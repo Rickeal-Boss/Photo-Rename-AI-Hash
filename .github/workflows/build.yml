@@ -1,0 +1,31 @@
+name: Build WinUI 3 (PhotoRenameAIHash)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore NuGet packages
+        run: dotnet restore PhotoRenameAIHash.csproj
+
+      - name: Build (Release, x64, unpackaged)
+        run: dotnet build PhotoRenameAIHash.csproj -c Release -p:Platform=x64 --no-restore
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoRenameAIHash-windows
+          path: bin/Release/net8.0-windows10.0.19041.0/win-x64/PhotoRenameAIHash.exe

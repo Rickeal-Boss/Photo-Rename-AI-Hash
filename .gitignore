@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / VS Code
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
+
+# Local settings cache
+PhotoRenameAIHash/bin/
+PhotoRenameAIHash/obj/
