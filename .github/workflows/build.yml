@@ -18,14 +18,17 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore NuGet packages
-        run: dotnet restore PhotoRenameAIHash.csproj
+      - name: Setup MSBuild (Visual Studio)
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore
+        run: msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
 
       - name: Build (Release, x64, unpackaged)
-        run: dotnet build PhotoRenameAIHash.csproj -c Release -p:Platform=x64 --no-restore
+        run: msbuild PhotoRenameAIHash.csproj /p:Configuration=Release /p:Platform=x64
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: PhotoRenameAIHash-windows
-          path: bin/Release/net8.0-windows10.0.19041.0/win-x64/PhotoRenameAIHash.exe
+          path: PhotoRenameAIHash/bin/Release/net8.0-windows10.0.19041.0/win-x64/PhotoRenameAIHash.exe
