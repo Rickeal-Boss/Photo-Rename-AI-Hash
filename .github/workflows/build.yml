@@ -24,12 +24,12 @@ jobs:
       - name: Restore
         run: msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
 
-      - name: Build (Release, x64, unpackaged)
-        run: msbuild PhotoRenameAIHash.csproj /p:Configuration=Release /p:Platform=x64
+      - name: Publish (self-contained, unpackaged, x64)
+        run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: PhotoRenameAIHash-windows
-          path: bin/
+          path: PhotoRenameAIHash/bin/
           if-no-files-found: error
