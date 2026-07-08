@@ -32,34 +32,47 @@ jobs:
         run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
 
       # unpackaged 自包含发布缺的是 VCRUNTIME140_APP / MSVCP140_APP / CONCRT140_APP
-      # （WinAppSDK 原生 DLL 按 _APP 变体链接，缺失即报“并行配置不正确”）。
-      # 这些 _APP CRT 随 WinAppSDK 1.5.240428000 NuGet 包一起还原在 runner 的
-      # global-packages 目录，版本与产物里的 WinAppSDK DLL 完全一致，从此处复制即可，
-      # 无需依赖 System32 或 VS 的 VC++ 可再发行布局。
+      # （带 _APP 后缀的 app-local CRT，WinAppSDK 原生 DLL 按此变体链接，缺失即报
+      # “并行配置不正确”）。WinAppSDK 的 SelfContained.targets 只从 MSIX 解压、并不含
+      # _APP CRT；_APP CRT 由机器上安装的 Visual C++ 可再发行提供，位于 C:\Windows\System32。
+      # windows-latest runner 已装 VC++ 可再发行，因此从此处复制 _APP 三件套到 exe 旁即可。
+      # 绝不通配 System32 全目录（会卷进数百系统 DLL），只复制精确的 _APP 文件名。
       - name: Copy _APP CRT into publish output
         shell: pwsh
         run: |
-          $pkgVer = "1.5.240428000"
-          $pkgRoot = Join-Path $env:USERPROFILE ".\nuget\packages\microsoft.windowsappsdk\$pkgVer"
-          if (-not (Test-Path $pkgRoot)) { Write-Error "未找到 WinAppSDK 包: $pkgRoot"; exit 1 }
-
-          # 定位 x64 native 目录（含 _APP CRT）
-          $native = Join-Path $pkgRoot "runtimes/win-x64/native"
-          if (-not (Test-Path $native)) {
-            $hit = Get-ChildItem -Path $pkgRoot -Recurse -Directory -Filter "native" |
-                   Where-Object { $_.FullName -like "*win-x64*" } | Select-Object -First 1
-            if ($hit) { $native = $hit.FullName } else { Write-Error "未找到 win-x64 native 目录"; exit 1 }
-          }
-
-          $appCrt = Get-ChildItem -Path $native -Filter "*_APP.dll" -ErrorAction SilentlyContinue
-          if (-not $appCrt) { Write-Error "未在 $native 找到 _APP CRT"; exit 1 }
-
+          $ErrorActionPreference = 'Stop'
           $exe = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" | Select-Object -First 1
           if (-not $exe) { Write-Error "未找到发布的 exe"; exit 1 }
           $dest = $exe.DirectoryName
+          Write-Host "发布输出目录: $dest"
 
-          foreach ($f in $appCrt) { Copy-Item $f.FullName -Destination $dest -Force }
-          Write-Host "已将 _APP CRT 从 $native 复制到 $dest"
+          $appCrtNames = @("VCRUNTIME140_APP.dll", "MSVCP140_APP.dll", "CONCRT140_APP.dll")
+          $searchRoots = @(
+            "$env:WINDIR\System32",
+            "$env:WINDIR\SysWOW64",
+            "C:\Program Files (x86)\Windows Kits\10",
+            "C:\Program Files\Microsoft Visual Studio",
+            "C:\Program Files (x86)\Microsoft Visual Studio"
+          )
+
+          $copied = 0
+          foreach ($name in $appCrtNames) {
+            $src = $null
+            foreach ($root in $searchRoots) {
+              if (-not (Test-Path $root)) { continue }
+              $hit = Get-ChildItem -Path $root -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($hit) { $src = $hit.FullName; break }
+            }
+            if ($src) {
+              Copy-Item $src -Destination $dest -Force
+              Write-Host "已复制 $name <- $src"
+              $copied++
+            } else {
+              Write-Warning "未找到 $name（目标机需自行安装 VC++ 可再发行 x64）"
+            }
+          }
+          if ($copied -eq 0) { Write-Error "未在任何位置找到 _APP CRT，无法修复 SxS"; exit 1 }
+          Write-Host "完成：已复制 $copied 个 _APP CRT 到 $dest"
           Get-ChildItem $dest -Filter "*_APP.dll" | ForEach-Object { Write-Host "  -> $($_.Name)" }
 
       - name: Upload build artifact
