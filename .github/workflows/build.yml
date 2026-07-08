@@ -27,6 +27,22 @@ jobs:
       - name: Publish (self-contained, unpackaged, x64)
         run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
 
+      # unpackaged 自包含发布下，msbuild /t:Publish 不会把 VC++ CRT 打进产物，
+      # 导致目标机双击 exe 报“并行配置不正确”。此处从 VS 安装目录复制与
+      # WinAppSDK 同源、版本精确匹配的 Microsoft.VC140.CRT，使产物自带运行库。
+      - name: Copy VC++ runtime into publish output
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          if (-not $vsPath) { Write-Error "vswhere 未找到 Visual Studio"; exit 1 }
+          $crtFolder = Get-ChildItem -Path "$vsPath\VC\Redist\MSVC" -Recurse -Directory -Filter "Microsoft.VC140.CRT" | Select-Object -First 1
+          if (-not $crtFolder) { Write-Error "未找到 Microsoft.VC140.CRT (VS C++ 可再发行)"; exit 1 }
+          $dest = "bin/x64/Release/net8.0-windows10.0.19041.0/win-x64"
+          if (-not (Test-Path $dest)) { Write-Error "发布输出目录不存在: $dest"; exit 1 }
+          Copy-Item -Path "$($crtFolder.FullName)\*.dll" -Destination $dest -Force
+          Write-Host "已将 VC++ CRT 从 $($crtFolder.FullName) 复制到 $dest"
+          Get-ChildItem $dest -Filter "vcruntime140*.dll" | ForEach-Object { Write-Host "  -> $($_.Name)" }
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
