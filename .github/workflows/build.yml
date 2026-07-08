@@ -18,58 +18,20 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Setup MSBuild (Visual Studio)
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Restore
-        run: msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
-
       - name: Publish (self-contained, unpackaged, x64)
-        run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
+        # 官方唯一能稳定自带 _APP CRT 的路径：dotnet publish + WindowsAppSDKSelfContained=true
+        # 根因：msbuild /t:Publish 不会把 VCRUNTIME140_APP / MSVCP140_APP / CONCRT140_APP
+        #       复制进产物，而 WinAppSDK 原生 DLL 按 _APP 变体链接 VC++ CRT，
+        #       缺失即报“应用程序的并行配置不正确”。
+        # dotnet publish 的 .NET SDK 发布管线会正确调用 WinAppSDK 自包含逻辑，
+        # 把 WinAppSDK 运行库与 _APP CRT 一并打进输出目录，实现真正免安装可移植。
+        run: dotnet publish PhotoRenameAIHash.csproj -c Release -r win-x64 --self-contained -p:Platform=x64 -p:WindowsAppSDKSelfContained=true
 
-      # unpackaged 自包含发布下，msbuild /t:Publish 不会把 VC++ CRT 打进产物，
-      # 导致目标机双击 exe 报“并行配置不正确”。此处把 VC++ CRT 复制到发布输出目录，
-      # 作为私有并行程序集随 exe 一起分发。
-      # 定位顺序：① VS 安装目录的 Microsoft.VC140.CRT（部分镜像有）；
-      #           ② 回退到系统目录 C:\Windows\System32（GitHub windows runner 恒有 x64 VC++ 可再发行）。
-      # 注意：从系统目录只复制核心 CRT 文件，绝不能用 *.dll 通配，否则会卷进数百个系统 DLL。
-      - name: Copy VC++ runtime into publish output
+      - name: Show publish output path
         shell: pwsh
         run: |
-          $required  = @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll","concrt140.dll","vccorlib140.dll")
-          $optional  = @("msvcp140_1.dll","msvcp140_2.dll")
-          $dest = "bin/x64/Release/net8.0-windows10.0.19041.0/win-x64"
-          if (-not (Test-Path $dest)) { Write-Error "发布输出目录不存在: $dest"; exit 1 }
-
-          $crtDir = $null
-          # ① VS 安装目录
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2>$null
-          if ($vsPath) {
-            $hit = Get-ChildItem -Path "$vsPath\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($hit) { $crtDir = Split-Path $hit.FullName }
-          }
-          # ② 回退：系统目录
-          if (-not $crtDir) {
-            $sys = Join-Path $env:SystemRoot "System32"
-            if (Test-Path "$sys\vcruntime140.dll") { $crtDir = $sys }
-          }
-          if (-not $crtDir) { Write-Error "未能在任何位置定位 VC++ CRT"; exit 1 }
-
-          if ($crtDir -like "*Microsoft.VC140.CRT*") {
-            # VS 源：整个 CRT 文件夹（仅含 CRT DLL）
-            Copy-Item -Path "$crtDir\*.dll" -Destination $dest -Force
-          } else {
-            # 系统目录源：只复制核心 + 可选 CRT 文件
-            foreach ($f in ($required + $optional)) {
-              $src = Join-Path $crtDir $f
-              if (Test-Path $src) { Copy-Item -Path $src -Destination $dest -Force }
-            }
-          }
-
-          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dest $_)) }
-          if ($missing) { Write-Error "复制后缺失 VC++ CRT: $($missing -join ', ')"; exit 1 }
-          Write-Host "VC++ CRT 已从 $crtDir 复制到 $dest"
-          Get-ChildItem $dest -Filter "vcruntime140*.dll" | ForEach-Object { Write-Host "  -> $($_.Name)" }
+          $exe = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" | Select-Object -First 1
+          if ($exe) { Write-Host "PUBLISH_EXE=$($exe.FullName)" } else { Write-Error "未找到发布的 exe" }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
