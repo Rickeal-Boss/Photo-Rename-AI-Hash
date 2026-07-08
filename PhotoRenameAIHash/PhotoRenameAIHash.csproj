@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>PhotoRenameAIHash</RootNamespace>
+    <AssemblyName>PhotoRenameAIHash</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240428000" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <!-- VCRT 转发器: 为 unpackaged 自包含提供 VCRUNTIME140_APP/MSVCP140_APP/CONCRT140_APP
+         等转发器 DLL, 把 WinAppSDK 原生 DLL 期望的 _APP CRT 名称重定向到系统常规
+         vcruntime140.dll, 根治"并行配置不正确"的 SxS 报错。 -->
+    <PackageReference Include="Microsoft.VCRTForwarders.140" Version="1.1.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+  </ItemGroup>
+
+</Project>
