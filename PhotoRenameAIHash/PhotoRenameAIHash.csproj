@@ -22,7 +22,10 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
     <!-- VCRT 转发器: 为 unpackaged 自包含提供 VCRUNTIME140_APP/MSVCP140_APP/CONCRT140_APP
          等转发器 DLL, 把 WinAppSDK 原生 DLL 期望的 _APP CRT 名称重定向到系统常规
-         vcruntime140.dll, 根治"并行配置不正确"的 SxS 报错。 -->
+         vcruntime140.dll, 增强可移植性(目标机未装 VC++ 可再发行时也能运行)。
+         注意: SxS "并行配置不正确" 的真正根因是 WinAppSDK 生成的 manifest 里
+         processorArchitecture="x64" 非法(应为 amd64), 由 build.yml 的
+         UpdateResource 步骤修正, 不是本包。 -->
     <PackageReference Include="Microsoft.VCRTForwarders.140" Version="1.1.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
   </ItemGroup>

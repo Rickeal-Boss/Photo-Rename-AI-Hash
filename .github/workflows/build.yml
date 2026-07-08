@@ -27,72 +27,124 @@ jobs:
       - name: Publish (self-contained, unpackaged, x64)
         # WinUI 3 必须用 Visual Studio 的 msbuild 发布（PRI 资源编译依赖 VS 的
         # AppxPackage 任务，裸 dotnet publish 会报 ExpandPriContent 任务加载失败）。
-        # msbuild /t:Publish 能正确产出 WinAppSDK 运行库，但不会复制 _APP 后缀的
-        # app-local CRT —— 由下一步补。
         run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
 
-      # unpackaged 自包含发布缺的是带 _APP 后缀的 app-local CRT
-      # (VCRUNTIME140_APP / MSVCP140_APP / ...)。Microsoft.VCRTForwarders.140 包
-      # 以"转发器"形式提供这些 DLL：把 WinAppSDK 原生 DLL 期望的 _APP 名称重定向到
-      # 系统常规 vcruntime140.dll，从而根治"并行配置不正确"的 SxS 报错。
-      # 为不依赖 NuGet 缓存路径、也不赌 msbuild 是否自动拷贝，本步直接从 nuget.org
-      # 拉取该包(1.1.0)并解压 runtimes/win-x64/native/release/*.dll 到产物目录；
-      # 仅当产物已存在同名文件时跳过。最后做硬性校验，确保 10 个 forwarder 全部就位。
-      - name: Ensure _APP CRT forwarders + portable VC++ CRT
+      # =====================================================================
+      # 关键修复：修正 exe 内嵌 manifest 中非法 processorArchitecture
+      # WinAppSDK 1.5 在注入 Microsoft.WindowsAppSDK 依赖时，会把构建平台 "x64"
+      # 直接写进 <dependentAssembly><assemblyIdentity processorArchitecture="x64">，
+      # 而 "x64" 不是 SxS activation context 的合法枚举(必须是 "amd64")，导致双击 exe
+      # 直接报"并行配置不正确"。本步用 UpdateResource 把 x64 改写为 amd64，根因级修复。
+      # （此 bug 由 WinAppSDK 构建期任务生成，nupkg 中无可覆盖属性，只能修产物。）
+      # =====================================================================
+      - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" | Select-Object -First 1
-          if (-not $exe) { Write-Error "未找到发布的 exe"; exit 1 }
-          $dest = $exe.DirectoryName
-          Write-Host "发布输出目录: $dest"
+          $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+          if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe"; exit 1 }
 
-          $appDlls = @("vcruntime140_app.dll","msvcp140_app.dll","concrt140_app.dll",
-                       "vcruntime140_1_app.dll","msvcp140_1_app.dll","msvcp140_2_app.dll",
-                       "msvcp140_atomic_wait_app.dll","vccorlib140_app.dll","vcomp140_app.dll","vcamp140_app.dll")
-
-          # 1) 直接自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders
-          #    (不依赖本地缓存路径；Restore 阶段已证实 runner 可访问 api.nuget.org)
-          $need = @()
-          foreach ($dll in $appDlls) {
-            if (-not (Test-Path (Join-Path $dest $dll))) { $need += $dll }
+          Add-Type @"
+          using System;
+          using System.IO;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public class ResEdit {
+            [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+            public static extern IntPtr BeginUpdateResource(string pFileName, bool bDeleteExistingResources);
+            [DllImport("kernel32.dll", SetLastError=true)]
+            public static extern bool UpdateResource(IntPtr hUpdate, IntPtr lpType, IntPtr lpName, ushort wLanguage, byte[] lpData, uint cbData);
+            [DllImport("kernel32.dll", SetLastError=true)]
+            public static extern bool EndUpdateResource(IntPtr hUpdate, bool fDiscard);
           }
-          if ($need.Count -gt 0) {
-            Write-Host "产物缺 $($need.Count) 个 forwarder，从 nuget.org 拉取 Microsoft.VCRTForwarders.140 ..."
-            $ver = "1.1.0"
-            $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtforwarders." + $ver + ".nupkg")
-            Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
-            $rel = "runtimes/win-x64/native/release/"
-            foreach ($entry in $zip.Entries) {
-              if ($entry.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $entry.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
-                $name = [System.IO.Path]::GetFileName($entry.FullName)
-                [System.IO.Compression.ZipFile]::ExtractToFile($entry, (Join-Path $dest $name), $true)
-                Write-Host ("  提取 " + $name)
+"@
+
+          $enc = [Text.Encoding]::UTF8
+          foreach ($exe in $exes) {
+            $exePath = $exe.FullName
+            Write-Host "修补内嵌 manifest: $exePath"
+            $bytes = [IO.File]::ReadAllBytes($exePath)
+            $s = $enc.GetString($bytes)
+            $start = $s.IndexOf("<assembly")
+            if ($start -lt 0) { Write-Error "exe 内未找到 <assembly"; exit 1 }
+            $end = $s.IndexOf("</assembly>", $start)
+            if ($end -lt 0) { Write-Error "exe 内未找到 </assembly>"; exit 1 }
+            $end += "</assembly>".Length
+            $manifest = $s.Substring($start, $end - $start)
+            $cnt = ([regex]::Matches($manifest, 'processorArchitecture="x64"')).Count
+            if ($cnt -eq 0) {
+              Write-Host "  -> 无 processorArchitecture=""x64""，无需修补(可能已修复)"
+              continue
+            }
+            $newManifest = $manifest.Replace('processorArchitecture="x64"', 'processorArchitecture="amd64"')
+            $newBytes = $enc.GetBytes($newManifest)
+            $h = [ResEdit]::BeginUpdateResource($exePath, $false)
+            if ($h -eq [IntPtr]::Zero) { Write-Error ("BeginUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+            $ok = [ResEdit]::UpdateResource($h, [IntPtr]24, [IntPtr]1, 0, $newBytes, [uint32]$newBytes.Length)
+            if (-not $ok) { Write-Error ("UpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+            $ok = [ResEdit]::EndUpdateResource($h, $false)
+            if (-not $ok) { Write-Error ("EndUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+            Write-Host ("  -> 已修补 $cnt 处 processorArchitecture=""x64"" -> ""amd64""")
+          }
+
+      # =====================================================================
+      # 可移植增强：补 _APP CRT 转发器 + 常规 VC++ CRT
+      # WinAppSDK 原生 DLL 按 _APP 后缀 CRT 链接；Microsoft.VCRTForwarders.140 提供
+      # 转发器把 _APP 名称重定向到系统常规 vcruntime140.dll。再把常规 VC++ 140 家族
+      # 一并拷入，使制品在目标机未装 VC++ 可再发行时也能直接运行。
+      # 转发器直接从 nuget.org 拉包解压(不依赖 NuGet 缓存路径)，常规 CRT 从 runner
+      # System32 复制。两者均只针对同名文件，不污染其他系统 DLL。
+      # =====================================================================
+      - name: Copy _APP CRT forwarders + portable VC++ CRT
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+          if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe"; exit 1 }
+          $dirs = $exes | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
+
+          # 1) 自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders
+          $ver = "1.1.0"
+          $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtforwarders." + $ver + ".nupkg")
+          Write-Host "下载 Microsoft.VCRTForwarders.140 $ver ..."
+          Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
+          $rel = "runtimes/win-x64/native/release/"
+          $fwCount = 0
+          foreach ($entry in $zip.Entries) {
+            if ($entry.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $entry.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
+              $name = [System.IO.Path]::GetFileName($entry.FullName)
+              foreach ($d in $dirs) {
+                [System.IO.Compression.ZipFile]::ExtractToFile($entry, (Join-Path $d $name), $true)
+              }
+              $fwCount++
+            }
+          }
+          $zip.Dispose()
+          Write-Host "已解压 $fwCount 个 forwarder DLL 到 $($dirs.Count) 个输出目录"
+
+          # 2) 常规 VC++ 140 家族(转发器最终依赖的对象)，从 runner System32 复制
+          $sysCrtPrefixes = @("vcruntime140","msvcp140","concrt140","vccorlib140","vcomp140","vcamp140")
+          foreach ($d in $dirs) {
+            foreach ($p in $sysCrtPrefixes) {
+              Get-ChildItem -Path (Join-Path $env:SystemRoot "System32") -Filter ($p + "*.dll") -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item $_.FullName -Destination $d -Force
               }
             }
-            $zip.Dispose()
-          } else {
-            Write-Host "OK: _APP CRT forwarders 已由 msbuild 自动就位，无需下载"
           }
+          Write-Host "已复制常规 VC++ 140 家族 CRT 到输出目录"
 
-          # 2) 硬性校验: 10 个 forwarder 必须全部存在
-          $stillMissing = @()
-          foreach ($dll in $appDlls) {
-            if (-not (Test-Path (Join-Path $dest $dll))) { $stillMissing += $dll }
+          # 3) 校验关键 forwarder 是否就位
+          $appDlls = @("vcruntime140_app.dll","msvcp140_app.dll","concrt140_app.dll","vcruntime140_1_app.dll","msvcp140_1_app.dll","msvcp140_2_app.dll","msvcp140_atomic_wait_app.dll","vccorlib140_app.dll","vcomp140_app.dll","vcamp140_app.dll")
+          $missing = @()
+          foreach ($d in $dirs) {
+            foreach ($dll in $appDlls) {
+              if (-not (Test-Path (Join-Path $d $dll))) { $missing += (Join-Path $d $dll) }
+            }
           }
-          if ($stillMissing.Count -gt 0) { Write-Error ("仍缺失 _APP CRT forwarders: " + ($stillMissing -join ', ')); exit 1 }
+          if ($missing.Count -gt 0) { Write-Error ("仍缺失 _APP CRT forwarders: " + ($missing -join ', ')); exit 1 }
           Write-Host "OK: 全部 _APP CRT forwarders 就位"
-
-          # 3) 可移植增强(仅警告不致命): 把常规 VC++ CRT 一并拷入,
-          #    使目标机未装 VC++ 可再发行时转发器也能找到 vcruntime140.dll。
-          $sysCrt = @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll","concrt140.dll")
-          foreach ($dll in $sysCrt) {
-            $sysPath = Join-Path $env:SystemRoot ("System32\" + $dll)
-            if (Test-Path $sysPath) { Copy-Item $sysPath -Destination $dest -Force; Write-Host ("  便携 CRT: " + $dll) }
-            else { Write-Warning ("System32 未找到 " + $dll + " (目标机需自装 VC++ 可再发行 x64)") }
-          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
