@@ -32,12 +32,12 @@ jobs:
         run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
 
       # unpackaged 自包含发布缺的是带 _APP 后缀的 app-local CRT
-      # (VCRUNTIME140_APP / MSVCP140_APP / CONCRT140_APP)。这些由
-      # Microsoft.VCRTForwarders.140 包(csproj 已引用)以"转发器"形式提供：
-      # msbuild publish 会自动把 runtimes/win-x64/native/release/*.dll 拷进产物。
-      # 转发器把 WinAppSDK 原生 DLL 期望的 _APP 名称重定向到系统常规 vcruntime140.dll，
-      # 从而根治"并行配置不正确"的 SxS 报错。本步做兜底校验(从 NuGet 缓存补全)，
-      # 并额外把常规 VC++ CRT 一并拷入，使制品在目标机未装 VC++ 可再发行时也能直接运行。
+      # (VCRUNTIME140_APP / MSVCP140_APP / ...)。Microsoft.VCRTForwarders.140 包
+      # 以"转发器"形式提供这些 DLL：把 WinAppSDK 原生 DLL 期望的 _APP 名称重定向到
+      # 系统常规 vcruntime140.dll，从而根治"并行配置不正确"的 SxS 报错。
+      # 为不依赖 NuGet 缓存路径、也不赌 msbuild 是否自动拷贝，本步直接从 nuget.org
+      # 拉取该包(1.1.0)并解压 runtimes/win-x64/native/release/*.dll 到产物目录；
+      # 仅当产物已存在同名文件时跳过。最后做硬性校验，确保 10 个 forwarder 全部就位。
       - name: Ensure _APP CRT forwarders + portable VC++ CRT
         shell: pwsh
         run: |
@@ -47,37 +47,51 @@ jobs:
           $dest = $exe.DirectoryName
           Write-Host "发布输出目录: $dest"
 
-          # 1) _APP 转发器: 优先确认 msbuild 已自动拷入; 缺失则从 NuGet 缓存补全
-          $pkgRoot = "$env:USERPROFILE\.nuget\packages"
-          $fwdPkg = Join-Path $pkgRoot "microsoft.vcrtforwarders.140"
-          $fwdSrc = $null
-          if (Test-Path $fwdPkg) {
-            $fwdSrc = Get-ChildItem -Path $fwdPkg -Recurse -Directory -Filter "release" |
-                      Where-Object { $_.FullName -like "*win-x64*native*release" } | Select-Object -First 1
-          }
           $appDlls = @("vcruntime140_app.dll","msvcp140_app.dll","concrt140_app.dll",
                        "vcruntime140_1_app.dll","msvcp140_1_app.dll","msvcp140_2_app.dll",
                        "msvcp140_atomic_wait_app.dll","vccorlib140_app.dll","vcomp140_app.dll","vcamp140_app.dll")
-          $missing = @()
-          foreach ($dll in $appDlls) {
-            if (-not (Test-Path (Join-Path $dest $dll))) {
-              if ($fwdSrc) {
-                $src = Join-Path $fwdSrc.FullName $dll
-                if (Test-Path $src) { Copy-Item $src -Destination $dest -Force; Write-Host "  补全 $dll <- $src"; continue }
-              }
-              $missing += $dll
-            }
-          }
-          if ($missing.Count -gt 0) { Write-Error "未找到 _APP CRT forwarders: $($missing -join ', ')"; exit 1 }
-          Write-Host "OK: _APP CRT forwarders 就位"
 
-          # 2) 可移植增强: 把常规 VC++ CRT 一并拷入(转发器最终依赖 vcruntime140.dll 等)
-          #    目标机若无 VC++ 可再发行也能运行。仅警告, 不致命(多数 Windows 机已装)。
+          # 1) 直接自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders
+          #    (不依赖本地缓存路径；Restore 阶段已证实 runner 可访问 api.nuget.org)
+          $need = @()
+          foreach ($dll in $appDlls) {
+            if (-not (Test-Path (Join-Path $dest $dll))) { $need += $dll }
+          }
+          if ($need.Count -gt 0) {
+            Write-Host "产物缺 $($need.Count) 个 forwarder，从 nuget.org 拉取 Microsoft.VCRTForwarders.140 ..."
+            $ver = "1.1.0"
+            $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtforwarders." + $ver + ".nupkg")
+            Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
+            $rel = "runtimes/win-x64/native/release/"
+            foreach ($entry in $zip.Entries) {
+              if ($entry.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $entry.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $name = [System.IO.Path]::GetFileName($entry.FullName)
+                [System.IO.Compression.ZipFile]::ExtractToFile($entry, (Join-Path $dest $name), $true)
+                Write-Host ("  提取 " + $name)
+              }
+            }
+            $zip.Dispose()
+          } else {
+            Write-Host "OK: _APP CRT forwarders 已由 msbuild 自动就位，无需下载"
+          }
+
+          # 2) 硬性校验: 10 个 forwarder 必须全部存在
+          $stillMissing = @()
+          foreach ($dll in $appDlls) {
+            if (-not (Test-Path (Join-Path $dest $dll))) { $stillMissing += $dll }
+          }
+          if ($stillMissing.Count -gt 0) { Write-Error ("仍缺失 _APP CRT forwarders: " + ($stillMissing -join ', ')); exit 1 }
+          Write-Host "OK: 全部 _APP CRT forwarders 就位"
+
+          # 3) 可移植增强(仅警告不致命): 把常规 VC++ CRT 一并拷入,
+          #    使目标机未装 VC++ 可再发行时转发器也能找到 vcruntime140.dll。
           $sysCrt = @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll","concrt140.dll")
           foreach ($dll in $sysCrt) {
-            $sysPath = Join-Path $env:SystemRoot "System32\$dll"
-            if (Test-Path $sysPath) { Copy-Item $sysPath -Destination $dest -Force; Write-Host "  便携 CRT: $dll" }
-            else { Write-Warning "System32 未找到 $dll (目标机需自装 VC++ 可再发行 x64)" }
+            $sysPath = Join-Path $env:SystemRoot ("System32\" + $dll)
+            if (Test-Path $sysPath) { Copy-Item $sysPath -Destination $dest -Force; Write-Host ("  便携 CRT: " + $dll) }
+            else { Write-Warning ("System32 未找到 " + $dll + " (目标机需自装 VC++ 可再发行 x64)") }
           }
 
       - name: Upload build artifact
