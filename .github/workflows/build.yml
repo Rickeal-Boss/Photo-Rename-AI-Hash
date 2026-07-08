@@ -18,20 +18,49 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Publish (self-contained, unpackaged, x64)
-        # 官方唯一能稳定自带 _APP CRT 的路径：dotnet publish + WindowsAppSDKSelfContained=true
-        # 根因：msbuild /t:Publish 不会把 VCRUNTIME140_APP / MSVCP140_APP / CONCRT140_APP
-        #       复制进产物，而 WinAppSDK 原生 DLL 按 _APP 变体链接 VC++ CRT，
-        #       缺失即报“应用程序的并行配置不正确”。
-        # dotnet publish 的 .NET SDK 发布管线会正确调用 WinAppSDK 自包含逻辑，
-        # 把 WinAppSDK 运行库与 _APP CRT 一并打进输出目录，实现真正免安装可移植。
-        run: dotnet publish PhotoRenameAIHash.csproj -c Release -r win-x64 --self-contained -p:Platform=x64 -p:WindowsAppSDKSelfContained=true
+      - name: Setup MSBuild (Visual Studio)
+        uses: microsoft/setup-msbuild@v2
 
-      - name: Show publish output path
+      - name: Restore
+        run: msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+
+      - name: Publish (self-contained, unpackaged, x64)
+        # WinUI 3 必须用 Visual Studio 的 msbuild 发布（PRI 资源编译依赖 VS 的
+        # AppxPackage 任务，裸 dotnet publish 会报 ExpandPriContent 任务加载失败）。
+        # msbuild /t:Publish 能正确产出 WinAppSDK 运行库，但不会复制 _APP 后缀的
+        # app-local CRT —— 由下一步补。
+        run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
+
+      # unpackaged 自包含发布缺的是 VCRUNTIME140_APP / MSVCP140_APP / CONCRT140_APP
+      # （WinAppSDK 原生 DLL 按 _APP 变体链接，缺失即报“并行配置不正确”）。
+      # 这些 _APP CRT 随 WinAppSDK 1.5.240428000 NuGet 包一起还原在 runner 的
+      # global-packages 目录，版本与产物里的 WinAppSDK DLL 完全一致，从此处复制即可，
+      # 无需依赖 System32 或 VS 的 VC++ 可再发行布局。
+      - name: Copy _APP CRT into publish output
         shell: pwsh
         run: |
+          $pkgVer = "1.5.240428000"
+          $pkgRoot = Join-Path $env:USERPROFILE ".\nuget\packages\microsoft.windowsappsdk\$pkgVer"
+          if (-not (Test-Path $pkgRoot)) { Write-Error "未找到 WinAppSDK 包: $pkgRoot"; exit 1 }
+
+          # 定位 x64 native 目录（含 _APP CRT）
+          $native = Join-Path $pkgRoot "runtimes/win-x64/native"
+          if (-not (Test-Path $native)) {
+            $hit = Get-ChildItem -Path $pkgRoot -Recurse -Directory -Filter "native" |
+                   Where-Object { $_.FullName -like "*win-x64*" } | Select-Object -First 1
+            if ($hit) { $native = $hit.FullName } else { Write-Error "未找到 win-x64 native 目录"; exit 1 }
+          }
+
+          $appCrt = Get-ChildItem -Path $native -Filter "*_APP.dll" -ErrorAction SilentlyContinue
+          if (-not $appCrt) { Write-Error "未在 $native 找到 _APP CRT"; exit 1 }
+
           $exe = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" | Select-Object -First 1
-          if ($exe) { Write-Host "PUBLISH_EXE=$($exe.FullName)" } else { Write-Error "未找到发布的 exe" }
+          if (-not $exe) { Write-Error "未找到发布的 exe"; exit 1 }
+          $dest = $exe.DirectoryName
+
+          foreach ($f in $appCrt) { Copy-Item $f.FullName -Destination $dest -Force }
+          Write-Host "已将 _APP CRT 从 $native 复制到 $dest"
+          Get-ChildItem $dest -Filter "*_APP.dll" | ForEach-Object { Write-Host "  -> $($_.Name)" }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
