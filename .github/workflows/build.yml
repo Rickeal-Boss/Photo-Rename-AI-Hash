@@ -233,7 +233,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PhotoRenameAIHash-msix
-          path: "**/*.msix"
+          path: |
+            **/*.msix
+            PhotoRenameAIHash.cer
+            Install.bat
           if-no-files-found: error
 
       # === 自报告：无论成败，把诊断写回 ci-diag 分支（[skip ci] 不触发新跑），

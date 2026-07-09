@@ -19,7 +19,7 @@
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
-    <PackageCertificateThumbprint>B260F25FCADC2AFC4B8A855E54A6AAA3520A8C31</PackageCertificateThumbprint>
+    <PackageCertificateThumbprint>9F089DB28AE4CB075CBAC1D1D8073E382271CF3A</PackageCertificateThumbprint>
   </PropertyGroup>
 
   <ItemGroup>
