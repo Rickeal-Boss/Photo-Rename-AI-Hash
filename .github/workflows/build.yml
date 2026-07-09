@@ -36,13 +36,14 @@ jobs:
       # 而 "x64" 不是 SxS activation context 的合法枚举(必须是 "amd64")，导致双击 exe
       # 直接报"并行配置不正确"。本步用 UpdateResource 把 x64 改写为 amd64，根因级修复。
       # （此 bug 由 WinAppSDK 构建期任务生成，nupkg 中无可覆盖属性，只能修产物。）
+      # 本步为必需步：改写后回读校验，确保 0 处残留 x64。
       # =====================================================================
       - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
-          if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe"; exit 1 }
+          if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe（Publish 步未产出，请检查上面的 Publish 日志）"; exit 1 }
 
           Add-Type @"
           using System;
@@ -59,11 +60,11 @@ jobs:
           }
 "@
 
-          $enc = [Text.Encoding]::UTF8
+          $enc = [System.Text.Encoding]::UTF8
           foreach ($exe in $exes) {
             $exePath = $exe.FullName
-            Write-Host "修补内嵌 manifest: $exePath"
-            $bytes = [IO.File]::ReadAllBytes($exePath)
+            Write-Host "==> 修补内嵌 manifest: $exePath"
+            $bytes = [System.IO.File]::ReadAllBytes($exePath)
             $s = $enc.GetString($bytes)
             $start = $s.IndexOf("<assembly")
             if ($start -lt 0) { Write-Error "exe 内未找到 <assembly"; exit 1 }
@@ -72,8 +73,9 @@ jobs:
             $end += "</assembly>".Length
             $manifest = $s.Substring($start, $end - $start)
             $cnt = ([regex]::Matches($manifest, 'processorArchitecture="x64"')).Count
+            Write-Host "    修补前 processorArchitecture=""x64"" 出现次数: $cnt"
             if ($cnt -eq 0) {
-              Write-Host "  -> 无 processorArchitecture=""x64""，无需修补(可能已修复)"
+              Write-Host "    无 processorArchitecture=""x64""，无需修补(已是 amd64 或不含 x64)"
               continue
             }
             $newManifest = $manifest.Replace('processorArchitecture="x64"', 'processorArchitecture="amd64"')
@@ -84,67 +86,80 @@ jobs:
             if (-not $ok) { Write-Error ("UpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
             $ok = [ResEdit]::EndUpdateResource($h, $false)
             if (-not $ok) { Write-Error ("EndUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
-            Write-Host ("  -> 已修补 $cnt 处 processorArchitecture=""x64"" -> ""amd64""")
+            # 回读校验
+            $b2 = [System.IO.File]::ReadAllBytes($exePath)
+            $s2 = $enc.GetString($b2)
+            $after = ([regex]::Matches($s2, 'processorArchitecture="x64"')).Count
+            Write-Host ("    修补后 processorArchitecture=""x64"" 次数: " + $after + " (应为 0)")
+            if ($after -ne 0) { Write-Error "修补验证失败，仍存在 x64"; exit 1 }
+            Write-Host "    OK: 已改写为 amd64"
           }
 
       # =====================================================================
-      # 可移植增强：补 _APP CRT 转发器 + 常规 VC++ CRT
+      # 可移植增强（最佳努力，不阻断构建）：补 _APP CRT 转发器 + 常规 VC++ CRT
       # WinAppSDK 原生 DLL 按 _APP 后缀 CRT 链接；Microsoft.VCRTForwarders.140 提供
       # 转发器把 _APP 名称重定向到系统常规 vcruntime140.dll。再把常规 VC++ 140 家族
       # 一并拷入，使制品在目标机未装 VC++ 可再发行时也能直接运行。
-      # 转发器直接从 nuget.org 拉包解压(不依赖 NuGet 缓存路径)，常规 CRT 从 runner
-      # System32 复制。两者均只针对同名文件，不污染其他系统 DLL。
+      # 注意：SxS 的真正的根因已在上面 manifest 步修复；本步仅为可移植性增强。
+      # 即便 nuget/System32 临时不可用，开发者本机装有 VC++/WinAppSDK 运行时仍可运行，
+      # 因此本步失败不阻断 CI（continue-on-error）。
       # =====================================================================
-      - name: Copy _APP CRT forwarders + portable VC++ CRT
+      - name: Bundle _APP CRT forwarders + portable VC++ CRT (best-effort)
         shell: pwsh
+        continue-on-error: true
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
-          if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe"; exit 1 }
+          if ($exes.Count -eq 0) { Write-Warning "未找到 exe，跳过 forwarder 复制"; exit 0 }
           $dirs = $exes | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
 
-          # 1) 自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders
+          # 1) 自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders（重试 3 次）
           $ver = "1.1.0"
-          $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtforwarders." + $ver + ".nupkg")
-          Write-Host "下载 Microsoft.VCRTForwarders.140 $ver ..."
-          Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
-          $rel = "runtimes/win-x64/native/release/"
-          $fwCount = 0
-          foreach ($entry in $zip.Entries) {
-            if ($entry.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $entry.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
-              $name = [System.IO.Path]::GetFileName($entry.FullName)
-              foreach ($d in $dirs) {
-                [System.IO.Compression.ZipFile]::ExtractToFile($entry, (Join-Path $d $name), $true)
+          $ok = $false
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtf." + $ver + ".nupkg")
+              Write-Host "下载 Microsoft.VCRTForwarders.140 $ver (第 $i 次) ..."
+              Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg -ErrorAction Stop
+              Add-Type -AssemblyName System.IO.Compression.FileSystem
+              $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
+              $rel = "runtimes/win-x64/native/release/"
+              $fw = 0
+              foreach ($e in $zip.Entries) {
+                if ($e.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $e.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $nm = [System.IO.Path]::GetFileName($e.FullName)
+                  foreach ($d in $dirs) { [System.IO.Compression.ZipFile]::ExtractToFile($e, (Join-Path $d $nm), $true) }
+                  $fw++
+                }
               }
-              $fwCount++
+              $zip.Dispose()
+              Write-Host "已解压 $fw 个 forwarder DLL 到 $($dirs.Count) 个输出目录"
+              $ok = $true
+              break
+            } catch {
+              Write-Warning ("nuget 下载/解压第 $i 次失败: " + $_.Exception.Message)
             }
           }
-          $zip.Dispose()
-          Write-Host "已解压 $fwCount 个 forwarder DLL 到 $($dirs.Count) 个输出目录"
+          if (-not $ok) { Write-Warning "无法从 nuget 获取 forwarders（本机有 VC++/WinAppSDK 运行时仍可运行）" }
 
-          # 2) 常规 VC++ 140 家族(转发器最终依赖的对象)，从 runner System32 复制
+          # 2) 常规 VC++ 140 家族(转发器最终依赖的对象)，从 runner System32 复制（最佳努力）
           $sysCrtPrefixes = @("vcruntime140","msvcp140","concrt140","vccorlib140","vcomp140","vcamp140")
           foreach ($d in $dirs) {
             foreach ($p in $sysCrtPrefixes) {
               Get-ChildItem -Path (Join-Path $env:SystemRoot "System32") -Filter ($p + "*.dll") -ErrorAction SilentlyContinue | ForEach-Object {
-                Copy-Item $_.FullName -Destination $d -Force
+                Copy-Item $_.FullName -Destination $d -Force -ErrorAction SilentlyContinue
               }
             }
           }
-          Write-Host "已复制常规 VC++ 140 家族 CRT 到输出目录"
 
-          # 3) 校验关键 forwarder 是否就位
+          # 3) 诊断：列出输出目录的 _app DLL 是否就位
           $appDlls = @("vcruntime140_app.dll","msvcp140_app.dll","concrt140_app.dll","vcruntime140_1_app.dll","msvcp140_1_app.dll","msvcp140_2_app.dll","msvcp140_atomic_wait_app.dll","vccorlib140_app.dll","vcomp140_app.dll","vcamp140_app.dll")
-          $missing = @()
           foreach ($d in $dirs) {
-            foreach ($dll in $appDlls) {
-              if (-not (Test-Path (Join-Path $d $dll))) { $missing += (Join-Path $d $dll) }
+            Write-Host "输出目录 $d 的 _app DLL 状态:"
+            foreach ($dl in $appDlls) {
+              if (Test-Path (Join-Path $d $dl)) { Write-Host ("  [OK]   " + $dl) } else { Write-Warning ("  [缺失] " + $dl) }
             }
           }
-          if ($missing.Count -gt 0) { Write-Error ("仍缺失 _APP CRT forwarders: " + ($missing -join ', ')); exit 1 }
-          Write-Host "OK: 全部 _APP CRT forwarders 就位"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
