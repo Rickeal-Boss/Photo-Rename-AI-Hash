@@ -30,12 +30,12 @@ if %errorlevel% neq 0 (
     )
 )
 
-:: Step 2: Check Windows App SDK runtime (1.5)
+:: Step 2: Check Windows App SDK runtime (1.5, >= 5001.404.1901.0)
 echo [2/3] Checking Windows App SDK runtime...
-powershell -NoProfile -Command "if (Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.5') { exit 0 } else { exit 1 }" >nul 2>&1
+powershell -NoProfile -Command "$p=Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.5'; if ($p -and [Version]$p.Version -ge [Version]'5001.404.1901.0') { exit 0 } else { exit 1 }" >nul 2>&1
 if %errorlevel% neq 0 (
     echo.
-    echo Windows App SDK 1.5 runtime is NOT installed.
+    echo Windows App SDK 1.5 runtime ^(version ^>= 5001.404.1901.0^) is missing.
     echo This is required to run PhotoRenameAIHash.
     echo.
     echo Downloading installer now...
