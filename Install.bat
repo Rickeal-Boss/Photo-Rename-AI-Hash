@@ -15,13 +15,19 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: Step 1: Import certificate to Trusted Root
+:: Step 1: Import certificate to Local Machine Trusted People
+:: MSIX sideloading requires the signing cert in the Local Machine store,
+:: NOT the Current User store. TrustedPeople is the standard location.
 echo [1/3] Importing certificate...
-certutil -addstore -f "Root" "PhotoRenameAIHash.cer" >nul 2>&1
+powershell -NoProfile -Command "Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -ErrorAction Stop" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ERROR: Failed to import certificate.
-    pause
-    exit /b 1
+    :: Some Windows configs use Root instead
+    powershell -NoProfile -Command "Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\Root' -ErrorAction Stop" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo ERROR: Failed to import certificate to machine store.
+        pause
+        exit /b 1
+    )
 )
 
 :: Step 2: Check Windows App SDK runtime (1.5)
@@ -57,10 +63,15 @@ set "MSIX="
 for %%f in (*.msix) do set "MSIX=%%f"
 if not defined MSIX (
     echo ERROR: No .msix file found in this folder.
+    if "%DEPS_HIDDEN%"=="1" (
+        if exist "_Deps_hidden" ren "_Deps_hidden" "Dependencies" >nul 2>&1
+    )
     pause
     exit /b 1
 )
-powershell -Command "Add-AppxPackage -Path '%MSIX%' -ErrorAction Stop" >nul 2>&1
+
+:: Run Add-AppxPackage with visible error output so the user can see the real reason
+powershell -NoProfile -Command "try { Add-AppxPackage -Path '%MSIX%' -ErrorAction Stop; Write-Host 'OK' } catch { Write-Host ('ERROR: ' + $_.Exception.Message); exit 1 }"
 set "INSTALL_ERR=%errorlevel%"
 
 :: Restore Dependencies folder (best-effort)
@@ -69,8 +80,8 @@ if "%DEPS_HIDDEN%"=="1" (
 )
 
 if %INSTALL_ERR% neq 0 (
-    echo ERROR: Installation failed.
-    echo If already installed, uninstall first via: Settings ^> Apps ^> PhotoRenameAIHash ^> Uninstall
+    echo.
+    echo Installation failed. See error above for details.
     pause
     exit /b 1
 )
