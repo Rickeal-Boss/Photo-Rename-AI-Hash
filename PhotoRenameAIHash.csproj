@@ -16,7 +16,13 @@
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>
     <EnableMsixTooling>true</EnableMsixTooling>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      框架依赖模型（framework-dependent）：MSIX 声明对 Microsoft.WindowsAppSDK 的
+      PackageDependency，由系统提供运行时。这是微软官方 WinUI 3 MSIX 模板的默认路径，
+      经广泛验证可靠。
+      注意：曾尝试 WindowsAppSDKSelfContained=true（自包含），但该组合官方只支持
+      unpackaged 应用；打进 MSIX 后会出现“安装成功、启动即静默崩溃”的问题，故回退。
+    -->
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
