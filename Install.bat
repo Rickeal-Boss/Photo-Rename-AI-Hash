@@ -41,7 +41,18 @@ if %errorlevel% neq 0 (
 )
 
 :: Step 3: Install MSIX (requires Windows 10 19041+)
+:: Add-AppxPackage auto-discovers a "Dependencies" folder next to the .msix
+:: and tries to install bundled framework MSIX files. If the system already
+:: has a newer Windows App Runtime, this fails with 0x80073D06.
+:: Temporarily hide Dependencies to force the installer to use the system's
+:: existing runtime.
 echo [3/3] Installing application...
+set "DEPS_HIDDEN=0"
+if exist "Dependencies" (
+    ren "Dependencies" "_Deps_hidden" >nul 2>&1
+    if !errorlevel! equ 0 set "DEPS_HIDDEN=1"
+)
+
 set "MSIX="
 for %%f in (*.msix) do set "MSIX=%%f"
 if not defined MSIX (
@@ -50,7 +61,14 @@ if not defined MSIX (
     exit /b 1
 )
 powershell -Command "Add-AppxPackage -Path '%MSIX%' -ErrorAction Stop" >nul 2>&1
-if %errorlevel% neq 0 (
+set "INSTALL_ERR=%errorlevel%"
+
+:: Restore Dependencies folder (best-effort)
+if "%DEPS_HIDDEN%"=="1" (
+    if exist "_Deps_hidden" ren "_Deps_hidden" "Dependencies" >nul 2>&1
+)
+
+if %INSTALL_ERR% neq 0 (
     echo ERROR: Installation failed.
     echo If already installed, uninstall first via: Settings ^> Apps ^> PhotoRenameAIHash ^> Uninstall
     pause
