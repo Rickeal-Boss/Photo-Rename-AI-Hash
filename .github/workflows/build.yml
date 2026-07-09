@@ -76,20 +76,12 @@ jobs:
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
           if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe（Publish 步未产出，请检查上面的 Publish 日志）"; exit 1 }
 
-          Add-Type @"
-          using System;
-          using System.IO;
-          using System.Runtime.InteropServices;
-          using System.Text;
-          public class ResEdit {
-            [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-            public static extern IntPtr BeginUpdateResource(string pFileName, bool bDeleteExistingResources);
-            [DllImport("kernel32.dll", SetLastError=true)]
-            public static extern bool UpdateResource(IntPtr hUpdate, IntPtr lpType, IntPtr lpName, ushort wLanguage, byte[] lpData, uint cbData);
-            [DllImport("kernel32.dll", SetLastError=true)]
-            public static extern bool EndUpdateResource(IntPtr hUpdate, bool fDiscard);
-          }
-"@
+          # C# P/Invoke 类放在独立文件（.github/scripts/ResEdit.cs），
+          # 避免内联 here-string 与 YAML run:| 缩进冲突（PowerShell 要求 "@ 必须顶格，
+          # 而 YAML 要求块内每行缩进，二者不可兼得 -> 曾导致 "Invalid workflow file"）。
+          $resCs = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/ResEdit.cs"
+          if (-not (Test-Path $resCs)) { Write-Error "缺少 $resCs（请确认已提交该文件）"; exit 1 }
+          Add-Type -Path $resCs
 
           $enc = [System.Text.Encoding]::UTF8
           foreach ($exe in $exes) {
