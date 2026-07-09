@@ -161,9 +161,40 @@ jobs:
             }
           }
 
+      # === 诊断：确认 exe 与 manifest 状态（无论后面是否红，日志里一眼可见） ===
+      - name: Diagnostics before upload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+          if ($exes.Count -eq 0) { Write-Warning "诊断: 未找到 exe（Publish 可能失败）"; exit 0 }
+          foreach ($exe in $exes) {
+            $d = $exe.DirectoryName
+            Write-Host "EXE: $($exe.FullName)"
+            $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+            $s = [System.Text.Encoding]::UTF8.GetString($bytes)
+            $x64 = ([regex]::Matches($s, 'processorArchitecture="x64"')).Count
+            $amd = ([regex]::Matches($s, 'processorArchitecture="amd64"')).Count
+            Write-Host ("  manifest processorArchitecture: x64=$x64 amd64=$amd (期望 x64=0)")
+            $sz = (Get-ChildItem $d -Recurse -File | Measure-Object -Property Length -Sum).Sum
+            Write-Host ("  dir size: {0:N0} bytes, files: {1}" -f $sz, (Get-ChildItem $d -Recurse -File).Count)
+          }
+
+      # === 打包为单个 zip 再上传（避免 upload-artifact 直传大目录树的尺寸/长路径问题） ===
+      - name: Package publish output as zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+          if ($exes.Count -eq 0) { Write-Error "未找到 exe，无法打包"; exit 1 }
+          $d = $exes[0].DirectoryName
+          $zip = "PhotoRenameAIHash-windows.zip"
+          Compress-Archive -Path $d -DestinationPath $zip -Force
+          Write-Host "已打包: $zip ($([System.IO.File]::ReadAllBytes($zip).Length) bytes)"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: PhotoRenameAIHash-windows
-          path: bin/
+          path: PhotoRenameAIHash-windows.zip
           if-no-files-found: error
