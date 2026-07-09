@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -22,12 +24,40 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Restore
-        run: msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+        shell: pwsh
+        run: |
+          "CHECKPOINT:restore-start" >> ci-diagnostics.log
+          msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+          "CHECKPOINT:restore-done" >> ci-diagnostics.log
 
       - name: Publish (self-contained, unpackaged, x64)
         # WinUI 3 必须用 Visual Studio 的 msbuild 发布（PRI 资源编译依赖 VS 的
         # AppxPackage 任务，裸 dotnet publish 会报 ExpandPriContent 任务加载失败）。
-        run: msbuild PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true
+        # 本步用 Start-Process 捕获 msbuild 真实退出码与完整输出到文件，便于失败时回推诊断。
+        shell: pwsh
+        run: |
+          "CHECKPOINT:publish-start" >> ci-diagnostics.log
+          try {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "msbuild"
+            $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true"
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $p = New-Object System.Diagnostics.Process
+            $p.StartInfo = $psi
+            $p.Start() | Out-Null
+            $stdout = $p.StandardOutput.ReadToEnd()
+            $stderr = $p.StandardError.ReadToEnd()
+            $p.WaitForExit()
+            $stdout | Out-File -FilePath publish.out.log -Encoding utf8
+            $stderr | Out-File -FilePath publish.err.log -Encoding utf8
+            if ($p.ExitCode -ne 0) { throw "msbuild exited with $($p.ExitCode)" }
+            "CHECKPOINT:publish-done" >> ci-diagnostics.log
+          } catch {
+            "PUBLISH-ERROR: $($_.Exception.Message)" >> ci-diagnostics.log
+            exit 1
+          }
 
       # =====================================================================
       # 关键修复：修正 exe 内嵌 manifest 中非法 processorArchitecture
@@ -41,6 +71,7 @@ jobs:
       - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
         shell: pwsh
         run: |
+          "CHECKPOINT:manifestfix-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
           if ($exes.Count -eq 0) { Write-Error "未找到发布的 exe（Publish 步未产出，请检查上面的 Publish 日志）"; exit 1 }
@@ -94,6 +125,7 @@ jobs:
             if ($after -ne 0) { Write-Error "修补验证失败，仍存在 x64"; exit 1 }
             Write-Host "    OK: 已改写为 amd64"
           }
+          "CHECKPOINT:manifestfix-done" >> ci-diagnostics.log
 
       # =====================================================================
       # 可移植增强（最佳努力，不阻断构建）：补 _APP CRT 转发器 + 常规 VC++ CRT
@@ -108,6 +140,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
+          "CHECKPOINT:forwarders-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Continue'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
           if ($exes.Count -eq 0) { Write-Warning "未找到 exe，跳过 forwarder 复制"; exit 0 }
@@ -160,11 +193,13 @@ jobs:
               if (Test-Path (Join-Path $d $dl)) { Write-Host ("  [OK]   " + $dl) } else { Write-Warning ("  [缺失] " + $dl) }
             }
           }
+          "CHECKPOINT:forwarders-done" >> ci-diagnostics.log
 
       # === 诊断：确认 exe 与 manifest 状态（无论后面是否红，日志里一眼可见） ===
       - name: Diagnostics before upload
         shell: pwsh
         run: |
+          "CHECKPOINT:diagnostics-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Continue'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
           if ($exes.Count -eq 0) { Write-Warning "诊断: 未找到 exe（Publish 可能失败）"; exit 0 }
@@ -179,11 +214,13 @@ jobs:
             $sz = (Get-ChildItem $d -Recurse -File | Measure-Object -Property Length -Sum).Sum
             Write-Host ("  dir size: {0:N0} bytes, files: {1}" -f $sz, (Get-ChildItem $d -Recurse -File).Count)
           }
+          "CHECKPOINT:diagnostics-done" >> ci-diagnostics.log
 
       # === 打包为单个 zip 再上传（避免 upload-artifact 直传大目录树的尺寸/长路径问题） ===
       - name: Package publish output as zip
         shell: pwsh
         run: |
+          "CHECKPOINT:package-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
           if ($exes.Count -eq 0) { Write-Error "未找到 exe，无法打包"; exit 1 }
@@ -191,6 +228,7 @@ jobs:
           $zip = "PhotoRenameAIHash-windows.zip"
           Compress-Archive -Path $d -DestinationPath $zip -Force
           Write-Host "已打包: $zip ($([System.IO.File]::ReadAllBytes($zip).Length) bytes)"
+          "CHECKPOINT:package-done" >> ci-diagnostics.log
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -198,3 +236,43 @@ jobs:
           name: PhotoRenameAIHash-windows
           path: PhotoRenameAIHash-windows.zip
           if-no-files-found: error
+
+      # === 自报告：无论成败，把诊断写回 ci-diag 分支（[skip ci] 不触发新跑），
+      #     主理人用 contents:read 即可读取失败真相，绕开 Actions:Read 权限限制 ===
+      - name: Self-report diagnostics to ci-diag branch
+        if: always()
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = "ci-diagnostics.log"
+          if (-not (Test-Path $log)) { "CHECKPOINT:none" | Out-File $log }
+          "=== CI SELF-DIAGNOSTIC ===" | Out-File -Append $log
+          ("run_id=" + $env:GITHUB_RUN_ID) | Out-File -Append $log
+          ("sha=" + $env:GITHUB_SHA) | Out-File -Append $log
+          $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" -ErrorAction SilentlyContinue
+          ("exe_count=" + $exes.Count) | Out-File -Append $log
+          if ($exes.Count -gt 0) {
+            $exe = $exes[0]
+            $b = [System.IO.File]::ReadAllBytes($exe.FullName)
+            $s = [System.Text.Encoding]::UTF8.GetString($b)
+            ("exe_x64_count=" + ([regex]::Matches($s,'processorArchitecture="x64"').Count) | Out-File -Append $log
+            ("exe_amd64_count=" + ([regex]::Matches($s,'processorArchitecture="amd64"').Count) | Out-File -Append $log
+            ("exe_path=" + $exe.FullName) | Out-File -Append $log
+          }
+          $zip = "PhotoRenameAIHash-windows.zip"
+          ("zip_exists=" + (Test-Path $zip)) | Out-File -Append $log
+          if (Test-Path publish.out.log) {
+            "--- publish.out.log (tail 60) ---" | Out-File -Append $log
+            (Get-Content publish.out.log -Tail 60) | Out-File -Append $log
+          }
+          if (Test-Path publish.err.log) {
+            "--- publish.err.log (tail 30) ---" | Out-File -Append $log
+            (Get-Content publish.err.log -Tail 30) | Out-File -Append $log
+          }
+          git config user.email "ci@local"
+          git config user.name "ci-bot"
+          git add ci-diagnostics.log
+          git commit -m "ci: diagnostic dump [skip ci]" | Out-Null
+          git push --force origin HEAD:refs/heads/ci-diag
+          Write-Host "pushed diagnostics to ci-diag branch"
