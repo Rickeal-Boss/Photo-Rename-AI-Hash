@@ -13,11 +13,7 @@
   </Properties>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
-    <!-- Windows App SDK 1.5 运行时框架包依赖（版本 5001.404.1901.0 对应 1.5.240428000）。
-         MSIX 安装时会随包自动部署该运行时，不再依赖系统 WinSxS 的 Microsoft.WindowsAppSDK 引用。 -->
-    <PackageDependency Name="Microsoft.WindowsAppSDK"
-                      Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
-                      MinVersion="5001.404.1901.0" />
+
   </Dependencies>
   <Resources>
     <Resource Language="x-generate" />
