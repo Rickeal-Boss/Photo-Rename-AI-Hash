@@ -154,18 +154,17 @@ jobs:
               $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtf." + $ver + ".nupkg")
               Write-Host "下载 Microsoft.VCRTForwarders.140 $ver (第 $i 次) ..."
               Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg -ErrorAction Stop
-              Add-Type -AssemblyName System.IO.Compression.FileSystem
-              $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
-              $rel = "runtimes/win-x64/native/release/"
+              # 解压 nupkg（Expand-Archive 是 PowerShell 原生 cmdlet，无需反射 ZipFile）
+              $extractDir = Join-Path $env:RUNNER_TEMP ("vcrtf_extract_" + $i)
+              if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+              Expand-Archive -Path $nupkg -DestinationPath $extractDir -Force
+              $rel = Join-Path $extractDir "runtimes/win-x64/native/release"
+              if (-not (Test-Path $rel)) { throw "nupkg 内未找到 runtimes/win-x64/native/release" }
               $fw = 0
-              foreach ($e in $zip.Entries) {
-                if ($e.FullName.StartsWith($rel, [System.StringComparison]::OrdinalIgnoreCase) -and $e.FullName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
-                  $nm = [System.IO.Path]::GetFileName($e.FullName)
-                  foreach ($d in $dirs) { [System.IO.Compression.ZipFile]::ExtractToFile($e, (Join-Path $d $nm), $true) }
-                  $fw++
-                }
+              Get-ChildItem -Path $rel -Filter "*.dll" | ForEach-Object {
+                foreach ($d in $dirs) { Copy-Item $_.FullName -Destination $d -Force }
+                $fw++
               }
-              $zip.Dispose()
               Write-Host "已解压 $fw 个 forwarder DLL 到 $($dirs.Count) 个输出目录"
               $ok = $true
               break
