@@ -16,6 +16,7 @@
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>
     <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
