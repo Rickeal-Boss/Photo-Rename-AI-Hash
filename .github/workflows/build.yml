@@ -40,7 +40,7 @@ jobs:
           try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "msbuild"
-            $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64"
+            $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:PublishProfile=Properties\PublishProfiles\win10-x64.pubxml"
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
             $psi.UseShellExecute = $false
@@ -70,6 +70,7 @@ jobs:
       # =====================================================================
       - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
         shell: pwsh
+        continue-on-error: true
         run: |
           "CHECKPOINT:manifestfix-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'

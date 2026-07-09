@@ -12,10 +12,11 @@
     <WindowsPackageType>MSIX</WindowsPackageType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <!-- 单项目 MSIX 打包：msbuild /t:Publish + GenerateAppxPackageOnBuild=true 才会产出并签名 .msix -->
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>
-    <!-- MSIX 打包：本地 dotnet publish 生成 .msix 并签名 -->
-    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
     <PackageCertificateThumbprint>B260F25FCADC2AFC4B8A855E54A6AAA3520A8C31</PackageCertificateThumbprint>
