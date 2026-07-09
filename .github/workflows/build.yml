@@ -102,6 +102,10 @@ jobs:
               continue
             }
             $newManifest = $manifest.Replace('processorArchitecture="x64"', 'processorArchitecture="amd64"')
+            # WinAppSDK 1.5 注入的 <dpiAwareness> 元素在部分 Windows 版本报
+            # "The setting ...dpiAwareness is not registered" -> Activation Context generation
+            # failed -> SxS。移除该元素（DPI 由 WinUI 内部处理，删掉不影响启动）。
+            $newManifest = [regex]::Replace($newManifest, '<dpiAwareness[^>]*>.*?</dpiAwareness>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
             $newBytes = $enc.GetBytes($newManifest)
             $h = [ResEdit]::BeginUpdateResource($exePath, $false)
             if ($h -eq [IntPtr]::Zero) { Write-Error ("BeginUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
@@ -113,8 +117,9 @@ jobs:
             $b2 = [System.IO.File]::ReadAllBytes($exePath)
             $s2 = $enc.GetString($b2)
             $after = ([regex]::Matches($s2, 'processorArchitecture="x64"')).Count
-            Write-Host ("    修补后 processorArchitecture=""x64"" 次数: " + $after + " (应为 0)")
-            if ($after -ne 0) { Write-Error "修补验证失败，仍存在 x64"; exit 1 }
+            $afterDpi = ([regex]::Matches($s2, 'dpiAwareness')).Count
+            Write-Host ("    修补后 processorArchitecture=""x64"" 次数: " + $after + " (应为 0); dpiAwareness 残留: " + $afterDpi + " (应为 0)")
+            if ($after -ne 0 -or $afterDpi -ne 0) { Write-Error "修补验证失败，仍存在 x64 或 dpiAwareness"; exit 1 }
             Write-Host "    OK: 已改写为 amd64"
           }
           "CHECKPOINT:manifestfix-done" >> ci-diagnostics.log
