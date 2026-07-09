@@ -247,8 +247,8 @@ jobs:
             $exe = $exes[0]
             $b = [System.IO.File]::ReadAllBytes($exe.FullName)
             $s = [System.Text.Encoding]::UTF8.GetString($b)
-            ("exe_x64_count=" + ([regex]::Matches($s,'processorArchitecture="x64"').Count) | Out-File -Append $log
-            ("exe_amd64_count=" + ([regex]::Matches($s,'processorArchitecture="amd64"').Count) | Out-File -Append $log
+            ("exe_x64_count=" + [regex]::Matches($s,'processorArchitecture="x64"').Count) | Out-File -Append $log
+            ("exe_amd64_count=" + [regex]::Matches($s,'processorArchitecture="amd64"').Count) | Out-File -Append $log
             ("exe_path=" + $exe.FullName) | Out-File -Append $log
           }
           $zip = "PhotoRenameAIHash-windows.zip"
