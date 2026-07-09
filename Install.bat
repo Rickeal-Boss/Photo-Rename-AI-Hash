@@ -1,74 +1,45 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo Installing PhotoRenameAIHash...
 
-:: Check admin rights
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo.
-    echo ERROR: Administrator privileges required.
-    echo Right-click Install.bat and select "Run as administrator".
-    echo.
+:: ===========================================================================
+:: [1/3] 导入签名证书到本机受信任存储
+:: MSIX 旁加载要求证书位于本机（LocalMachine）TrustedPeople（Root 兜底）。
+:: ===========================================================================
+echo [1/3] Importing certificate (machine-trusted)...
+powershell -NoProfile -Command "Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null; Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null"
+if errorlevel 1 (
+    echo ERROR: Certificate import failed. Make sure you run this as Administrator.
     pause
     exit /b 1
 )
 
-:: Step 1: Import certificate to Local Machine Trusted People
-:: MSIX sideloading requires the signing cert in the Local Machine store,
-:: NOT the Current User store. TrustedPeople is the standard location.
-echo [1/2] Importing certificate...
-powershell -NoProfile -Command "Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -ErrorAction Stop" >nul 2>&1
-if %errorlevel% neq 0 (
-    :: Some Windows configs use Root instead
-    powershell -NoProfile -Command "Import-Certificate -FilePath 'PhotoRenameAIHash.cer' -CertStoreLocation 'Cert:\LocalMachine\Root' -ErrorAction Stop" >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo ERROR: Failed to import certificate to machine store.
-        pause
-        exit /b 1
-    )
-)
-
-:: Step 2: Install MSIX
-:: The app is self-contained (WindowsAppSDKSelfContained=true) — it bundles
-:: its own Windows App SDK runtime, so no system runtime check is needed.
-:: Temporarily hide Dependencies folder to prevent Add-AppxPackage from
-:: trying to install bundled framework packages that conflict with system version.
-echo [2/2] Installing application...
-set "DEPS_HIDDEN=0"
-if exist "Dependencies" (
-    ren "Dependencies" "_Deps_hidden" >nul 2>&1
-    if !errorlevel! equ 0 set "DEPS_HIDDEN=1"
-)
-
-set "MSIX="
-for %%f in (*.msix) do set "MSIX=%%f"
-if not defined MSIX (
-    echo ERROR: No .msix file found in this folder.
-    if "%DEPS_HIDDEN%"=="1" (
-        if exist "_Deps_hidden" ren "_Deps_hidden" "Dependencies" >nul 2>&1
-    )
+:: ===========================================================================
+:: [2/3] 确保 Windows App SDK 框架运行时（并列安装，非破坏性）
+:: 框架包（Microsoft.WindowsAppRuntime.1.5）是 side-by-side 的：安装匹配版本不会
+:: 覆盖、也不会影响系统上已有的其它版本/其它应用。若系统已满足版本要求则跳过。
+:: ===========================================================================
+echo [2/3] Ensuring Windows App SDK framework (side-by-side, non-destructive)...
+powershell -NoProfile -Command "Get-ChildItem -Path '.' -Recurse -Filter 'Microsoft.WindowsAppSDK*.msix' -ErrorAction SilentlyContinue | ForEach-Object { Add-AppxPackage -Path $_.FullName -ErrorAction SilentlyContinue }; $p = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.5' | Where-Object { $_.Version -ge [Version]'5001.404.1901.0' }; if (-not $p) { Write-Host 'ERROR: required Windows App SDK framework (>= 5001.404.1901.0) could not be provisioned.'; Write-Host 'Download it from: https://aka.ms/windowsappsdk/1.5/1.5.240428000/windowsappruntimeinstall-x64.exe'; exit 1 }"
+if errorlevel 1 (
+    echo ERROR: Windows App SDK framework not available.
     pause
     exit /b 1
 )
 
-:: Show real error on failure
-powershell -NoProfile -Command "try { Add-AppxPackage -Path '%MSIX%' -ErrorAction Stop; Write-Host 'OK' } catch { Write-Host ('ERROR: ' + $_.Exception.Message); exit 1 }"
-set "INSTALL_ERR=%errorlevel%"
-
-:: Restore Dependencies folder (best-effort)
-if "%DEPS_HIDDEN%"=="1" (
-    if exist "_Deps_hidden" ren "_Deps_hidden" "Dependencies" >nul 2>&1
-)
-
-if %INSTALL_ERR% neq 0 (
-    echo.
-    echo Installation failed. See error above for details.
+:: ===========================================================================
+:: [3/3] 安装应用
+:: ===========================================================================
+echo [3/3] Installing application...
+powershell -NoProfile -Command "$a = Get-ChildItem -Path '.' -Recurse -Filter 'PhotoRenameAIHash_*.msix' -ErrorAction SilentlyContinue | Select-Object -First 1; if (-not $a) { Write-Host 'ERROR: PhotoRenameAIHash_*.msix not found in this folder.'; exit 1 }; try { Add-AppxPackage -Path $a.FullName } catch { Write-Host ('ERROR: ' + $_.Exception.Message); exit 1 }"
+if errorlevel 1 (
+    echo Installation failed. See error above.
     pause
     exit /b 1
 )
 
 echo.
-echo Done! Launch "PhotoRenameAIHash" from Start menu.
-timeout /t 3 >nul
+echo Done! PhotoRenameAIHash is installed. Launch it from the Start menu.
+pause
