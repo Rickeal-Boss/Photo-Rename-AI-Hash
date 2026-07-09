@@ -262,8 +262,8 @@ jobs:
           $zip = "PhotoRenameAIHash-windows.zip"
           ("zip_exists=" + (Test-Path $zip)) | Out-File -Append $log
           if (Test-Path publish.out.log) {
-            "--- publish.out.log (tail 60) ---" | Out-File -Append $log
-            (Get-Content publish.out.log -Tail 60) | Out-File -Append $log
+            "--- publish.out.log (head 500) ---" | Out-File -Append $log
+            (Get-Content publish.out.log | Select-Object -First 500) | Out-File -Append $log
           }
           if (Test-Path publish.err.log) {
             "--- publish.err.log (tail 30) ---" | Out-File -Append $log
