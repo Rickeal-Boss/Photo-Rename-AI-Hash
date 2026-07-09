@@ -14,16 +14,10 @@
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
     <!--
-      框架依赖（framework-dependent）：声明对 Microsoft.WindowsAppSDK 运行时包的依赖。
-      运行时由系统提供（Install.bat 会以“并列安装”方式补齐匹配版本，不覆盖、不影响
-      系统上已有的其它运行时/应用）。Publisher 必须与系统框架包发行者完全一致。
-      MinVersion 必须与 CI 制品 Dependencies/ 中实际打包的框架运行时版本一致 ——
-      当前 GitHub Windows Runner 自带的 WindowsAppSDK 运行时为 5001.119.156.0，
-      故此处锁定为该版本，保证离线安装时依赖校验可通过。
+      自包含模型：WindowsAppSDKSelfContained=true 已把运行时打进 .msix 内部，
+      此处不再声明对外部 Microsoft.WindowsAppSDK 框架的 PackageDependency，
+      避免离线安装时因框架未预置导致的 0x80073CF3 依赖校验失败。
     -->
-    <PackageDependency Name="Microsoft.WindowsAppSDK"
-                       MinVersion="5001.119.156.0"
-                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
   </Dependencies>
   <Resources>
     <Resource Language="x-generate" />

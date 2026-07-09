@@ -17,12 +17,13 @@
     <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>
     <EnableMsixTooling>true</EnableMsixTooling>
     <!--
-      框架依赖模型（framework-dependent）：MSIX 声明对 Microsoft.WindowsAppSDK 的
-      PackageDependency，由系统提供运行时。这是微软官方 WinUI 3 MSIX 模板的默认路径，
-      经广泛验证可靠。
-      注意：曾尝试 WindowsAppSDKSelfContained=true（自包含），但该组合官方只支持
-      unpackaged 应用；打进 MSIX 后会出现“安装成功、启动即静默崩溃”的问题，故回退。
+      自包含模型（self-contained）：WindowsAppSDKSelfContained=true 把 Windows App SDK
+      运行时直接打进应用 .msix 内部，MSIX 不再声明对外部 Microsoft.WindowsAppSDK 框架的
+      PackageDependency。安装时只需 Add-AppxPackage -Path 应用.msix，无需任何框架/运行时
+      预装——彻底规避"框架版本不匹配/未预置"导致的 0x80073CF3 与启动失败。
+      （此路线参考已验证可用的 Screen Translator AI 自包含安装器实现。）
     -->
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
