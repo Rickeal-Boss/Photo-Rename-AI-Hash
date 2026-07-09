@@ -19,13 +19,16 @@ if errorlevel 1 (
 :: ===========================================================================
 :: [2/3] 确保 Windows App SDK 框架运行时（并列安装，非破坏性）
 :: 框架包（Microsoft.WindowsAppRuntime.1.5*.msix）是 side-by-side 的。
-:: 关键：必须在一个 Add-AppxPackage 调用里把「所有」框架包作为 -Path 数组传入，
-:: 由 Windows 在「单次部署」中解析依赖图（umbrella 依赖 Main x64/x86/arm64），
-:: 切忌对每个包单独调用并重复传 -DependencyPath，否则会报
-:: 0x80073CF9「指定了多次相同的程序包」。
+:: 关键点（两个已踩过的坑）：
+::   坑1：不能把“所有包作为数组”一次性传给 -Path（本机 Add-AppxPackage -Path 是
+::        string 单值，传数组会报 Cannot convert String[] to String）。
+::   坑2：不能对每个包单独调用并重复传 -DependencyPath（会报 0x80073CF9 重复）。
+:: 正确做法：先逐个注册 3 个 Main（x64/x86/arm64，彼此无依赖，是 leaf 包），
+::          最后再注册 umbrella（它依赖这 3 个 Main，此时已就绪）。
+:: 兜底：若上述都失败，联网运行官方运行时安装器（装的是 1.5.240428000，>= 所需版本）。
 :: ===========================================================================
 echo [2/3] Ensuring Windows App SDK framework (side-by-side, non-destructive)...
-powershell -NoProfile -Command "$fw = @(Get-ChildItem -Path '.' -Recurse -Include 'Microsoft.WindowsAppRuntime*.msix','Microsoft.WindowsAppSDK*.msix' -ErrorAction SilentlyContinue); if ($fw.Count -gt 0) { Write-Host ('  found ' + $fw.Count + ' bundled framework package(s); installing side-by-side...'); try { Add-AppxPackage -Path $fw.FullName -ErrorAction Stop; Write-Host '  Windows App SDK framework installed.' } catch { Write-Host ('  warning: ' + $_.Exception.Message) } } else { Write-Host '  no bundled framework MSIX in this folder; Windows will fetch the Windows App SDK runtime automatically during app install (requires internet).' }"
+powershell -NoProfile -Command "$fw = @(Get-ChildItem -Path '.' -Recurse -Include 'Microsoft.WindowsAppRuntime*.msix','Microsoft.WindowsAppSDK*.msix' -ErrorAction SilentlyContinue); $provisioned = $false; if ($fw.Count -gt 0) { Write-Host ('  found ' + $fw.Count + ' bundled framework package(s); installing side-by-side...'); $umbrella = @($fw | Where-Object { $_.BaseName -eq 'Microsoft.WindowsAppRuntime.1.5' }); $mains = @($fw | Where-Object { $_.BaseName -ne 'Microsoft.WindowsAppRuntime.1.5' }); foreach ($m in $mains) { try { Add-AppxPackage -Path $m.FullName -ErrorAction Stop } catch { Write-Host ('    warning (main): ' + $_.Exception.Message) } }; if ($umbrella.Count -eq 1) { try { Add-AppxPackage -Path $umbrella[0].FullName -ErrorAction Stop; $provisioned = $true } catch { Write-Host ('    warning (umbrella): ' + $_.Exception.Message) } } }; if (-not $provisioned) { $p = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.5' | Where-Object { $_.Version -ge [Version]'5001.119.156.0' }; if ($p) { $provisioned = $true } }; if (-not $provisioned) { Write-Host '  bundled framework not usable; trying official online installer...'; try { $url = 'https://aka.ms/windowsappsdk/1.5/1.5.240428000/windowsappruntimeinstall-x64.exe'; $exe = Join-Path $env:TEMP 'war-install.exe'; Invoke-WebRequest -Uri $url -OutFile $exe -ErrorAction Stop; Start-Process -FilePath $exe -ArgumentList '/quiet','/norestart' -Wait -ErrorAction Stop; $p = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.5' | Where-Object { $_.Version -ge [Version]'5001.119.156.0' }; if ($p) { $provisioned = $true; Write-Host ('  framework installed via official installer: ' + $p.Version) } } catch { Write-Host ('  online installer failed: ' + $_.Exception.Message) } }; if ($provisioned) { Write-Host '  Windows App SDK framework ready.' } else { Write-Host '  WARNING: framework not provisioned; app install may fail (internet required).' }"
 
 :: ===========================================================================
 :: [3/3] 安装应用
