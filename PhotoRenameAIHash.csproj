@@ -24,6 +24,7 @@
       （此路线参考已验证可用的 Screen Translator AI 自包含安装器实现。）
     -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
