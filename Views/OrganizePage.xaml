@@ -135,7 +135,7 @@
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
                              IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
-                             FontFamily="Consolas" Height="140" VerticalScrollBarVisibility="Auto" />
+                             FontFamily="Consolas" Height="140" ScrollViewer.VerticalScrollBarVisibility="Auto" />
                 </StackPanel>
             </Border>
 
@@ -150,7 +150,7 @@
                         <TextBlock Grid.Column="3" Text="MD5" FontWeight="SemiBold" Margin="12,0,0,0" />
                     </Grid>
                     <ListView ItemsSource="{x:Bind ViewModel.Results, Mode=OneWay}"
-                              MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                              MaxHeight="320" ScrollViewer.VerticalScrollBarVisibility="Auto">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
