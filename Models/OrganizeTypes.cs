@@ -10,6 +10,9 @@ public class OrganizeRequest
     /// <summary>输出/归档目标文件夹；重命名模式下可留空（等同源文件夹）。</summary>
     public string OutputFolder { get; set; } = "";
 
+    /// <summary>重命名模式实际执行前的备份文件夹；为空表示未选择（将触发选择弹窗）。</summary>
+    public string BackupFolder { get; set; } = "";
+
     public OperationMode Mode { get; set; } = OperationMode.Copy;
 
     public string NamingTemplate { get; set; } = "{category}_{scene}_{people}_{action}_{subtitle}_{source}";

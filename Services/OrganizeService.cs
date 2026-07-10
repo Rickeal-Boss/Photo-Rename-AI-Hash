@@ -251,6 +251,14 @@ public sealed class OrganizeService : IOrganizeService
             return skip;
         }
 
+        // 重命名模式实际执行前，先把原文件备份到用户指定的备份文件夹（保险）
+        if (req.Mode == OperationMode.Rename && !req.DryRun &&
+            !string.IsNullOrWhiteSpace(req.BackupFolder) &&
+            !string.Equals(resolved, f.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            await BackupOriginalAsync(req.BackupFolder, f.Path, ct).ConfigureAwait(false);
+        }
+
         string status = await ExecuteAsync(req, f.Path, resolved, md5, OpName(req.Mode), ct).ConfigureAwait(false);
         var entry = new RenameLogEntry
         {
@@ -300,6 +308,27 @@ public sealed class OrganizeService : IOrganizeService
 
         File.Move(source, target, overwrite);
         return "已移动";
+    }
+
+    /// <summary>
+    /// 重命名模式实际执行前的保险：把原文件复制一份到备份文件夹（同名冲突自动加 _1/_2）。
+    /// 备份失败（如目标不可写、磁盘满）直接抛异常，由 <see cref="RunAsync"/> 的逐文件 try/catch
+    /// 标记为「错误」且不执行 rename，避免在未成功备份的情况下丢失原文件。
+    /// </summary>
+    private static Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(backupDir);
+        string name = Path.GetFileName(source);
+        string dest = Path.Combine(backupDir, name);
+        int i = 1;
+        while (File.Exists(dest))
+        {
+            dest = Path.Combine(backupDir, $"{Path.GetFileNameWithoutExtension(name)}_{i}{Path.GetExtension(name)}");
+            if (++i > 9999) break;
+        }
+        File.Copy(source, dest, false);
+        return Task.CompletedTask;
     }
 
     /// <summary>

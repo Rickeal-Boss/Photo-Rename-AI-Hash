@@ -16,6 +16,9 @@ public partial class OrganizeViewModel : ObservableObject
     private AppSettings _model;
     private CancellationTokenSource? _cts;
 
+    /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
+    public Func<Task<string?>>? BackupFolderPicker { get; set; }
+
     public OrganizeViewModel()
     {
         _model = _settings.Load();
@@ -54,6 +57,8 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private bool _useExifDate = true;
 
+    [ObservableProperty] private string _backupFolder = "";
+
     [ObservableProperty] private bool _isBusy;
 
     [ObservableProperty] private int _progress;
@@ -80,6 +85,22 @@ public partial class OrganizeViewModel : ObservableObject
         {
             StatusText = "请选择有效输出文件夹（重命名模式可留空）。";
             return;
+        }
+
+        // 重命名模式 + 实际执行：必须先选择备份文件夹，未选择则取消（不动任何文件）
+        if ((OperationMode)OperationModeIndex == OperationMode.Rename && !DryRun)
+        {
+            if (string.IsNullOrWhiteSpace(BackupFolder))
+            {
+                var picked = BackupFolderPicker != null ? await BackupFolderPicker() : null;
+                if (string.IsNullOrWhiteSpace(picked))
+                {
+                    StatusText = "已取消：重命名实际执行前需先选择备份文件夹。";
+                    AppendLog("已取消：未选择备份文件夹，未执行重命名。");
+                    return;
+                }
+                BackupFolder = picked!;
+            }
         }
 
         IsBusy = true;
@@ -110,6 +131,7 @@ public partial class OrganizeViewModel : ObservableObject
         {
             IsBusy = false;
             _cts = null;
+            BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
         }
     }
 
@@ -158,6 +180,7 @@ public partial class OrganizeViewModel : ObservableObject
         {
             IsBusy = false;
             _cts = null;
+            BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
         }
     }
 
@@ -174,6 +197,7 @@ public partial class OrganizeViewModel : ObservableObject
 
     private OrganizeRequest BuildRequest()
     {
+        _model = _settings.Load(); // 单例 VM 可能滞后于「设置」页改动，每次构建请求时刷新密钥/端点
         var provider = (AiProvider)AiProviderIndex;
         string key = provider switch
         {
@@ -200,6 +224,7 @@ public partial class OrganizeViewModel : ObservableObject
             CustomApiModel = _model.CustomApiModel,
             Language = _model.Language,
             UseExifDate = UseExifDate,
+            BackupFolder = BackupFolder,
         };
     }
 

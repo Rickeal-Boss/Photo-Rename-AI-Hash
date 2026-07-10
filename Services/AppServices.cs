@@ -1,3 +1,5 @@
+using PhotoRenameAIHash.ViewModels;
+
 namespace PhotoRenameAIHash.Services;
 
 /// <summary>
@@ -15,4 +17,10 @@ public static class AppServices
     public static RenameLogService RenameLogService { get; } = new RenameLogService();
 
     public static IOrganizeService OrganizeService { get; } = new OrganizeService();
+
+    /// <summary>整理页 ViewModel 单例：与页面实例生命周期解耦，切换标签页时运行中的整理任务不中断。</summary>
+    public static OrganizeViewModel OrganizeVm { get; } = new();
+
+    /// <summary>去重页 ViewModel 单例：同上，确保感知哈希扫描/删除任务在切换标签后继续。</summary>
+    public static DeduplicateViewModel DeduplicateVm { get; } = new();
 }
