@@ -51,11 +51,33 @@
                         <ComboBoxItem Content="无（按日期/序号命名）" />
                         <ComboBoxItem Content="智谱 GLM-4V" />
                         <ComboBoxItem Content="通义千问 Qwen-VL" />
+                        <ComboBoxItem Content="自定义 OpenAI 兼容" />
                     </ComboBox>
                     <TextBlock Text="智谱 API Key" FontWeight="SemiBold" />
                     <PasswordBox Password="{x:Bind ViewModel.ZhipuApiKey, Mode=TwoWay}" />
                     <TextBlock Text="通义千问 API Key (DashScope)" FontWeight="SemiBold" />
                     <PasswordBox Password="{x:Bind ViewModel.QwenApiKey, Mode=TwoWay}" />
+
+                    <!-- 自定义 OpenAI 兼容 API 配置 -->
+                    <Grid Visibility="{x:Bind ViewModel.CustomProviderVisibility, Mode=OneWay}"
+                          RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="8">
+                        <TextBlock Grid.Row="0" Text="自定义 API" Style="{StaticResource CardTitleStyle}" />
+                        <StackPanel Grid.Row="1" Spacing="4">
+                            <TextBlock Text="端点 URL" FontWeight="SemiBold" />
+                            <TextBox Text="{x:Bind ViewModel.CustomApiUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="https://api.openai.com/v1/chat/completions" />
+                        </StackPanel>
+                        <StackPanel Grid.Row="2" Spacing="4">
+                            <TextBlock Text="模型名称" FontWeight="SemiBold" />
+                            <TextBox Text="{x:Bind ViewModel.CustomApiModel, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="gpt-4o" />
+                        </StackPanel>
+                        <StackPanel Grid.Row="3" Spacing="4">
+                            <TextBlock Text="API Key" FontWeight="SemiBold" />
+                            <PasswordBox Password="{x:Bind ViewModel.CustomApiKey, Mode=TwoWay}" />
+                        </StackPanel>
+                    </Grid>
+
                     <TextBlock Text="密钥保存在本机设置文件中（明文），仅用于本地调用。"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>

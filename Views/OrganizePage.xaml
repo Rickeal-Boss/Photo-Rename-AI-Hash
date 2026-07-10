@@ -42,6 +42,7 @@
                             <ComboBoxItem Content="无（按日期/序号命名）" />
                             <ComboBoxItem Content="智谱 GLM-4V" />
                             <ComboBoxItem Content="通义千问 Qwen-VL" />
+                            <ComboBoxItem Content="自定义 OpenAI 兼容" />
                         </ComboBox>
                         <TextBlock Text="API 密钥在「设置」中填写" VerticalAlignment="Center"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

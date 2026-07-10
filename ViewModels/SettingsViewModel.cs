@@ -1,6 +1,7 @@
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.UI.Xaml;
 using PhotoRenameAIHash.Helpers;
 using PhotoRenameAIHash.Models;
 using PhotoRenameAIHash.Services;
@@ -23,6 +24,9 @@ public partial class SettingsViewModel : ObservableObject
         AiProviderIndex = (int)_model.AiProvider;
         ZhipuApiKey = _model.ZhipuApiKey;
         QwenApiKey = _model.QwenApiKey;
+        CustomApiUrl = _model.CustomApiUrl;
+        CustomApiModel = _model.CustomApiModel;
+        CustomApiKey = _model.CustomApiKey;
     }
 
     /// <summary>Maps AppTheme -> RadioButtons index (0=Light, 1=Dark, 2=System).</summary>
@@ -42,12 +46,23 @@ public partial class SettingsViewModel : ObservableObject
         };
     }
 
-    /// <summary>Maps AiProvider -> ComboBox index (0=None, 1=Zhipu, 2=Qwen).</summary>
+    /// <summary>Maps AiProvider -> ComboBox index (0=None, 1=Zhipu, 2=Qwen, 3=Custom).</summary>
     public int AiProviderIndex
     {
         get => (int)_model.AiProvider;
-        set => _model.AiProvider = (AiProvider)value;
+        set
+        {
+            _model.AiProvider = (AiProvider)value;
+            OnPropertyChanged(nameof(IsCustomProvider));
+        }
     }
+
+    /// <summary>当前选中的是否为「自定义」引擎。</summary>
+    public bool IsCustomProvider => _model.AiProvider == AiProvider.Custom;
+
+    /// <summary>自定义引擎区域可见性。</summary>
+    public Visibility CustomProviderVisibility =>
+        IsCustomProvider ? Visibility.Visible : Visibility.Collapsed;
 
     [ObservableProperty]
     private AppTheme _theme;
@@ -71,6 +86,15 @@ public partial class SettingsViewModel : ObservableObject
     private string _qwenApiKey = "";
 
     [ObservableProperty]
+    private string _customApiUrl = "";
+
+    [ObservableProperty]
+    private string _customApiModel = "";
+
+    [ObservableProperty]
+    private string _customApiKey = "";
+
+    [ObservableProperty]
     private string _statusText = "";
 
     partial void OnThemeChanged(AppTheme oldValue, AppTheme newValue)
@@ -90,6 +114,9 @@ public partial class SettingsViewModel : ObservableObject
         _model.Language = Language;
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;
+        _model.CustomApiUrl = CustomApiUrl;
+        _model.CustomApiModel = CustomApiModel;
+        _model.CustomApiKey = CustomApiKey;
 
         await _settings.SaveAsync(_model);
         StatusText = "设置已保存。";

@@ -47,4 +47,13 @@ public class AppSettings
     public string ZhipuApiKey { get; set; } = "";
 
     public string QwenApiKey { get; set; } = "";
+
+    /// <summary>自定义 OpenAI 兼容 API 地址（如 https://api.openai.com/v1/chat/completions）。</summary>
+    public string CustomApiUrl { get; set; } = "";
+
+    /// <summary>自定义模型名（如 gpt-4o）。</summary>
+    public string CustomApiModel { get; set; } = "";
+
+    /// <summary>自定义 API Key。</summary>
+    public string CustomApiKey { get; set; } = "";
 }

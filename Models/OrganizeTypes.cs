@@ -29,6 +29,12 @@ public class OrganizeRequest
 
     public string AiApiKey { get; set; } = "";
 
+    /// <summary>自定义 API 端点（AiProvider.Custom 时使用）。</summary>
+    public string CustomApiUrl { get; set; } = "";
+
+    /// <summary>自定义模型名（AiProvider.Custom 时使用）。</summary>
+    public string CustomApiModel { get; set; } = "";
+
     public string Language { get; set; } = "zh-CN";
 
     public bool UseExifDate { get; set; } = true;

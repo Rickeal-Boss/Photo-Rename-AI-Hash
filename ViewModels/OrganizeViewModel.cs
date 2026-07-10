@@ -179,6 +179,7 @@ public partial class OrganizeViewModel : ObservableObject
         {
             AiProvider.Zhipu => _model.ZhipuApiKey,
             AiProvider.Qwen => _model.QwenApiKey,
+            AiProvider.Custom => _model.CustomApiKey,
             _ => "",
         };
 
@@ -195,6 +196,8 @@ public partial class OrganizeViewModel : ObservableObject
             DryRun = DryRun,
             AiProvider = provider,
             AiApiKey = key,
+            CustomApiUrl = _model.CustomApiUrl,
+            CustomApiModel = _model.CustomApiModel,
             Language = _model.Language,
             UseExifDate = UseExifDate,
         };

@@ -410,6 +410,7 @@ public sealed class OrganizeService : IOrganizeService
         {
             AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey),
             AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey),
+            AiProvider.Custom => new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey),
             _ => null,
         };
     }
