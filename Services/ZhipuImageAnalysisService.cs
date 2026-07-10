@@ -7,13 +7,13 @@ using PhotoRenameAIHash.Models;
 
 namespace PhotoRenameAIHash.Services;
 
-/// <summary>智谱 GLM-4V 视觉识别（OpenAI 兼容接口）。</summary>
+/// <summary>智谱 GLM-4.6V-Flash 视觉识别（OpenAI 兼容接口，默认免费模型）。</summary>
 public sealed class ZhipuImageAnalysisService : IImageAnalysisService
 {
     public AiProvider Provider => AiProvider.Zhipu;
 
     private const string Endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-    private const string Model = "glm-4v-plus";
+    private const string Model = "GLM-4.6V-Flash";
 
     private readonly string _apiKey;
 

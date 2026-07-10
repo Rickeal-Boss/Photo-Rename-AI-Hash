@@ -190,17 +190,22 @@ public static class ImageAnalysisHelper
         }
     }
 
-    /// <summary>从模型原始响应（或模型直接返回的 JSON 文本）中解析结构化结果。</summary>
+    /// <summary>从模型原始响应（或模型直接返回的 JSON 文本）中解析结构化结果。
+    /// 兼容模型偶发的格式瑕疵：markdown 代码围栏（```json … ```）、尾随逗号、行内注释。</summary>
     public static ImageAnalysisResult? Parse(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
+        var obj = ExtractJsonObject(json);
+        if (obj == null) return null;
         try
         {
-            int s = json.IndexOf('{');
-            int e = json.LastIndexOf('}');
-            if (s < 0 || e < 0 || e <= s) return null;
-            var obj = json.Substring(s, e - s + 1);
-            using var doc = JsonDocument.Parse(obj);
+            // 允许尾随逗号与注释：模型常见格式瑕疵，默认严格解析会直接判为「无法解析」
+            var options = new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip,
+            };
+            using var doc = JsonDocument.Parse(obj, options);
             var root = doc.RootElement;
             return new ImageAnalysisResult
             {
@@ -216,6 +221,30 @@ public static class ImageAnalysisHelper
         {
             return null;
         }
+    }
+
+    /// <summary>从可能夹带说明文字 / markdown 围栏的模型输出中，提取最外层的 JSON 对象文本。</summary>
+    private static string? ExtractJsonObject(string json)
+    {
+        var text = json.Trim();
+
+        // 剥离 markdown 代码围栏：```json … ``` 或 ``` … ```
+        if (text.StartsWith("```"))
+        {
+            int nl = text.IndexOf('\n');
+            if (nl >= 0)
+            {
+                text = text.Substring(nl + 1);
+                int fence = text.LastIndexOf("```");
+                if (fence >= 0) text = text.Substring(0, fence);
+                text = text.Trim();
+            }
+        }
+
+        int s = text.IndexOf('{');
+        int e = text.LastIndexOf('}');
+        if (s < 0 || e < 0 || e <= s) return null;
+        return text.Substring(s, e - s + 1);
     }
 
     private static string Str(JsonElement root, string key)

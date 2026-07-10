@@ -41,7 +41,7 @@
                         <TextBlock Text="识别引擎" VerticalAlignment="Center" />
                         <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="200">
                             <ComboBoxItem Content="无（按日期/序号命名）" />
-                            <ComboBoxItem Content="智谱 GLM-4V" />
+                            <ComboBoxItem Content="智谱 GLM-4.6V-Flash" />
                             <ComboBoxItem Content="通义千问 Qwen-VL" />
                             <ComboBoxItem Content="自定义 OpenAI 兼容" />
                         </ComboBox>

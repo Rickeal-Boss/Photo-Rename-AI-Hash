@@ -45,12 +45,24 @@ public sealed class OrganizeService : IOrganizeService
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
-        int done = 0;
-        int index = 0;
+        // 工作队列：文件处理失败（如视觉模型偶发未按 JSON 返回、网络抖动、瞬时限流等）不直接跳过，
+        // 而是重新入队到队尾稍后再次尝试，最大化「成功重命名」的比例；达到单文件最大尝试次数仍失败才放弃。
+        var queue = new Queue<(PhotoFile File, int Index)>();
+        int order = 0;
         foreach (var f in files)
         {
+            order++;
+            queue.Enqueue((f, order));
+        }
+
+        var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
+        int done = 0;
+
+        while (queue.Count > 0)
+        {
             ct.ThrowIfCancellationRequested();
-            index++;
+            var (f, index) = queue.Dequeue();
             try
             {
                 var entry = await ProcessOneAsync(f, req, output, ai, index, ct).ConfigureAwait(false);
@@ -65,21 +77,37 @@ public sealed class OrganizeService : IOrganizeService
             }
             catch (Exception ex)
             {
-                report.Failed++;
-                done++;
-                var err = new RenameLogEntry
+                attempts.TryGetValue(f.Path, out int n);
+                n++;
+                if (n < maxPerFileAttempts)
                 {
-                    OriginalName = f.Name,
-                    Status = "错误",
-                    Message = ex.Message,
-                };
-                report.Results.Add(err);
-                progress.Report(new OrganizeProgress
+                    // 重新排队到队尾，稍后再次尝试（保留原序号，避免重命名序号错乱）
+                    attempts[f.Path] = n;
+                    queue.Enqueue((f, index));
+                    progress.Report(new OrganizeProgress
+                    {
+                        LogLine = $"{f.Name} [重试 {n}/{maxPerFileAttempts}] 上次失败：{ex.Message}",
+                    });
+                }
+                else
                 {
-                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                    Result = err,
-                    LogLine = $"{f.Name} [错误] {ex.Message}",
-                });
+                    // 已达单文件最大尝试次数：放弃该文件，标记为「错误」且不重命名，避免无限循环
+                    report.Failed++;
+                    done++;
+                    var err = new RenameLogEntry
+                    {
+                        OriginalName = f.Name,
+                        Status = "错误",
+                        Message = ex.Message,
+                    };
+                    report.Results.Add(err);
+                    progress.Report(new OrganizeProgress
+                    {
+                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                        Result = err,
+                        LogLine = $"{f.Name} [错误] {ex.Message}",
+                    });
+                }
             }
         }
 
