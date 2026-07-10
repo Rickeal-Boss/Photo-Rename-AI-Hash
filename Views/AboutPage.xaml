@@ -8,9 +8,28 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Padding="24" Spacing="12" MaxWidth="560">
-        <TextBlock Text="关于" Style="{StaticResource PageTitleStyle}" />
-        <TextBlock Text="{x:Bind ViewModel.Version, Mode=OneWay}" FontWeight="SemiBold" />
-        <TextBlock Text="{x:Bind ViewModel.Description, Mode=OneWay}" TextWrapping="Wrap" />
-    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="12" MaxWidth="560">
+            <TextBlock Text="关于" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="{x:Bind ViewModel.Version, Mode=OneWay}" FontWeight="SemiBold" />
+            <TextBlock Text="{x:Bind ViewModel.Description, Mode=OneWay}" TextWrapping="Wrap" />
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="DPI 缩放自诊" Style="{StaticResource CardTitleStyle}" />
+                    <TextBlock TextWrapping="Wrap">
+                        <Run Text="当前缩放：" /><Run Text="{x:Bind DpiScaleText, Mode=OneWay}" FontWeight="SemiBold" />
+                    </TextBlock>
+                    <TextBlock TextWrapping="Wrap">
+                        <Run Text="DPI 感知模式：" /><Run Text="{x:Bind DpiAwarenessText, Mode=OneWay}" FontWeight="SemiBold" />
+                    </TextBlock>
+                    <TextBlock TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               FontSize="12">
+                        若“当前缩放”与系统显示设置中的缩放比例一致（例如系统为 150% 时此处显示 150%），说明进程 DPI 感知正常（Per-Monitor v2），文字由 DirectWrite 矢量渲染，应锐利。若此处显示 100% 而系统为 125% 以上，说明 .exe 兼容性被手动设为“系统/系统(增强)”覆盖了感知，Windows 会位图拉伸整窗 → 文字发虚。
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
 </Page>
