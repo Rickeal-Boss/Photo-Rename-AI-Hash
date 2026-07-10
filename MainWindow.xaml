@@ -8,11 +8,12 @@
     mc:Ignorable="d"
     Title="Photo Rename AI · Hash">
 
-    <Grid>
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
         <NavigationView x:Name="NavView"
                         SelectionChanged="NavView_SelectionChanged"
                         Header="{x:Bind ViewModel.AppTitle, Mode=OneWay}"
-                        IsBackButtonVisible="Collapsed">
+                        IsBackButtonVisible="Collapsed"
+                        PaneBackground="{ThemeResource SolidBackgroundFillColorSecondaryBrush}">
             <NavigationView.MenuItems>
                 <NavigationViewItem Content="整理" Tag="Organize" Icon="Pictures" IsSelected="True" />
                 <NavigationViewItem Content="去重" Tag="Deduplicate" Icon="Map" />

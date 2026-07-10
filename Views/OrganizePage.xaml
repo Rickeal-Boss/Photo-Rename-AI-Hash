@@ -134,8 +134,8 @@
                     <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
-                             IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
-                             FontFamily="Consolas" Height="140" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                             Style="{StaticResource LogTextBoxStyle}"
+                             Height="140" ScrollViewer.VerticalScrollBarVisibility="Auto" />
                 </StackPanel>
             </Border>
 

@@ -2,19 +2,45 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <!-- ═══════════════════════════════════════════
+         主题感知背景刷子
+         ═══════════════════════════════════════════ -->
+    <SolidColorBrush x:Key="PageBackgroundBrush"
+                     Color="{ThemeResource SolidBackgroundFillColorBase}" />
+    <SolidColorBrush x:Key="NavPaneBackgroundBrush"
+                     Color="{ThemeResource SolidBackgroundFillColorSecondary}" />
+
+    <!-- ═══════════════════════════════════════════
+         隐式样式 —— Page（所有页面自动获取主题背景）
+         ═══════════════════════════════════════════ -->
+    <Style TargetType="Page">
+        <Setter Property="Background" Value="{StaticResource PageBackgroundBrush}" />
+    </Style>
+
+    <!-- ═══════════════════════════════════════════
+         页面标题
+         ═══════════════════════════════════════════ -->
     <Style x:Key="PageTitleStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="28" />
         <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
     </Style>
 
     <Thickness x:Key="PagePadding">24,24,24,24</Thickness>
 
+    <!-- ═══════════════════════════════════════════
+         章节标题
+         ═══════════════════════════════════════════ -->
     <Style x:Key="SectionHeaderStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="14" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Margin" Value="0,8,0,4" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
     </Style>
 
+    <!-- ═══════════════════════════════════════════
+         卡片样式
+         ═══════════════════════════════════════════ -->
     <Style x:Key="CardStyle" TargetType="Border">
         <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
         <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
@@ -23,10 +49,26 @@
         <Setter Property="Padding" Value="16" />
     </Style>
 
+    <!-- 卡片标题 -->
     <Style x:Key="CardTitleStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="16" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Margin" Value="0,0,0,4" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+    </Style>
+
+    <!-- ═══════════════════════════════════════════
+         日志 / 只读文本框
+         ═══════════════════════════════════════════ -->
+    <Style x:Key="LogTextBoxStyle" TargetType="TextBox">
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="AcceptsReturn" Value="True" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="FontFamily" Value="Consolas" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorSecondaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
     </Style>
 
 </ResourceDictionary>
