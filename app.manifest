@@ -10,9 +10,9 @@
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <!-- 注意：dpiAwareness（PerMonitorV2）必须用 2016 命名空间，2005 命名空间下 OS 不识别此元素 -->
+      <!-- dpiAwareness（PerMonitorV2）必须用 2016 命名空间，2005 命名空间下 OS 不识别此元素。
+           注意：MSIX 打包下不要放 longPathAware —— 它会触发 SideBySide 事件 79（激活上下文生成失败）。 -->
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
-      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
 </assembly>
