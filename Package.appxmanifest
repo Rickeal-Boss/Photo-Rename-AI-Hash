@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="1.0.0.1" />
+            Version="1.0.0.2" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>

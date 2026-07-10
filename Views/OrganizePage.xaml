@@ -116,7 +116,8 @@
                     <TextBlock Text="执行控制" Style="{StaticResource CardTitleStyle}" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <Button Content="开始整理" Command="{x:Bind ViewModel.StartOrganizeCommand}"
-                                Style="{ThemeResource AccentButtonStyle}" />
+                                Background="{ThemeResource AccentFillColorDefaultBrush}"
+                                Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
                         <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}" />
                         <Button Content="取消" Command="{x:Bind ViewModel.CancelCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />

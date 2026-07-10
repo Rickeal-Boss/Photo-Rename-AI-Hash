@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MetadataExtractor;
-using MetadataExtractor.Formats.Exif;
 using PhotoRenameAIHash.Models;
 
 namespace PhotoRenameAIHash.Services;
@@ -42,90 +41,23 @@ public sealed class PhotoService : IPhotoService
         return result;
     }
 
-    public async Task<IReadOnlyList<DuplicateGroup>> FindDuplicatesAsync(
-        IEnumerable<PhotoFile> files,
-        int aHashThreshold,
-        int dHashThreshold,
-        CancellationToken ct = default)
-    {
-        var list = files.ToList();
-        var records = new List<(PhotoFile file, ulong a, ulong d)>();
-
-        foreach (var pf in list)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                using var stream = File.OpenRead(pf.Path);
-                var a = await AppServices.HashService.ComputeAHashAsync(stream, 8, ct).ConfigureAwait(false);
-                stream.Position = 0;
-                var d = await AppServices.HashService.ComputeDHashAsync(stream, 8, ct).ConfigureAwait(false);
-                records.Add((pf, a, d));
-            }
-            catch
-            {
-                // Skip unreadable or unsupported images.
-            }
-        }
-
-        var groups = new List<DuplicateGroup>();
-        var used = new bool[records.Count];
-        for (int i = 0; i < records.Count; i++)
-        {
-            if (used[i]) continue;
-            var grp = new DuplicateGroup { Id = groups.Count + 1 };
-            grp.Members.Add(records[i].file);
-            used[i] = true;
-
-            for (int j = i + 1; j < records.Count; j++)
-            {
-                if (used[j]) continue;
-                int da = AppServices.HashService.HammingDistance(records[i].a, records[j].a);
-                int dd = AppServices.HashService.HammingDistance(records[i].d, records[j].d);
-                if (da <= aHashThreshold || dd <= dHashThreshold)
-                {
-                    grp.Members.Add(records[j].file);
-                    used[j] = true;
-                }
-            }
-
-            if (grp.Members.Count > 1) groups.Add(grp);
-        }
-
-        return groups;
-    }
-
-    public async Task<int> RenameAsync(IReadOnlyList<RenameItem> items, CancellationToken ct = default)
-    {
-        int done = 0;
-        await Task.Run(() =>
-        {
-            foreach (var item in items)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (File.Exists(item.SourcePath) && !File.Exists(item.DestinationPath))
-                {
-                    File.Move(item.SourcePath, item.DestinationPath);
-                    done++;
-                }
-            }
-        }, ct).ConfigureAwait(false);
-
-        return done;
-    }
-
     /// <summary>读取照片 EXIF 拍摄时间（DateTimeOriginal），失败或无 EXIF 时返回 null。</summary>
     public DateTime? GetDateTaken(string filePath)
     {
         try
         {
             var directories = ImageMetadataReader.ReadMetadata(filePath);
-            var subIfd = directories.OfType<ExifSubIfdDirectory>().FirstOrDefault();
-            var raw = subIfd?.GetDescription(ExifDirectoryBase.DateTimeOriginal);
-            if (!string.IsNullOrWhiteSpace(raw) &&
-                DateTime.TryParse(raw, out var parsed))
+            // EXIF 标签 ID：0x9003=DateTimeOriginal, 0x9004=DateTimeDigitized, 0x0132=DateTime(file change)
+            foreach (var tag in new[] { 0x9003, 0x9004, 0x0132 })
             {
-                return parsed;
+                foreach (var dir in directories)
+                {
+                    var raw = dir.GetDescription(tag);
+                    if (!string.IsNullOrWhiteSpace(raw) && DateTime.TryParse(raw, out var parsed))
+                    {
+                        return parsed;
+                    }
+                }
             }
         }
         catch

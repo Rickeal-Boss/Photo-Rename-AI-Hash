@@ -45,7 +45,8 @@ public sealed class HashService : IHashService
 
     public async Task<string> ComputeMd5Async(Stream data, CancellationToken ct = default)
     {
-        var hash = await MD5.HashDataAsync(data, ct).ConfigureAwait(false);
+        using var md5 = MD5.Create();
+        var hash = await Task.Run(() => md5.ComputeHash(data), ct).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
