@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="1.0.0.18" />
+            Version="1.0.0.19" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>
@@ -38,9 +38,9 @@
                          Square71x71Logo="Assets\SmallTile.png"
                          DefaultSize="square150x150Logo">
           <uap:ShowNameOnTiles>
-            <uap:ShowOn Tile="Square150x150Logo" />
-            <uap:ShowOn Tile="Wide310x150Logo" />
-            <uap:ShowOn Tile="Square310x310Logo" />
+            <uap:ShowOn Tile="square150x150Logo" />
+            <uap:ShowOn Tile="wide310x150Logo" />
+            <uap:ShowOn Tile="square310x310Logo" />
           </uap:ShowNameOnTiles>
         </uap:DefaultTile>
         <uap:SplashScreen Image="Assets\Splash.png" />
