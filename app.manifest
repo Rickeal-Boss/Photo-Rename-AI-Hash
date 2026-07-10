@@ -10,7 +10,8 @@
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <!-- 注意：dpiAwareness（PerMonitorV2）必须用 2016 命名空间，2005 命名空间下 OS 不识别此元素 -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
       <longPathAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>

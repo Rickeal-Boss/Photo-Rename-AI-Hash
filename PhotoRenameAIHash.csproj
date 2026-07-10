@@ -12,6 +12,9 @@
     <WindowsPackageType>MSIX</WindowsPackageType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 关键：把含 dpiAwareness(PerMonitorV2) 的 Win32 清单嵌入 .exe。
+         否则进程 DPI 感知会落到 Unaware，OS 在 125%+ 缩放下位图拉伸整窗 → 文字发虚。 -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- 单项目 MSIX 打包：EnableMsixTooling + GenerateAppxPackageOnBuild=true 才会产出并签名 .msix -->
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <NoWarn>$(NoWarn);NU1701;CS1591</NoWarn>

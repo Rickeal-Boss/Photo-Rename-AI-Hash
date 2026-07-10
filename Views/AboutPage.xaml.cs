@@ -1,7 +1,6 @@
-using System;
-using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using PhotoRenameAIHash.Helpers;
 using PhotoRenameAIHash.ViewModels;
 
 namespace PhotoRenameAIHash.Views;
@@ -18,6 +17,10 @@ public sealed partial class AboutPage : Page
         DependencyProperty.Register(nameof(DpiAwarenessText), typeof(string), typeof(AboutPage),
             new PropertyMetadata("检测中…"));
 
+    public static readonly DependencyProperty DpiForceTextProperty =
+        DependencyProperty.Register(nameof(DpiForceText), typeof(string), typeof(AboutPage),
+            new PropertyMetadata("—"));
+
     public string DpiScaleText
     {
         get => (string)GetValue(DpiScaleTextProperty);
@@ -28,6 +31,12 @@ public sealed partial class AboutPage : Page
     {
         get => (string)GetValue(DpiAwarenessTextProperty);
         set => SetValue(DpiAwarenessTextProperty, value);
+    }
+
+    public string DpiForceText
+    {
+        get => (string)GetValue(DpiForceTextProperty);
+        set => SetValue(DpiForceTextProperty, value);
     }
 
     public AboutPage()
@@ -61,47 +70,7 @@ public sealed partial class AboutPage : Page
         }
 
         // 直读进程 DPI 感知模式，确认是否为 Per-Monitor v2（发虚排查根因 #1）。
-        DpiAwarenessText = DpiAwarenessHelper.GetAwarenessText();
-    }
-
-    /// <summary>
-    /// 通过 user32 P/Invoke 读取当前线程的 DPI 感知模式。
-    /// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4。
-    /// </summary>
-    private static class DpiAwarenessHelper
-    {
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetThreadDpiAwarenessContext();
-
-        [DllImport("user32.dll")]
-        private static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
-
-        private static readonly IntPtr PerMonitorV2 = new(-4);
-
-        public static string GetAwarenessText()
-        {
-            try
-            {
-                IntPtr ctx = GetThreadDpiAwarenessContext();
-                int awareness = GetAwarenessFromDpiAwarenessContext(ctx);
-                string baseName = awareness switch
-                {
-                    0 => "Unaware",
-                    1 => "System-Aware",
-                    2 => "Per-Monitor",
-                    _ => $"Unknown({awareness})",
-                };
-                bool isV2 = AreDpiAwarenessContextsEqual(ctx, PerMonitorV2);
-                return isV2 ? $"Per-Monitor v2（{baseName}）" : baseName;
-            }
-            catch (Exception ex)
-            {
-                return $"N/A（{ex.GetType().Name}）";
-            }
-        }
+        DpiAwarenessText = DpiHelper.GetAwarenessText();
+        DpiForceText = DpiHelper.GetForceResultText();
     }
 }

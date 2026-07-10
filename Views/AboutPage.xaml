@@ -23,6 +23,9 @@
                     <TextBlock TextWrapping="Wrap">
                         <Run Text="DPI 感知模式：" /><Run Text="{x:Bind DpiAwarenessText, Mode=OneWay}" FontWeight="SemiBold" />
                     </TextBlock>
+                    <TextBlock TextWrapping="Wrap">
+                        <Run Text="启动期强制 PMv2：" /><Run Text="{x:Bind DpiForceText, Mode=OneWay}" FontWeight="SemiBold" />
+                    </TextBlock>
                     <TextBlock TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                FontSize="12">
