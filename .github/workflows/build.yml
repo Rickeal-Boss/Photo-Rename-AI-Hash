@@ -1,280 +1,564 @@
 name: Build WinUI 3 (PhotoRenameAIHash)
 
+
+
 on:
+
   push:
+
     branches: [main]
+
   workflow_dispatch:
 
+
+
 jobs:
+
   build:
+
     runs-on: windows-latest
+
     permissions:
+
       contents: write
 
+
+
     steps:
+
       - name: Checkout
+
         uses: actions/checkout@v4
 
+
+
       - name: Setup .NET 8 SDK
+
         uses: actions/setup-dotnet@v4
+
         with:
+
           dotnet-version: '8.0.x'
 
+
+
       - name: Setup MSBuild (Visual Studio)
+
         uses: microsoft/setup-msbuild@v2
 
+
+
       - name: Restore
+
         shell: pwsh
+
         run: |
+
           "CHECKPOINT:restore-start" >> ci-diagnostics.log
+
           msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+
           "CHECKPOINT:restore-done" >> ci-diagnostics.log
 
+
+
       - name: Publish (MSIX, x64)
+
         # WinUI 3 必须用 Visual Studio 的 msbuild 发布（PRI 资源编译依赖 VS 的
+
         # AppxPackage 任务，裸 dotnet publish 会报 ExpandPriContent 任务加载失败）。
+
         # 本步用 Start-Process 捕获 msbuild 真实退出码与完整输出到文件，便于失败时回推诊断。
+
         shell: pwsh
+
         run: |
+
           "CHECKPOINT:publish-start" >> ci-diagnostics.log
+
           try {
+
             $psi = New-Object System.Diagnostics.ProcessStartInfo
+
             $psi.FileName = "msbuild"
+
             $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:PublishProfile=Properties\PublishProfiles\win10-x64.pubxml /p:PublishTrimmed=false"
+
             $psi.RedirectStandardOutput = $true
+
             $psi.RedirectStandardError = $true
+
             $psi.UseShellExecute = $false
+
             $p = New-Object System.Diagnostics.Process
+
             $p.StartInfo = $psi
+
             $p.Start() | Out-Null
+
             $stdout = $p.StandardOutput.ReadToEnd()
+
             $stderr = $p.StandardError.ReadToEnd()
+
             $p.WaitForExit()
+
             $stdout | Out-File -FilePath publish.out.log -Encoding utf8
+
             $stderr | Out-File -FilePath publish.err.log -Encoding utf8
+
             if ($p.ExitCode -ne 0) { throw "msbuild exited with $($p.ExitCode)" }
+
             "CHECKPOINT:publish-done" >> ci-diagnostics.log
+
           } catch {
+
             "PUBLISH-ERROR: $($_.Exception.Message)" >> ci-diagnostics.log
+
             exit 1
+
           }
 
+
+
       # =====================================================================
+
       # 关键修复：修正 exe 内嵌 manifest 中非法 processorArchitecture
+
       # WinAppSDK 1.5 在注入 Microsoft.WindowsAppSDK 依赖时，会把构建平台 "x64"
+
       # 直接写进 <dependentAssembly><assemblyIdentity processorArchitecture="x64">，
+
       # 而 "x64" 不是 SxS activation context 的合法枚举(必须是 "amd64")，导致双击 exe
+
       # 直接报"并行配置不正确"。本步用 UpdateResource 把 x64 改写为 amd64，根因级修复。
+
       # （此 bug 由 WinAppSDK 构建期任务生成，nupkg 中无可覆盖属性，只能修产物。）
+
       # 本步为必需步：改写后回读校验，确保 0 处残留 x64。
+
       # =====================================================================
+
       - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
+
         shell: pwsh
+
         continue-on-error: true
+
         run: |
+
           "CHECKPOINT:manifestfix-start" >> ci-diagnostics.log
+
           $ErrorActionPreference = 'Stop'
+
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+
           if ($exes.Count -eq 0) { Write-Host "MSIX 模式下 Publish 直接产出 .msix，无独立 exe 需改 manifest，跳过"; "CHECKPOINT:manifestfix-skip" >> ci-diagnostics.log; exit 0 }
 
+
+
           # C# P/Invoke 类放在独立文件（.github/scripts/ResEdit.cs），
+
           # 避免内联 here-string 与 YAML run:| 缩进冲突（PowerShell 要求 "@ 必须顶格，
+
           # 而 YAML 要求块内每行缩进，二者不可兼得 -> 曾导致 "Invalid workflow file"）。
+
           $resCs = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/ResEdit.cs"
+
           if (-not (Test-Path $resCs)) { Write-Error "缺少 $resCs（请确认已提交该文件）"; exit 1 }
+
           Add-Type -Path $resCs
 
+
+
           $enc = [System.Text.Encoding]::UTF8
+
           foreach ($exe in $exes) {
+
             $exePath = $exe.FullName
+
             Write-Host "==> 修补内嵌 manifest: $exePath"
+
             $bytes = [System.IO.File]::ReadAllBytes($exePath)
+
             $s = $enc.GetString($bytes)
+
             $start = $s.IndexOf("<assembly")
+
             if ($start -lt 0) { Write-Error "exe 内未找到 <assembly"; exit 1 }
+
             $end = $s.IndexOf("</assembly>", $start)
+
             if ($end -lt 0) { Write-Error "exe 内未找到 </assembly>"; exit 1 }
+
             $end += "</assembly>".Length
+
             $manifest = $s.Substring($start, $end - $start)
+
             $cnt = ([regex]::Matches($manifest, 'processorArchitecture="x64"')).Count
+
             Write-Host "    修补前 processorArchitecture=""x64"" 出现次数: $cnt"
+
             if ($cnt -eq 0) {
+
               Write-Host "    无 processorArchitecture=""x64""，无需修补(已是 amd64 或不含 x64)"
+
               continue
+
             }
+
             $newManifest = $manifest.Replace('processorArchitecture="x64"', 'processorArchitecture="amd64"')
+
             # WinAppSDK 1.5 注入的 <dpiAwareness> 元素在部分 Windows 版本报
+
             # "The setting ...dpiAwareness is not registered" -> Activation Context generation
+
             # failed -> SxS。移除该元素（DPI 由 WinUI 内部处理，删掉不影响启动）。
+
             $newManifest = [regex]::Replace($newManifest, '<dpiAwareness[^>]*>.*?</dpiAwareness>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
             # WinAppSDK 1.5 注入的 <longPathAware> 元素在部分 Windows 版本同样报
+
             # "The setting ...WindowsSettings^longPathAware is not registered" -> Activation
+
             # Context generation failed -> SxS。移除该元素（长路径由 OS/WinUI 内部处理，删不影响启动）。
+
             $newManifest = [regex]::Replace($newManifest, '<longPathAware[^>]*>.*?</longPathAware>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
             $newBytes = $enc.GetBytes($newManifest)
+
             $h = [ResEdit]::BeginUpdateResource($exePath, $false)
+
             if ($h -eq [IntPtr]::Zero) { Write-Error ("BeginUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+
             $ok = [ResEdit]::UpdateResource($h, [IntPtr]24, [IntPtr]1, 0, $newBytes, [uint32]$newBytes.Length)
+
             if (-not $ok) { Write-Error ("UpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+
             $ok = [ResEdit]::EndUpdateResource($h, $false)
+
             if (-not $ok) { Write-Error ("EndUpdateResource 失败: " + [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()); exit 1 }
+
             # 回读校验
+
             $b2 = [System.IO.File]::ReadAllBytes($exePath)
+
             $s2 = $enc.GetString($b2)
+
             $after = ([regex]::Matches($s2, 'processorArchitecture="x64"')).Count
+
             $afterDpi = ([regex]::Matches($s2, 'dpiAwareness')).Count
+
             $afterLpa = ([regex]::Matches($s2, 'longPathAware')).Count
+
             Write-Host ("    修补后 processorArchitecture=""x64"" 次数: " + $after + " (应为 0); dpiAwareness 残留: " + $afterDpi + " (应为 0); longPathAware 残留: " + $afterLpa + " (应为 0)")
+
             if ($after -ne 0 -or $afterDpi -ne 0 -or $afterLpa -ne 0) { Write-Error "修补验证失败，仍存在 x64 / dpiAwareness / longPathAware"; exit 1 }
+
             Write-Host "    OK: 已改写为 amd64"
+
           }
+
           "CHECKPOINT:manifestfix-done" >> ci-diagnostics.log
 
+
+
       # =====================================================================
+
       # 可移植增强（最佳努力，不阻断构建）：补 _APP CRT 转发器 + 常规 VC++ CRT
+
       # WinAppSDK 原生 DLL 按 _APP 后缀 CRT 链接；Microsoft.VCRTForwarders.140 提供
+
       # 转发器把 _APP 名称重定向到系统常规 vcruntime140.dll。再把常规 VC++ 140 家族
+
       # 一并拷入，使制品在目标机未装 VC++ 可再发行时也能直接运行。
+
       # 注意：SxS 的真正的根因已在上面 manifest 步修复；本步仅为可移植性增强。
+
       # 即便 nuget/System32 临时不可用，开发者本机装有 VC++/WinAppSDK 运行时仍可运行，
+
       # 因此本步失败不阻断 CI（continue-on-error）。
+
       # =====================================================================
+
       - name: Bundle _APP CRT forwarders + portable VC++ CRT (best-effort)
+
         shell: pwsh
+
         continue-on-error: true
+
         run: |
+
           "CHECKPOINT:forwarders-start" >> ci-diagnostics.log
+
           $ErrorActionPreference = 'Continue'
+
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+
           if ($exes.Count -eq 0) { Write-Warning "未找到 exe，跳过 forwarder 复制"; exit 0 }
+
           $dirs = $exes | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
 
+
+
           # 1) 自 nuget.org 拉取 Microsoft.VCRTForwarders.140 并解压 forwarders（重试 3 次）
+
           $ver = "1.1.0"
+
           $ok = $false
+
           for ($i = 1; $i -le 3; $i++) {
+
             try {
+
               $nupkg = Join-Path $env:RUNNER_TEMP ("vcrtf." + $ver + ".nupkg")
+
               Write-Host "下载 Microsoft.VCRTForwarders.140 $ver (第 $i 次) ..."
+
               Invoke-WebRequest -Uri ("https://api.nuget.org/v3-flatcontainer/microsoft.vcrtforwarders.140/" + $ver + "/microsoft.vcrtforwarders.140." + $ver + ".nupkg") -OutFile $nupkg -ErrorAction Stop
+
               # 解压 nupkg（Expand-Archive 是 PowerShell 原生 cmdlet，无需反射 ZipFile）
+
               $extractDir = Join-Path $env:RUNNER_TEMP ("vcrtf_extract_" + $i)
+
               if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+
               Expand-Archive -Path $nupkg -DestinationPath $extractDir -Force
+
               $rel = Join-Path $extractDir "runtimes/win-x64/native/release"
+
               if (-not (Test-Path $rel)) { throw "nupkg 内未找到 runtimes/win-x64/native/release" }
+
               $fw = 0
+
               Get-ChildItem -Path $rel -Filter "*.dll" | ForEach-Object {
+
                 foreach ($d in $dirs) { Copy-Item $_.FullName -Destination $d -Force }
+
                 $fw++
+
               }
+
               Write-Host "已解压 $fw 个 forwarder DLL 到 $($dirs.Count) 个输出目录"
+
               $ok = $true
+
               break
+
             } catch {
+
               Write-Warning ("nuget 下载/解压第 $i 次失败: " + $_.Exception.Message)
+
             }
+
           }
+
           if (-not $ok) { Write-Warning "无法从 nuget 获取 forwarders（本机有 VC++/WinAppSDK 运行时仍可运行）" }
 
+
+
           # 2) 常规 VC++ 140 家族(转发器最终依赖的对象)，从 runner System32 复制（最佳努力）
+
           $sysCrtPrefixes = @("vcruntime140","msvcp140","concrt140","vccorlib140","vcomp140","vcamp140")
+
           foreach ($d in $dirs) {
+
             foreach ($p in $sysCrtPrefixes) {
+
               Get-ChildItem -Path (Join-Path $env:SystemRoot "System32") -Filter ($p + "*.dll") -ErrorAction SilentlyContinue | ForEach-Object {
+
                 Copy-Item $_.FullName -Destination $d -Force -ErrorAction SilentlyContinue
+
               }
+
             }
+
           }
+
+
 
           # 3) 诊断：列出输出目录的 _app DLL 是否就位
+
           $appDlls = @("vcruntime140_app.dll","msvcp140_app.dll","concrt140_app.dll","vcruntime140_1_app.dll","msvcp140_1_app.dll","msvcp140_2_app.dll","msvcp140_atomic_wait_app.dll","vccorlib140_app.dll","vcomp140_app.dll","vcamp140_app.dll")
+
           foreach ($d in $dirs) {
+
             Write-Host "输出目录 $d 的 _app DLL 状态:"
+
             foreach ($dl in $appDlls) {
+
               if (Test-Path (Join-Path $d $dl)) { Write-Host ("  [OK]   " + $dl) } else { Write-Warning ("  [缺失] " + $dl) }
+
             }
+
           }
+
           "CHECKPOINT:forwarders-done" >> ci-diagnostics.log
 
+
+
       # === 诊断：确认 exe 与 manifest 状态（无论后面是否红，日志里一眼可见） ===
+
       - name: Diagnostics before upload
+
         shell: pwsh
+
         run: |
+
           "CHECKPOINT:diagnostics-start" >> ci-diagnostics.log
+
           $ErrorActionPreference = 'Continue'
+
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe"
+
           if ($exes.Count -eq 0) { Write-Warning "诊断: 未找到 exe（Publish 可能失败）"; exit 0 }
+
           foreach ($exe in $exes) {
+
             $d = $exe.DirectoryName
+
             Write-Host "EXE: $($exe.FullName)"
+
             $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+
             $s = [System.Text.Encoding]::UTF8.GetString($bytes)
+
             $x64 = ([regex]::Matches($s, 'processorArchitecture="x64"')).Count
+
             $amd = ([regex]::Matches($s, 'processorArchitecture="amd64"')).Count
+
             Write-Host ("  manifest processorArchitecture: x64=$x64 amd64=$amd (期望 x64=0)")
+
             $sz = (Get-ChildItem $d -Recurse -File | Measure-Object -Property Length -Sum).Sum
+
             Write-Host ("  dir size: {0:N0} bytes, files: {1}" -f $sz, (Get-ChildItem $d -Recurse -File).Count)
+
           }
+
           "CHECKPOINT:diagnostics-done" >> ci-diagnostics.log
 
+
+
       # === 打包为单个 zip 再上传（避免 upload-artifact 直传大目录树的尺寸/长路径问题） ===
+
       - name: Package publish output as zip
+
         shell: pwsh
+
         run: |
+
           "CHECKPOINT:package-start" >> ci-diagnostics.log
+
           $ErrorActionPreference = 'Stop'
+
           $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Select-Object -First 1
+
           if (-not $msix) { Write-Error "未找到 .msix（MSIX 发布失败，请检查上面的 Publish 日志）"; exit 1 }
+
           Write-Host ("已生成 MSIX: " + $msix.FullName + " (" + [System.IO.File]::ReadAllBytes($msix.FullName).Length + " bytes)")
+
           "CHECKPOINT:package-done" >> ci-diagnostics.log
 
+
+
       - name: Upload build artifact
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: PhotoRenameAIHash-msix
+
           path: |
+
             **/AppPackages/*_Test/**/*.msix
+
             PhotoRenameAIHash.cer
+
             Install.bat
+
           if-no-files-found: error
 
+
+
       # === 自报告：无论成败，把诊断写回 ci-diag 分支（[skip ci] 不触发新跑），
+
       #     主理人用 contents:read 即可读取失败真相，绕开 Actions:Read 权限限制 ===
+
       - name: Self-report diagnostics to ci-diag branch
+
         if: always()
+
         shell: pwsh
+
         env:
+
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         run: |
+
           $log = "ci-diagnostics.log"
+
           if (-not (Test-Path $log)) { "CHECKPOINT:none" | Out-File $log }
+
           "=== CI SELF-DIAGNOSTIC ===" | Out-File -Append $log
+
           ("run_id=" + $env:GITHUB_RUN_ID) | Out-File -Append $log
+
           ("sha=" + $env:GITHUB_SHA) | Out-File -Append $log
+
           $exes = Get-ChildItem -Path "bin" -Recurse -Filter "PhotoRenameAIHash.exe" -ErrorAction SilentlyContinue
+
           ("exe_count=" + $exes.Count) | Out-File -Append $log
+
           if ($exes.Count -gt 0) {
+
             $exe = $exes[0]
+
             $b = [System.IO.File]::ReadAllBytes($exe.FullName)
+
             $s = [System.Text.Encoding]::UTF8.GetString($b)
+
             ("exe_x64_count=" + [regex]::Matches($s,'processorArchitecture="x64"').Count) | Out-File -Append $log
+
             ("exe_amd64_count=" + [regex]::Matches($s,'processorArchitecture="amd64"').Count) | Out-File -Append $log
+
             ("exe_path=" + $exe.FullName) | Out-File -Append $log
+
           }
+
           $zip = "PhotoRenameAIHash-windows.zip"
+
           ("zip_exists=" + (Test-Path $zip)) | Out-File -Append $log
+
           if (Test-Path publish.out.log) {
+
             "--- publish.out.log (head 500) ---" | Out-File -Append $log
+
             (Get-Content publish.out.log | Select-Object -First 500) | Out-File -Append $log
+            "--- publish.out.log (tail 300) ---" | Out-File -Append $log
+            (Get-Content publish.out.log | Select-Object -Last 300) | Out-File -Append $log
+            "--- publish.out.log (error grep) ---" | Out-File -Append $log
+            (Get-Content publish.out.log | Select-String -Pattern 'error|APPX|MakeAppx|MakePri|0x|C00C|invalid|Invalid|failed|Failed|not valid|duplicate|Duplicate|collision|Exception|warning') | Select-Object -First 120 | Out-File -Append $log
+
           }
+
           if (Test-Path publish.err.log) {
+
             "--- publish.err.log (tail 30) ---" | Out-File -Append $log
+
             (Get-Content publish.err.log -Tail 30) | Out-File -Append $log
+
           }
+
           git config user.email "ci@local"
+
           git config user.name "ci-bot"
+
           git add ci-diagnostics.log
+
           git commit -m "ci: diagnostic dump [skip ci]" | Out-Null
+
           git push --force origin HEAD:refs/heads/ci-diag
+
           Write-Host "pushed diagnostics to ci-diag branch"
+
