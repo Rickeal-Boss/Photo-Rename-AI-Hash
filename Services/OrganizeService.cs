@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Models;
+using Windows.Storage;
 
 namespace PhotoRenameAIHash.Services;
 
@@ -311,24 +312,22 @@ public sealed class OrganizeService : IOrganizeService
     }
 
     /// <summary>
-    /// 重命名模式实际执行前的保险：把原文件复制一份到备份文件夹（同名冲突自动加 _1/_2）。
-    /// 备份失败（如目标不可写、磁盘满）直接抛异常，由 <see cref="RunAsync"/> 的逐文件 try/catch
-    /// 标记为「错误」且不执行 rename，避免在未成功备份的情况下丢失原文件。
+    /// 重命名模式实际执行前的保险：把原文件复制一份到备份文件夹。
+    /// 采用 MSIX 容器下唯一可靠的写法——通过 FolderPicker 选择路径取得的 StorageFolder/StorageFile
+    /// （携带 Broker 令牌）做 CopyAsync，忽略同名冲突（自动加序号），保证无论是否声明
+    /// broadFileSystemAccess 都能真正落盘到用户选择的备份文件夹；备份失败直接抛异常，
+    /// 由 <see cref="RunAsync"/> 的逐文件 try/catch 标记为「错误」且不执行 rename，避免丢失原文件。
     /// </summary>
-    private static Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
+    private static async Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        Directory.CreateDirectory(backupDir);
-        string name = Path.GetFileName(source);
-        string dest = Path.Combine(backupDir, name);
-        int i = 1;
-        while (File.Exists(dest))
-        {
-            dest = Path.Combine(backupDir, $"{Path.GetFileNameWithoutExtension(name)}_{i}{Path.GetExtension(name)}");
-            if (++i > 9999) break;
-        }
-        File.Copy(source, dest, false);
-        return Task.CompletedTask;
+
+        var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir);
+        var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source);
+        await srcFile.CopyAsync(
+            backupFolder,
+            Path.GetFileName(source),
+            Windows.Storage.NameCollisionOption.GenerateUniqueName);
     }
 
     /// <summary>

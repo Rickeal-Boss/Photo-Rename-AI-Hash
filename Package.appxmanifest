@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="1.0.0.11" />
+            Version="1.0.0.12" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>
@@ -41,5 +41,7 @@
     <rescap:Capability Name="runFullTrust" />
     <!-- AI 视觉识别需要访问智谱 / 通义等 HTTPS 接口 -->
     <rescap:Capability Name="internetClient" />
+    <!-- 文件整理/备份需要读写用户通过 FolderPicker 选择的任意文件夹（System.IO 在 MSIX 容器内依赖此能力） -->
+    <rescap:Capability Name="broadFileSystemAccess" />
   </Capabilities>
 </Package>

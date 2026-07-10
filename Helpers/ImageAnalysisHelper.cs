@@ -46,8 +46,9 @@ public static class ImageAnalysisHelper
 
     /// <summary>
     /// 调用视觉识别接口。失败时抛异常（而非静默返回 null），调用方据此提示具体原因。
-    /// 遇 HTTP 429（限流）或 5xx（服务端错误）时按 <see cref="BackoffAsync"/> 自动等待重试；
-    /// 重试期间不返回任何结果，因此调用方不会据此产出 <c>unknown_</c> 重命名；限流解除后继续。
+    /// 遇 HTTP 429（限流）或 5xx（服务端错误）时按固定 15 秒间隔自动重试，最多 15 次尝试
+    /// （首试 + 至多 14 次重试），忽略 429 的 Retry-After 头；重试期间不返回任何结果，
+    /// 因此调用方不会据此产出 <c>unknown_</c> 重命名；限流解除后继续。
     /// 4xx（非 429）为客户端永久错误，不重试、直接抛异常。
     /// </summary>
     /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试耗尽）。</exception>
@@ -81,13 +82,16 @@ public static class ImageAnalysisHelper
             max_tokens = 400,
         };
 
-        const int maxRetries = 5;
-        int attempt = 0;
-        while (true)
+        // 429 限流 / 5xx 服务端错误：最多 15 次尝试（首试 + 至多 14 次重试），
+        // 每次重试前固定等待 15 秒（忽略 429 的 Retry-After 头）；重试期间不返回任何结果，
+        // 因此调用方不会据此产出 unknown_ 重命名；限流解除后继续。
+        const int maxAttempts = 15;
+        int attempt = 1;
+        while (attempt <= maxAttempts)
         {
             ct.ThrowIfCancellationRequested();
 
-            // HttpRequestMessage 单次使用，每次重试都必须重新构造
+            // HttpRequestMessage 单次使用，每次尝试都必须重新构造
             using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
@@ -100,14 +104,14 @@ public static class ImageAnalysisHelper
             catch (Exception ex)
             {
                 // 网络/连通性异常：视为瞬时抖动可重试，耗尽后抛明确异常
-                if (attempt < maxRetries)
+                if (attempt < maxAttempts)
                 {
+                    await BackoffAsync(ct).ConfigureAwait(false);
                     attempt++;
-                    await BackoffAsync(attempt, null, ct).ConfigureAwait(false);
                     continue;
                 }
                 throw new InvalidOperationException(
-                    $"调用视觉识别接口失败（网络/连通性，重试 {maxRetries} 次后仍失败）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
+                    $"调用视觉识别接口失败（网络/连通性，已尝试 {maxAttempts} 次仍失败）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
             }
 
             using (resp)
@@ -115,18 +119,18 @@ public static class ImageAnalysisHelper
                 var respText = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                 int code = (int)resp.StatusCode;
 
-                // 429 限流 / 5xx 服务端错误：等待后重试，期间不做任何重命名
+                // 429 限流 / 5xx 服务端错误：固定等待 15 秒后重试，期间不做任何重命名
                 if (code == 429 || code >= 500)
                 {
-                    if (attempt < maxRetries)
+                    if (attempt < maxAttempts)
                     {
+                        await BackoffAsync(ct).ConfigureAwait(false);
                         attempt++;
-                        await BackoffAsync(attempt, resp, ct).ConfigureAwait(false);
                         continue;
                     }
                     var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
                     throw new HttpRequestException(
-                        $"视觉识别接口限流/错误（{code} {resp.StatusCode}），重试 {maxRetries} 次后仍失败：{snippet}");
+                        $"视觉识别接口限流/错误（{code} {resp.StatusCode}），已尝试 {maxAttempts} 次仍失败：{snippet}");
                 }
 
                 if (!resp.IsSuccessStatusCode)
@@ -139,32 +143,17 @@ public static class ImageAnalysisHelper
                 return respText;
             }
         }
+
+        // 兜底：循环内已保证在第 maxAttempts 次失败后抛出，此处仅满足编译器「所有路径均有返回值」要求
+        throw new InvalidOperationException($"视觉识别接口调用超出最大尝试次数（{maxAttempts}）。");
     }
 
     /// <summary>
-    /// 计算下一次重试前的等待时长：优先采用 429 响应头 <c>Retry-After</c>（相对秒数或绝对时间）；
-    /// 无该头时按 2^attempt 指数退避。结果钳制在 1–120 秒，并尊重 <paramref name="ct"/> 以便用户取消。
+    /// 重试前的固定等待：15 秒（按需求固定间隔，忽略 429 的 Retry-After 头），并尊重 <paramref name="ct"/> 以便用户取消。
     /// </summary>
-    private static async Task BackoffAsync(int attempt, HttpResponseMessage? resp, CancellationToken ct)
+    private static async Task BackoffAsync(CancellationToken ct)
     {
-        int seconds;
-        var ra = resp?.Headers.RetryAfter;
-        if (ra != null)
-        {
-            if (ra.Delta.HasValue)
-                seconds = (int)Math.Ceiling(ra.Delta.Value.TotalSeconds);
-            else if (ra.Date.HasValue)
-                seconds = Math.Max(0, (int)Math.Ceiling((ra.Date.Value - DateTimeOffset.UtcNow).TotalSeconds));
-            else
-                seconds = (int)Math.Pow(2, attempt);
-        }
-        else
-        {
-            seconds = (int)Math.Pow(2, attempt);
-        }
-
-        seconds = Math.Clamp(seconds, 1, 120);
-        await Task.Delay(TimeSpan.FromSeconds(seconds), ct).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
     }
 
     /// <summary>
