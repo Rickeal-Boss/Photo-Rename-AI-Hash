@@ -55,7 +55,6 @@ public sealed class OrganizeService : IOrganizeService
         IImageAnalysisService? ai = CreateAi(req);
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
-        int scanCount = files.Count;
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过「已按目标格式命名完成」的文件，
         // 避免重复处理（例如已正确命名的 game_古建筑竞技场_..._screenshot.png）。
