@@ -14,4 +14,13 @@ public interface IHashService
 
     /// <summary>Similarity in [0,1]; 1 means identical.</summary>
     double Similarity(ulong a, ulong b);
+
+    /// <summary>Best-effort perceptual hash; returns null if the file is unreadable/unsupported.</summary>
+    Task<ulong?> TryComputeAHashAsync(string filePath, int size = 8, CancellationToken ct = default);
+
+    /// <summary>Best-effort perceptual hash; returns null if the file is unreadable/unsupported.</summary>
+    Task<ulong?> TryComputeDHashAsync(string filePath, int size = 8, CancellationToken ct = default);
+
+    /// <summary>Best-effort MD5; returns null if the file is unreadable/unsupported.</summary>
+    Task<string?> TryComputeMd5Async(string filePath, CancellationToken ct = default);
 }

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,4 +17,7 @@ public interface IPhotoService
         CancellationToken ct = default);
 
     Task<int> RenameAsync(IReadOnlyList<RenameItem> items, CancellationToken ct = default);
+
+    /// <summary>读取 EXIF 拍摄时间；不可用时返回 null。</summary>
+    DateTime? GetDateTaken(string filePath);
 }

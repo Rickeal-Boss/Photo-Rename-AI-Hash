@@ -16,12 +16,12 @@ public sealed class PhotoService : IPhotoService
 
     public async Task<IReadOnlyList<PhotoFile>> ScanAsync(string folder, CancellationToken ct = default)
     {
-        if (!Directory.Exists(folder)) return Array.Empty<PhotoFile>();
+        if (!System.IO.Directory.Exists(folder)) return Array.Empty<PhotoFile>();
 
         var result = new List<PhotoFile>();
         await Task.Run(() =>
         {
-            foreach (var path in Directory.EnumerateFiles(folder))
+            foreach (var path in System.IO.Directory.EnumerateFiles(folder))
             {
                 ct.ThrowIfCancellationRequested();
                 var ext = Path.GetExtension(path).ToLowerInvariant();
