@@ -54,6 +54,7 @@ public partial class SettingsViewModel : ObservableObject
         {
             _model.AiProvider = (AiProvider)value;
             OnPropertyChanged(nameof(IsCustomProvider));
+            OnPropertyChanged(nameof(CustomProviderVisibility));
         }
     }
 
