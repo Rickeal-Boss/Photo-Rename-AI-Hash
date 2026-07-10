@@ -21,6 +21,17 @@ public sealed class OrganizeService : IOrganizeService
     private readonly IHashService _hash = AppServices.HashService;
     private readonly RenameLogService _log = AppServices.RenameLogService;
 
+    private PauseTokenSource? _pts;
+
+    /// <summary>当前是否处于暂停状态（供 UI 显示「继续」）。</summary>
+    public bool IsPaused => _pts?.IsPaused ?? false;
+
+    /// <summary>协作式暂停：挂起处理循环，保留已扫描的工作队列与状态，可随时继续（区别于 Cancel 的硬取消）。</summary>
+    public void Pause() => _pts?.Pause();
+
+    /// <summary>继续被暂停的处理循环。</summary>
+    public void Resume() => _pts?.Resume();
+
     public async Task<OrganizeReport> RunAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
@@ -44,24 +55,41 @@ public sealed class OrganizeService : IOrganizeService
         IImageAnalysisService? ai = CreateAi(req);
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
+        int scanCount = files.Count;
+
+        // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过「已按目标格式命名完成」的文件，
+        // 避免重复处理（例如已正确命名的 game_古建筑竞技场_..._screenshot.png）。
+        var completed = await _log.LoadRenameLogAsync(output).ConfigureAwait(false);
 
         // 工作队列：文件处理失败（如视觉模型偶发未按 JSON 返回、网络抖动、瞬时限流等）不直接跳过，
         // 而是重新入队到队尾稍后再次尝试，最大化「成功重命名」的比例；达到单文件最大尝试次数仍失败才放弃。
         var queue = new Queue<(PhotoFile File, int Index)>();
         int order = 0;
+        int skippedAtStart = 0;
         foreach (var f in files)
         {
             order++;
+            string curName = f.Name; // 当前文件名（含扩展名）
+            // 续传跳过：当前文件名已是某条成功记录的目标名，或该源路径此前已成功处理。
+            if (completed.DoneByName.Contains(curName) || completed.DoneBySource.Contains(f.Path))
+            {
+                skippedAtStart++;
+                report.Skipped++;
+                progress.Report(new OrganizeProgress { LogLine = $"{curName} 跳过(日志已完成)" });
+                continue;
+            }
             queue.Enqueue((f, order));
         }
 
         var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
-        int done = 0;
+        int done = skippedAtStart; // 已跳过的也算进度推进
 
+        _pts = new PauseTokenSource();
         while (queue.Count > 0)
         {
             ct.ThrowIfCancellationRequested();
+            await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停：挂起直到继续或取消
             var (f, index) = queue.Dequeue();
             try
             {
@@ -112,9 +140,10 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         if (req.EnableDedup) await _log.SaveDedupLibraryAsync().ConfigureAwait(false);
+        _pts = null;
         progress.Report(new OrganizeProgress
         {
-            Message = $"完成：处理 {report.Processed}，跳过 {report.Skipped}，失败 {report.Failed}。",
+            Message = $"完成：处理 {report.Processed}，跳过 {report.Skipped}（含续传跳过 {skippedAtStart}），失败 {report.Failed}。",
         });
         return report;
     }
@@ -140,10 +169,23 @@ public sealed class OrganizeService : IOrganizeService
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
+        // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
+        var completed = await _log.LoadRenameLogAsync(req.OutputFolder).ConfigureAwait(false);
+        _pts = new PauseTokenSource();
+
         int done = 0;
         foreach (var f in files)
         {
             ct.ThrowIfCancellationRequested();
+            await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
+            // 续传跳过：当前文件名已是某条成功记录的目标名，或该源路径此前已成功处理。
+            if (completed.DoneByName.Contains(f.Name) || completed.DoneBySource.Contains(f.Path))
+            {
+                report.Skipped++;
+                done++;
+                progress.Report(new OrganizeProgress { LogLine = $"{f.Name} 跳过(日志已完成)" });
+                continue;
+            }
             try
             {
                 string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
@@ -208,6 +250,7 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         if (req.EnableDedup) await _log.SaveDedupLibraryAsync().ConfigureAwait(false);
+        _pts = null;
         progress.Report(new OrganizeProgress
         {
             Message = $"归档完成：处理 {report.Processed}，跳过 {report.Skipped}，失败 {report.Failed}。",
@@ -480,5 +523,69 @@ public sealed class OrganizeService : IOrganizeService
             AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey),
             _ => null,
         };
+    }
+}
+
+/// <summary>
+/// 协作式暂停令牌源：调用 <see cref="Pause"/> 后，等待该令牌的异步操作会挂起，直到
+/// <see cref="Resume"/>（或传入的 <see cref="CancellationToken"/> 触发取消）才继续。
+/// 与 <see cref="CancellationToken"/> 的「硬取消」区分：暂停不丢弃已扫描的工作队列与状态，可随时继续。
+/// </summary>
+internal sealed class PauseTokenSource
+{
+    private readonly object _gate = new();
+
+    private TaskCompletionSource<bool>? _waiter;
+
+    private bool _paused;
+
+    public bool IsPaused
+    {
+        get { lock (_gate) return _paused; }
+    }
+
+    public void Pause()
+    {
+        lock (_gate)
+        {
+            if (_paused) return;
+            _paused = true;
+            _waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    public void Resume()
+    {
+        TaskCompletionSource<bool>? waiter;
+        lock (_gate)
+        {
+            if (!_paused) return;
+            _paused = false;
+            waiter = _waiter;
+            _waiter = null;
+        }
+
+        waiter?.TrySetResult(true);
+    }
+
+    public Task WaitWhilePausedAsync(CancellationToken ct)
+    {
+        TaskCompletionSource<bool>? waiter;
+        lock (_gate)
+        {
+            if (!_paused) return Task.CompletedTask;
+            waiter = _waiter;
+        }
+
+        if (waiter == null) return Task.CompletedTask;
+        if (ct.IsCancellationRequested)
+        {
+            waiter.TrySetResult(true);
+            return Task.CompletedTask;
+        }
+
+        // 取消时放行，使循环顶部的 ThrowIfCancellationRequested 能抛出，避免暂停态下取消死锁。
+        ct.Register(() => waiter.TrySetResult(true));
+        return waiter.Task;
     }
 }

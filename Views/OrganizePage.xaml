@@ -123,6 +123,9 @@
                         <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}" />
                         <Button Content="取消" Command="{x:Bind ViewModel.CancelCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                        <Button Content="{x:Bind ViewModel.PauseButtonText, Mode=OneWay}"
+                                Command="{x:Bind ViewModel.PauseToggleCommand}"
+                                IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                     </StackPanel>
                 </StackPanel>
             </Border>

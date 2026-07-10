@@ -61,6 +61,10 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private bool _isBusy;
 
+    [ObservableProperty] private bool _isPaused;
+
+    [ObservableProperty] private string _pauseButtonText = "暂停";
+
     [ObservableProperty] private int _progress;
 
     [ObservableProperty] private string _statusText = "选择文件夹后点击「开始整理」。";
@@ -131,6 +135,8 @@ public partial class OrganizeViewModel : ObservableObject
         {
             IsBusy = false;
             _cts = null;
+            IsPaused = false;
+            PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
         }
     }
@@ -180,6 +186,8 @@ public partial class OrganizeViewModel : ObservableObject
         {
             IsBusy = false;
             _cts = null;
+            IsPaused = false;
+            PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
         }
     }
@@ -194,6 +202,28 @@ public partial class OrganizeViewModel : ObservableObject
 
     [RelayCommand]
     private void Cancel() => _cts?.Cancel();
+
+    [RelayCommand]
+    private void PauseToggle()
+    {
+        if (!IsBusy) return;
+        if (IsPaused)
+        {
+            AppServices.OrganizeService.Resume();
+            IsPaused = false;
+            PauseButtonText = "暂停";
+            StatusText = "继续处理…";
+            AppendLog("已继续。");
+        }
+        else
+        {
+            AppServices.OrganizeService.Pause();
+            IsPaused = true;
+            PauseButtonText = "继续";
+            StatusText = "已暂停，点击「继续」恢复处理。";
+            AppendLog("已暂停。");
+        }
+    }
 
     private OrganizeRequest BuildRequest()
     {
