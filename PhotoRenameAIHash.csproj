@@ -24,7 +24,6 @@
       （此路线参考已验证可用的 Screen Translator AI 自包含安装器实现。）
     -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
@@ -38,4 +37,14 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
   </ItemGroup>
 
+  <!-- Packaged self-contained: strip the WindowsAppRuntime FrameworkSdkReference so the
+       MSIX uses ONLY the bundled self-contained runtime. Without this, a dangling
+       framework-package reference remains and the WindowsAppSDK bootstrap asserts
+       (0xc000027b) at startup. Required for packaged (MSIX) self-contained per
+       Microsoft docs + WindowsAppSDK-Samples (cs2/cs-winui-packaged). -->
+  <Target Name="_RemoveFrameworkReferences" BeforeTargets="_ConvertItems;_CalculateInputsForGenerateCurrentProjectAppxManifest">
+    <ItemGroup>
+      <FrameworkSdkReference Remove="@(FrameworkSdkReference)" Condition="$([System.String]::Copy('%(FrameworkSdkReference.SDKName)').StartsWith('Microsoft.WindowsAppRuntime.'))" />
+    </ItemGroup>
+  </Target>
 </Project>
