@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MetadataExtractor;
+using MetadataExtractor.Formats.Exif;
 using PhotoRenameAIHash.Models;
 
 namespace PhotoRenameAIHash.Services;
@@ -110,5 +112,27 @@ public sealed class PhotoService : IPhotoService
         }, ct).ConfigureAwait(false);
 
         return done;
+    }
+
+    /// <summary>读取照片 EXIF 拍摄时间（DateTimeOriginal），失败或无 EXIF 时返回 null。</summary>
+    public DateTime? GetDateTaken(string filePath)
+    {
+        try
+        {
+            var directories = ImageMetadataReader.ReadMetadata(filePath);
+            var subIfd = directories.OfType<ExifSubIfdDirectory>().FirstOrDefault();
+            var raw = subIfd?.GetDescription(ExifDirectoryBase.DateTimeOriginal);
+            if (!string.IsNullOrWhiteSpace(raw) &&
+                DateTime.TryParse(raw, out var parsed))
+            {
+                return parsed;
+            }
+        }
+        catch
+        {
+            // 不支持的格式或损坏的文件：忽略
+        }
+
+        return null;
     }
 }

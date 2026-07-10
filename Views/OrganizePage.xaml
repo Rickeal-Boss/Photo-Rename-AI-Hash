@@ -9,35 +9,170 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Padding="24" RowDefinitions="Auto,Auto,*,Auto">
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12">
-            <Button Content="选择文件夹" Click="PickFolder_Click" />
-            <TextBox Width="320" PlaceholderText="文件夹路径"
-                     Text="{x:Bind ViewModel.FolderPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button Content="扫描" Command="{x:Bind ViewModel.ScanCommand}" />
-        </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16" MaxWidth="960">
+            <TextBlock Text="整理" Style="{StaticResource PageTitleStyle}" />
 
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12" Margin="0,12,0,0">
-            <TextBlock Text="命名规则:" VerticalAlignment="Center" />
-            <TextBox Width="260" Text="{x:Bind ViewModel.Pattern, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button Content="执行重命名" Command="{x:Bind ViewModel.RenameCommand}" />
-        </StackPanel>
-
-        <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.Preview, Mode=OneWay}" Margin="0,12,0,0">
-            <ListView.ItemTemplate>
-                <DataTemplate x:DataType="m:PhotoFile">
-                    <Grid ColumnDefinitions="*,Auto" Padding="4">
-                        <TextBlock Grid.Column="0" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Grid.Column="1" Text="{x:Bind NewName}"
-                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                   Margin="16,0,0,0" />
+            <!-- 路径设置 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="路径设置" Style="{StaticResource CardTitleStyle}" />
+                    <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto">
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="源文件夹" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{x:Bind ViewModel.SourceFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="选择要整理的源文件夹" />
+                        <Button Grid.Row="0" Grid.Column="2" Content="浏览" Click="PickSource_Click" Margin="8,0,0,0" />
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="输出文件夹" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{x:Bind ViewModel.OutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="整理后输出位置（重命名模式可留空）" />
+                        <Button Grid.Row="1" Grid.Column="2" Content="浏览" Click="PickOutput_Click" Margin="8,0,0,0" />
                     </Grid>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
+                </StackPanel>
+            </Border>
 
-        <TextBlock Grid.Row="3" Margin="0,12,0,0"
-                   Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-    </Grid>
+            <!-- 识别引擎 / 命名规则 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="识别引擎 / 命名规则" Style="{StaticResource CardTitleStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <TextBlock Text="识别引擎" VerticalAlignment="Center" />
+                        <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="200">
+                            <ComboBoxItem Content="无（按日期/序号命名）" />
+                            <ComboBoxItem Content="智谱 GLM-4V" />
+                            <ComboBoxItem Content="通义千问 Qwen-VL" />
+                        </ComboBox>
+                        <TextBlock Text="API 密钥在「设置」中填写" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="命名规则" />
+                        <TextBox Text="{x:Bind ViewModel.NamingTemplate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Text="可用占位符：{yyyy}{MM}{dd}{HH}{mm}{ss}{date}{n}{name}  |  AI：{category}{scene}{people}{action}{subtitle}{source}"
+                                   TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 操作模式 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="操作模式" Style="{StaticResource CardTitleStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="24">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="模式" VerticalAlignment="Center" />
+                            <ComboBox SelectedIndex="{x:Bind ViewModel.OperationModeIndex, Mode=TwoWay}" Width="160">
+                                <ComboBoxItem Content="复制 (copy)" />
+                                <ComboBoxItem Content="移动 (move)" />
+                                <ComboBoxItem Content="重命名 (rename)" />
+                            </ComboBox>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="冲突处理" VerticalAlignment="Center" />
+                            <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictIndex, Mode=TwoWay}" Width="200">
+                                <ComboBoxItem Content="自动重命名(加 _1/_2)" />
+                                <ComboBoxItem Content="跳过" />
+                                <ComboBoxItem Content="覆盖" />
+                            </ComboBox>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <ToggleSwitch OffContent="模拟运行" OnContent="实际执行"
+                                          IsOn="{x:Bind ViewModel.DryRun, Mode=TwoWay}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <TextBlock Text="「模拟运行」开启时不改动任何文件，仅预览结果。"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+
+            <!-- 感知哈希去重 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="感知哈希去重" Style="{StaticResource CardTitleStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <ToggleSwitch OffContent="关闭" OnContent="启用去重"
+                                      IsOn="{x:Bind ViewModel.EnableDedup, Mode=TwoWay}" />
+                        <Button Content="清空去重库" Command="{x:Bind ViewModel.ClearDedupCommand}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="24">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="aHash 阈值" VerticalAlignment="Center" />
+                            <Slider Minimum="0" Maximum="20" Width="180"
+                                    Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="dHash 阈值" VerticalAlignment="Center" />
+                            <Slider Minimum="0" Maximum="20" Width="180"
+                                    Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 执行控制 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="执行控制" Style="{StaticResource CardTitleStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Content="开始整理" Command="{x:Bind ViewModel.StartOrganizeCommand}"
+                                Style="{ThemeResource AccentButtonStyle}" />
+                        <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}" />
+                        <Button Content="取消" Command="{x:Bind ViewModel.CancelCommand}"
+                                IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 进度 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="进度" Style="{StaticResource CardTitleStyle}" />
+                    <ProgressBar Value="{x:Bind ViewModel.Progress, Mode=OneWay}"
+                                 IsIndeterminate="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
+                             IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                             FontFamily="Consolas" Height="140" VerticalScrollBarVisibility="Auto" />
+                </StackPanel>
+            </Border>
+
+            <!-- 处理结果 -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="处理结果" Style="{StaticResource CardTitleStyle}" />
+                    <Grid ColumnDefinitions="2*,2*,Auto,Auto" Padding="0,0,0,4">
+                        <TextBlock Grid.Column="0" Text="原文件名" FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="1" Text="新文件名" FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="2" Text="状态" FontWeight="SemiBold" Margin="12,0,0,0" />
+                        <TextBlock Grid.Column="3" Text="MD5" FontWeight="SemiBold" Margin="12,0,0,0" />
+                    </Grid>
+                    <ListView ItemsSource="{x:Bind ViewModel.Results, Mode=OneWay}"
+                              MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0,4" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="m:RenameLogEntry">
+                                <Grid ColumnDefinitions="2*,2*,Auto,Auto">
+                                    <TextBlock Grid.Column="0" Text="{x:Bind OriginalName}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind NewName}"
+                                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{x:Bind Status}" Margin="12,0,0,0"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="3" Text="{x:Bind Md5}" Margin="12,0,0,0"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
 </Page>

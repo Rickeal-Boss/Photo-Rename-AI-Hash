@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Helpers;
@@ -30,6 +31,7 @@ public sealed class HashService : IHashService
             x &= x - 1;
             count++;
         }
+
         return count;
     }
 
@@ -37,6 +39,52 @@ public sealed class HashService : IHashService
     {
         const int bits = 8 * 8; // 64-bit hashes
         return 1.0 - (double)HammingDistance(a, b) / bits;
+    }
+
+    // ---- MD5（用于冲突检测与去重库） ----
+
+    public async Task<string> ComputeMd5Async(Stream data, CancellationToken ct = default)
+    {
+        var hash = await MD5.HashDataAsync(data, ct).ConfigureAwait(false);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    // ---- 基于文件路径的便捷重载 ----
+
+    public Task<ulong> ComputeAHashAsync(string filePath, int size = 8, CancellationToken ct = default)
+    {
+        using var s = File.OpenRead(filePath);
+        return ComputeAHashAsync(s, size, ct);
+    }
+
+    public Task<ulong> ComputeDHashAsync(string filePath, int size = 8, CancellationToken ct = default)
+    {
+        using var s = File.OpenRead(filePath);
+        return ComputeDHashAsync(s, size, ct);
+    }
+
+    public async Task<string> ComputeMd5Async(string filePath, CancellationToken ct = default)
+    {
+        using var s = File.OpenRead(filePath);
+        return await ComputeMd5Async(s, ct).ConfigureAwait(false);
+    }
+
+    public async Task<ulong?> TryComputeAHashAsync(string filePath, int size = 8, CancellationToken ct = default)
+    {
+        try { return await ComputeAHashAsync(filePath, size, ct).ConfigureAwait(false); }
+        catch { return null; }
+    }
+
+    public async Task<ulong?> TryComputeDHashAsync(string filePath, int size = 8, CancellationToken ct = default)
+    {
+        try { return await ComputeDHashAsync(filePath, size, ct).ConfigureAwait(false); }
+        catch { return null; }
+    }
+
+    public async Task<string?> TryComputeMd5Async(string filePath, CancellationToken ct = default)
+    {
+        try { return await ComputeMd5Async(filePath, ct).ConfigureAwait(false); }
+        catch { return null; }
     }
 
     private static ulong AHashFromGray(byte[] gray, int size)
@@ -50,6 +98,7 @@ public sealed class HashService : IHashService
         {
             if (gray[i] >= mean) hash |= 1UL << i;
         }
+
         return hash;
     }
 
@@ -67,6 +116,7 @@ public sealed class HashService : IHashService
                 bit++;
             }
         }
+
         return hash;
     }
 }

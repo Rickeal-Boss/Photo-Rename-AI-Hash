@@ -39,5 +39,7 @@
   <Capabilities>
     <!-- WinUI 3 桌面应用是 Win32 全信任模型，必须声明 runFullTrust -->
     <rescap:Capability Name="runFullTrust" />
+    <!-- AI 视觉识别需要访问智谱 / 通义等 HTTPS 接口 -->
+    <rescap:Capability Name="internetClient" />
   </Capabilities>
 </Package>

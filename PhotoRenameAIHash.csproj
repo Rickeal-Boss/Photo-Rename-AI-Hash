@@ -35,6 +35,7 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
     <PackageReference Include="Microsoft.VCRTForwarders.140" Version="1.1.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+    <PackageReference Include="MetadataExtractor" Version="2.9.3" />
   </ItemGroup>
 
   <!-- Packaged self-contained: strip the WindowsAppRuntime FrameworkSdkReference so the

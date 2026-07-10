@@ -20,6 +20,9 @@ public partial class SettingsViewModel : ObservableObject
         AHashThreshold = _model.AHashThreshold;
         DHashThreshold = _model.DHashThreshold;
         Language = _model.Language;
+        AiProviderIndex = (int)_model.AiProvider;
+        ZhipuApiKey = _model.ZhipuApiKey;
+        QwenApiKey = _model.QwenApiKey;
     }
 
     /// <summary>Maps AppTheme -> RadioButtons index (0=Light, 1=Dark, 2=System).</summary>
@@ -39,6 +42,13 @@ public partial class SettingsViewModel : ObservableObject
         };
     }
 
+    /// <summary>Maps AiProvider -> ComboBox index (0=None, 1=Zhipu, 2=Qwen).</summary>
+    public int AiProviderIndex
+    {
+        get => (int)_model.AiProvider;
+        set => _model.AiProvider = (AiProvider)value;
+    }
+
     [ObservableProperty]
     private AppTheme _theme;
 
@@ -53,6 +63,12 @@ public partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     private string _language = "";
+
+    [ObservableProperty]
+    private string _zhipuApiKey = "";
+
+    [ObservableProperty]
+    private string _qwenApiKey = "";
 
     [ObservableProperty]
     private string _statusText = "";
@@ -72,6 +88,8 @@ public partial class SettingsViewModel : ObservableObject
         _model.AHashThreshold = AHashThreshold;
         _model.DHashThreshold = DHashThreshold;
         _model.Language = Language;
+        _model.ZhipuApiKey = ZhipuApiKey;
+        _model.QwenApiKey = QwenApiKey;
 
         await _settings.SaveAsync(_model);
         StatusText = "设置已保存。";

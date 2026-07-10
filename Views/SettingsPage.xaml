@@ -8,30 +8,62 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Padding="24" Spacing="16" MaxWidth="560">
-        <TextBlock Text="设置" Style="{StaticResource PageTitleStyle}" />
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16" MaxWidth="560">
+            <TextBlock Text="设置" Style="{StaticResource PageTitleStyle}" />
 
-        <TextBlock Text="主题" FontWeight="SemiBold" />
-        <RadioButtons SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
-            <RadioButton Content="浅色" />
-            <RadioButton Content="深色" />
-            <RadioButton Content="跟随系统" />
-        </RadioButtons>
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="外观" Style="{StaticResource CardTitleStyle}" />
+                    <TextBlock Text="主题" FontWeight="SemiBold" />
+                    <RadioButtons SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
+                        <RadioButton Content="浅色" />
+                        <RadioButton Content="深色" />
+                        <RadioButton Content="跟随系统" />
+                    </RadioButtons>
+                    <TextBlock Text="语言" FontWeight="SemiBold" />
+                    <TextBox Text="{x:Bind ViewModel.Language, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+            </Border>
 
-        <TextBlock Text="默认文件夹" FontWeight="SemiBold" />
-        <TextBox Text="{x:Bind ViewModel.DefaultFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="默认文件夹" Style="{StaticResource CardTitleStyle}" />
+                    <TextBox Text="{x:Bind ViewModel.DefaultFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+            </Border>
 
-        <TextBlock Text="aHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
-        <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="感知哈希去重" Style="{StaticResource CardTitleStyle}" />
+                    <TextBlock Text="aHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
+                    <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
+                    <TextBlock Text="dHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
+                    <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
+                </StackPanel>
+            </Border>
 
-        <TextBlock Text="dHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
-        <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="AI 视觉识别" Style="{StaticResource CardTitleStyle}" />
+                    <TextBlock Text="识别引擎" FontWeight="SemiBold" />
+                    <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="240">
+                        <ComboBoxItem Content="无（按日期/序号命名）" />
+                        <ComboBoxItem Content="智谱 GLM-4V" />
+                        <ComboBoxItem Content="通义千问 Qwen-VL" />
+                    </ComboBox>
+                    <TextBlock Text="智谱 API Key" FontWeight="SemiBold" />
+                    <PasswordBox Password="{x:Bind ViewModel.ZhipuApiKey, Mode=TwoWay}" />
+                    <TextBlock Text="通义千问 API Key (DashScope)" FontWeight="SemiBold" />
+                    <PasswordBox Password="{x:Bind ViewModel.QwenApiKey, Mode=TwoWay}" />
+                    <TextBlock Text="密钥保存在本机设置文件中（明文），仅用于本地调用。"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
 
-        <TextBlock Text="语言" FontWeight="SemiBold" />
-        <TextBox Text="{x:Bind ViewModel.Language, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-        <Button Content="保存设置" Command="{x:Bind ViewModel.SaveCommand}" />
-        <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-    </StackPanel>
+            <Button Content="保存设置" Command="{x:Bind ViewModel.SaveCommand}" />
+            <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+    </ScrollViewer>
 </Page>

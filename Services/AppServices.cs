@@ -11,4 +11,8 @@ public static class AppServices
     public static IPhotoService PhotoService { get; } = new PhotoService();
 
     public static ISettingsService SettingsService { get; } = new SettingsService();
+
+    public static RenameLogService RenameLogService { get; } = new RenameLogService();
+
+    public static IOrganizeService OrganizeService { get; } = new OrganizeService();
 }
