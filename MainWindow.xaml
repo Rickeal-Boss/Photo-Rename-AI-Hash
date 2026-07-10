@@ -12,8 +12,7 @@
         <NavigationView x:Name="NavView"
                         SelectionChanged="NavView_SelectionChanged"
                         Header="{x:Bind ViewModel.AppTitle, Mode=OneWay}"
-                        IsBackButtonVisible="Collapsed"
-                        PaneBackground="{ThemeResource SolidBackgroundFillColorSecondaryBrush}">
+                        IsBackButtonVisible="Collapsed">
             <NavigationView.MenuItems>
                 <NavigationViewItem Content="整理" Tag="Organize" Icon="Pictures" IsSelected="True" />
                 <NavigationViewItem Content="去重" Tag="Deduplicate" Icon="Map" />
