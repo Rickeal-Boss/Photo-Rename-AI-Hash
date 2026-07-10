@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="1.0.0.16" />
+            Version="1.0.0.17" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>
@@ -32,6 +32,7 @@
           BackgroundColor="transparent"
           Square150x150Logo="Assets\Square150x150Logo.png"
           Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:LockScreen BadgeLogo="Assets\BadgeLogo.png" Notification="badge" />
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
                          Square310x310Logo="Assets\LargeTile.png"
                          Square71x71Logo="Assets\SmallTile.png"
@@ -44,7 +45,6 @@
         </uap:DefaultTile>
         <uap:SplashScreen Image="Assets\Splash.png" />
       </uap:VisualElements>
-      <uap:LockScreen BadgeLogo="Assets\BadgeLogo.png" Notification="badge" />
     </Application>
   </Applications>
   <Capabilities>
