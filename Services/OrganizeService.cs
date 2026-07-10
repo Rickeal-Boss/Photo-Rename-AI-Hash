@@ -404,13 +404,24 @@ public sealed class OrganizeService : IOrganizeService
     private static IImageAnalysisService? CreateAi(OrganizeRequest req)
     {
         if (req.AiProvider == AiProvider.None) return null;
-        if (string.IsNullOrWhiteSpace(req.AiApiKey)) return null;
+
+        if (string.IsNullOrWhiteSpace(req.AiApiKey))
+            throw new InvalidOperationException(
+                $"已选择识别引擎「{req.AiProvider}」但未配置 API Key。请打开「设置」填写对应 Key 后再开始整理。");
+
+        if (req.AiProvider == AiProvider.Custom)
+        {
+            if (string.IsNullOrWhiteSpace(req.CustomApiUrl))
+                throw new InvalidOperationException("自定义引擎未配置端点 URL：请打开「设置」填写自定义 API 端点。");
+            if (string.IsNullOrWhiteSpace(req.CustomApiModel))
+                throw new InvalidOperationException("自定义引擎未配置模型名：请打开「设置」填写自定义模型名。");
+            return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey);
+        }
 
         return req.AiProvider switch
         {
             AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey),
             AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey),
-            AiProvider.Custom => new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey),
             _ => null,
         };
     }

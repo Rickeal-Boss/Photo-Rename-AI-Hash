@@ -44,10 +44,20 @@ public static class ImageAnalysisHelper
                "Example: {\"category\":\"pet\",\"scene\":\"living room\",\"people\":\"none\",\"action\":\"sleeping\",\"subtitle\":\"none\",\"source\":\"phone\"}";
     }
 
-    public static async Task<string?> CallVisionApiAsync(
+    /// <summary>
+    /// 调用视觉识别接口。失败时抛异常（而非静默返回 null），调用方据此提示具体原因。
+    /// </summary>
+    /// <exception cref="InvalidOperationException">端点/模型/密钥为空或网络异常。</exception>
+    /// <exception cref="HttpRequestException">接口返回非成功状态码（携带状态码与响应体片段）。</exception>
+    public static async Task<string> CallVisionApiAsync(
         string endpoint, string model, string apiKey, string prompt, string dataUrl, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(apiKey)) return null;
+        if (string.IsNullOrWhiteSpace(endpoint))
+            throw new InvalidOperationException("视觉识别端点 URL 未配置（自定义引擎请在「设置」中填写端点）。");
+        if (string.IsNullOrWhiteSpace(model))
+            throw new InvalidOperationException("视觉识别模型名未配置（自定义引擎请在「设置」中填写模型名）。");
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("API Key 未配置：请在「设置」中填写所选识别引擎的 Key 后再开始整理。");
 
         var body = new
         {
@@ -72,15 +82,59 @@ public static class ImageAnalysisHelper
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
+        HttpResponseMessage resp;
         try
         {
-            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode) return null;
-            return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            throw new InvalidOperationException(
+                $"调用视觉识别接口失败（网络/连通性）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
+        }
+
+        var respText = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
+            throw new HttpRequestException(
+                $"视觉识别接口返回 {(int)resp.StatusCode} {resp.StatusCode}：{snippet}");
+        }
+
+        return respText;
+    }
+
+    /// <summary>
+    /// 从 OpenAI 兼容响应体中抽取 message content。
+    /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因。
+    /// </summary>
+    public static string ExtractContent(string raw)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("error", out var err))
+            {
+                var msg = err.ValueKind == JsonValueKind.String
+                    ? err.GetString()
+                    : (err.TryGetProperty("message", out var m) ? m.GetString() : null);
+                throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? err.GetRawText()));
+            }
+
+            return root
+                .GetProperty("choices")[0]
+                .GetProperty("message")
+                .GetProperty("content")
+                .GetString() ?? "";
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("解析视觉识别响应失败：" + ex.Message, ex);
         }
     }
 

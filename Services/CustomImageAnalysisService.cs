@@ -29,27 +29,16 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
     public async Task<ImageAnalysisResult?> AnalyzeAsync(string imagePath, string language, CancellationToken ct = default)
     {
         var dataUrl = await ImageAnalysisHelper.EncodeAsJpegDataUrlAsync(imagePath, 1024, ct).ConfigureAwait(false);
-        if (dataUrl == null) return null;
+        if (dataUrl == null)
+            throw new InvalidOperationException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
 
+        // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
             ImageAnalysisHelper.BuildPrompt(language), dataUrl, ct).ConfigureAwait(false);
-        if (raw == null) return null;
 
-        string? content = null;
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            content = doc.RootElement
-                .GetProperty("choices")[0]
-                .GetProperty("message")
-                .GetProperty("content")
-                .GetString();
-        }
-        catch
-        {
-            return null;
-        }
-
-        return ImageAnalysisHelper.Parse(content);
+        var content = ImageAnalysisHelper.ExtractContent(raw);
+        var result = ImageAnalysisHelper.Parse(content);
+        return result ?? throw new InvalidOperationException(
+            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}");
     }
 }
