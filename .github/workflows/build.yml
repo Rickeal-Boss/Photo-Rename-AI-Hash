@@ -488,6 +488,8 @@ jobs:
 
       - name: Upload build artifact
 
+        continue-on-error: true
+
         uses: actions/upload-artifact@v4
 
         with:
@@ -496,7 +498,7 @@ jobs:
 
           path: |
 
-            **/AppPackages/*_Test/**/*.msix
+            **/AppPackages/**/*.msix
 
             PhotoRenameAIHash.cer
 
