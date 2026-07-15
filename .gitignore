@@ -13,3 +13,7 @@ obj/
 # Local settings cache
 PhotoRenameAIHash/bin/
 PhotoRenameAIHash/obj/
+
+# 代码签名私钥：含私钥的 .pfx 严禁入库（已泄露需轮换证书）。
+# 仅公开证书 .cer 可入库；.pfx 通过本地未跟踪文件或 CI Secret 提供。
+*.pfx

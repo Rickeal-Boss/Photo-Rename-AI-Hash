@@ -121,6 +121,53 @@ public sealed class PhotoService : IPhotoService
         return groups;
     }
 
+    /// <summary>
+    /// 精确哈希去重：以文件内容 MD5 为键聚合，找出"内容逐字节完全相同"的图片。
+    /// 仅用于展示详细路径，不参与任何文件处理（删除/移动）。
+    /// </summary>
+    public async Task<IReadOnlyList<DuplicateGroup>> FindExactDuplicatesAsync(
+        IEnumerable<PhotoFile> files,
+        CancellationToken ct = default)
+    {
+        var list = files.ToList();
+        var byHash = new Dictionary<string, DuplicateGroup>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var pf in list)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var md5 = await AppServices.HashService.ComputeMd5Async(pf.Path, ct).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(md5)) continue;
+
+                if (!byHash.TryGetValue(md5, out var grp))
+                {
+                    grp = new DuplicateGroup { Hash = md5, KeepIndex = 0 };
+                    byHash[md5] = grp;
+                }
+
+                grp.Members.Add(pf);
+            }
+            catch
+            {
+                // Skip unreadable or locked files.
+            }
+        }
+
+        var groups = new List<DuplicateGroup>();
+        int id = 1;
+        foreach (var g in byHash.Values)
+        {
+            if (g.Members.Count > 1)
+            {
+                g.Id = id++;
+                groups.Add(g);
+            }
+        }
+
+        return groups;
+    }
+
     public async Task<int> RenameAsync(IReadOnlyList<RenameItem> items, CancellationToken ct = default)
     {
         int done = 0;

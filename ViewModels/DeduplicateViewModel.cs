@@ -31,6 +31,23 @@ public partial class DeduplicateViewModel : ObservableObject
     [ObservableProperty]
     private bool _isBusy;
 
+    /// <summary>
+    /// true = 精确哈希模式：仅按内容 MD5 找出"完全相同"的图片并展示详细路径，
+    /// 不参与任何文件处理（不删除）。false = 感知哈希(相似)模式（原行为）。
+    /// </summary>
+    [ObservableProperty]
+    private bool _exactHashMode;
+
+    /// <summary>精确哈希模式下删除按钮不可用（仅展示）。</summary>
+    [ObservableProperty]
+    private bool _canDelete = true;
+
+    partial void OnExactHashModeChanged(bool value)
+    {
+        CanDelete = !value;
+        DeleteSelectedCommand.NotifyCanExecuteChanged();
+    }
+
     [RelayCommand]
     private async Task ScanAsync()
     {
@@ -41,19 +58,31 @@ public partial class DeduplicateViewModel : ObservableObject
         }
 
         IsBusy = true;
-        StatusText = "正在计算感知哈希…";
+        StatusText = ExactHashMode ? "正在计算内容 MD5…" : "正在计算感知哈希…";
         try
         {
             var files = await _photoService.ScanAsync(FolderPath, CancellationToken.None);
-            var found = await _photoService.FindDuplicatesAsync(
-                files, AHashThreshold, DHashThreshold, CancellationToken.None);
 
             Groups.Clear();
-            foreach (var g in found) Groups.Add(g);
+            if (ExactHashMode)
+            {
+                var found = await _photoService.FindExactDuplicatesAsync(files, CancellationToken.None);
+                foreach (var g in found) Groups.Add(g);
 
-            StatusText = found.Count == 0
-                ? "未找到相似图片组。"
-                : $"找到 {found.Count} 组相似图片（保留每组首个，其余可删除）。";
+                StatusText = found.Count == 0
+                    ? "未找到内容完全相同的图片。"
+                    : $"找到 {found.Count} 组内容完全相同的图片（仅展示详细路径，不删除）。";
+            }
+            else
+            {
+                var found = await _photoService.FindDuplicatesAsync(
+                    files, AHashThreshold, DHashThreshold, CancellationToken.None);
+                foreach (var g in found) Groups.Add(g);
+
+                StatusText = found.Count == 0
+                    ? "未找到相似图片组。"
+                    : $"找到 {found.Count} 组相似图片（保留每组首个，其余可删除）。";
+            }
         }
         finally
         {
@@ -61,9 +90,11 @@ public partial class DeduplicateViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanDelete))]
     private void DeleteSelected()
     {
+        if (ExactHashMode) return; // 仅展示模式：不参与文件处理
+
         int removed = 0;
         foreach (var g in Groups)
         {

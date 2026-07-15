@@ -19,26 +19,42 @@
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="20" Margin="0,12,0,0">
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="8"
+                        IsEnabled="{x:Bind ViewModel.CanDelete, Mode=OneWay}">
                 <TextBlock Text="aHash 阈值:" VerticalAlignment="Center" />
                 <Slider Width="160" Minimum="0" Maximum="20" Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
             </StackPanel>
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="8"
+                        IsEnabled="{x:Bind ViewModel.CanDelete, Mode=OneWay}">
                 <TextBlock Text="dHash 阈值:" VerticalAlignment="Center" />
                 <Slider Width="160" Minimum="0" Maximum="20" Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
             </StackPanel>
-            <Button Content="删除非保留项" Command="{x:Bind ViewModel.DeleteSelectedCommand}" />
+            <CheckBox Content="精确哈希（完全相同，仅展示路径）"
+                      IsChecked="{x:Bind ViewModel.ExactHashMode, Mode=TwoWay}"
+                      VerticalAlignment="Center" />
+            <Button Content="删除非保留项"
+                    Command="{x:Bind ViewModel.DeleteSelectedCommand}"
+                    IsEnabled="{x:Bind ViewModel.CanDelete, Mode=OneWay}" />
         </StackPanel>
 
         <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}" Margin="0,12,0,0">
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="m:DuplicateGroup">
                     <StackPanel Padding="6" Spacing="4">
-                        <TextBlock Text="{x:Bind Id}" FontWeight="SemiBold" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <TextBlock Text="{x:Bind Id}" FontWeight="SemiBold" />
+                            <TextBlock Text="{x:Bind Hash}"
+                                       FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       IsTextSelectionEnabled="True" />
+                        </StackPanel>
                         <ItemsControl ItemsSource="{x:Bind Members, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="m:PhotoFile">
-                                    <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Path}"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTipService.ToolTip="{x:Bind Path}"
+                                               IsTextSelectionEnabled="True" />
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
