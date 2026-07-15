@@ -6,7 +6,7 @@ on:
 
   push:
 
-    branches: [main]
+    branches: [main, Hy]
 
   workflow_dispatch:
 
@@ -56,11 +56,25 @@ jobs:
 
           "CHECKPOINT:restore-start" >> ci-diagnostics.log
 
-          msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+          msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64 /p:AppxPackageSigningEnabled=false
 
           "CHECKPOINT:restore-done" >> ci-diagnostics.log
 
 
+
+      - name: Restore signing certificate (if secret provided)
+
+        if: ${{ secrets.SIGNING_PFX_B64 != '' }}
+
+        shell: pwsh
+
+        env:
+
+          PFX_B64: ${{ secrets.SIGNING_PFX_B64 }}
+
+        run: |
+          [System.IO.File]::WriteAllBytes("PhotoRenameAIHash.pfx", [System.Convert]::FromBase64String($env:PFX_B64))
+          Write-Host "signing pfx restored from secret"
 
       - name: Publish (MSIX, x64)
 
@@ -69,12 +83,22 @@ jobs:
         # AppxPackage 任务，裸 dotnet publish 会报 ExpandPriContent 任务加载失败）。
 
         # 本步用 Start-Process 捕获 msbuild 真实退出码与完整输出到文件，便于失败时回推诊断。
+        # 签名策略：配置了 SIGNING_PFX_B64 秘钥则启用签名（含空密码）；否则关闭签名以通过构建。
 
         shell: pwsh
+
+        env:
+
+          SIGNING_PFX_B64: ${{ secrets.SIGNING_PFX_B64 }}
+
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
 
         run: |
 
           "CHECKPOINT:publish-start" >> ci-diagnostics.log
+
+          $sign = if ($env:SIGNING_PFX_B64) { "/p:AppxPackageSigningEnabled=true /p:PackageCertificatePassword=$env:PFX_PASSWORD" } else { "/p:AppxPackageSigningEnabled=false" }
+          Write-Host "signing args: $sign"
 
           try {
 
@@ -82,7 +106,7 @@ jobs:
 
             $psi.FileName = "msbuild"
 
-            $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:PublishProfile=Properties\PublishProfiles\win10-x64.pubxml /p:PublishTrimmed=false"
+            $psi.Arguments = "PhotoRenameAIHash.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:PublishProfile=Properties\PublishProfiles\win10-x64.pubxml /p:PublishTrimmed=false $sign"
 
             $psi.RedirectStandardOutput = $true
 
