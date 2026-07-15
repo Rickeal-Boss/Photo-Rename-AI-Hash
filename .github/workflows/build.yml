@@ -64,8 +64,6 @@ jobs:
 
       - name: Restore signing certificate (if secret provided)
 
-        if: ${{ secrets.SIGNING_PFX_B64 != '' }}
-
         shell: pwsh
 
         env:
@@ -73,8 +71,12 @@ jobs:
           PFX_B64: ${{ secrets.SIGNING_PFX_B64 }}
 
         run: |
-          [System.IO.File]::WriteAllBytes("PhotoRenameAIHash.pfx", [System.Convert]::FromBase64String($env:PFX_B64))
-          Write-Host "signing pfx restored from secret"
+          if ($env:PFX_B64) {
+            [System.IO.File]::WriteAllBytes("PhotoRenameAIHash.pfx", [System.Convert]::FromBase64String($env:PFX_B64))
+            Write-Host "signing pfx restored from secret"
+          } else {
+            Write-Host "no SIGNING_PFX_B64 secret; build will be unsigned"
+          }
 
       - name: Publish (MSIX, x64)
 
