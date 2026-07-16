@@ -88,30 +88,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- 感知哈希去重 -->
-            <Border Style="{StaticResource CardStyle}">
-                <StackPanel Spacing="12">
-                    <TextBlock Text="感知哈希去重" Style="{StaticResource CardTitleStyle}" />
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <ToggleSwitch OffContent="关闭" OnContent="启用去重"
-                                      IsOn="{x:Bind ViewModel.EnableDedup, Mode=TwoWay}" />
-                        <Button Content="清空去重库" Command="{x:Bind ViewModel.ClearDedupCommand}" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="24">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="aHash 阈值" VerticalAlignment="Center" />
-                            <Slider Minimum="0" Maximum="20" Width="180"
-                                    Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="dHash 阈值" VerticalAlignment="Center" />
-                            <Slider Minimum="0" Maximum="20" Width="180"
-                                    Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
-                        </StackPanel>
-                    </StackPanel>
-                </StackPanel>
-            </Border>
-
             <!-- 执行控制 -->
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">

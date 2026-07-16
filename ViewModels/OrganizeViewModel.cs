@@ -25,9 +25,6 @@ public partial class OrganizeViewModel : ObservableObject
         SourceFolder = _model.DefaultFolder;
         OutputFolder = _model.OutputFolder;
         NamingTemplate = _model.NamingTemplate;
-        EnableDedup = _model.EnableDedup;
-        AHashThreshold = _model.AHashThreshold;
-        DHashThreshold = _model.DHashThreshold;
         DryRun = _model.DryRun;
         UseExifDate = _model.UseExifDate;
         AiProviderIndex = (int)_model.AiProvider;
@@ -46,12 +43,6 @@ public partial class OrganizeViewModel : ObservableObject
     [ObservableProperty] private int _operationModeIndex;
 
     [ObservableProperty] private int _conflictIndex;
-
-    [ObservableProperty] private bool _enableDedup;
-
-    [ObservableProperty] private int _aHashThreshold = 8;
-
-    [ObservableProperty] private int _dHashThreshold = 10;
 
     [ObservableProperty] private bool _dryRun;
 
@@ -193,14 +184,6 @@ public partial class OrganizeViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task ClearDedupAsync()
-    {
-        await AppServices.RenameLogService.ClearDedupLibraryAsync();
-        StatusText = "已清空去重库。";
-        AppendLog("已清空去重库。");
-    }
-
-    [RelayCommand]
     private void Cancel() => _cts?.Cancel();
 
     [RelayCommand]
@@ -244,9 +227,6 @@ public partial class OrganizeViewModel : ObservableObject
             Mode = (OperationMode)OperationModeIndex,
             NamingTemplate = NamingTemplate,
             Conflict = (ConflictStrategy)ConflictIndex,
-            EnableDedup = EnableDedup,
-            AHashThreshold = AHashThreshold,
-            DHashThreshold = DHashThreshold,
             DryRun = DryRun,
             AiProvider = provider,
             AiApiKey = key,
@@ -263,9 +243,6 @@ public partial class OrganizeViewModel : ObservableObject
         _model.DefaultFolder = SourceFolder;
         _model.OutputFolder = OutputFolder;
         _model.NamingTemplate = NamingTemplate;
-        _model.EnableDedup = EnableDedup;
-        _model.AHashThreshold = AHashThreshold;
-        _model.DHashThreshold = DHashThreshold;
         _model.DryRun = DryRun;
         _model.UseExifDate = UseExifDate;
         _model.AiProvider = (AiProvider)AiProviderIndex;

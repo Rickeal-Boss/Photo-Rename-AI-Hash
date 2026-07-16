@@ -15,12 +15,6 @@ public class AppSettings
 
     public string DefaultFolder { get; set; } = "";
 
-    /// <summary>Hamming-distance threshold for aHash grouping (0 = exact match).</summary>
-    public int AHashThreshold { get; set; } = 8;
-
-    /// <summary>Hamming-distance threshold for dHash grouping (0 = exact match).</summary>
-    public int DHashThreshold { get; set; } = 10;
-
     public string Language { get; set; } = "zh-CN";
 
     // ---- 整理功能配置（持久化以便下次启动沿用） ----
@@ -30,8 +24,6 @@ public class AppSettings
     public string NamingTemplate { get; set; } = "{category}_{scene}_{people}_{action}_{subtitle}_{source}";
 
     public ConflictStrategy ConflictStrategy { get; set; } = ConflictStrategy.AutoRename;
-
-    public bool EnableDedup { get; set; }
 
     public string OutputFolder { get; set; } = "";
 

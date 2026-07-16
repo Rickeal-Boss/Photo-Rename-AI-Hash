@@ -19,12 +19,6 @@ public class OrganizeRequest
 
     public ConflictStrategy Conflict { get; set; } = ConflictStrategy.AutoRename;
 
-    public bool EnableDedup { get; set; }
-
-    public int AHashThreshold { get; set; } = 8;
-
-    public int DHashThreshold { get; set; } = 10;
-
     /// <summary>为 true 时只预测、不改写任何文件。</summary>
     public bool DryRun { get; set; }
 

@@ -36,16 +36,6 @@
 
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
-                    <TextBlock Text="感知哈希去重" Style="{StaticResource CardTitleStyle}" />
-                    <TextBlock Text="aHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
-                    <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.AHashThreshold, Mode=TwoWay}" />
-                    <TextBlock Text="dHash 阈值 (0-20，越小越严格)" FontWeight="SemiBold" />
-                    <Slider Minimum="0" Maximum="20" Value="{x:Bind ViewModel.DHashThreshold, Mode=TwoWay}" />
-                </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource CardStyle}">
-                <StackPanel Spacing="12">
                     <TextBlock Text="AI 视觉识别" Style="{StaticResource CardTitleStyle}" />
                     <TextBlock Text="识别引擎" FontWeight="SemiBold" />
                     <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="240">

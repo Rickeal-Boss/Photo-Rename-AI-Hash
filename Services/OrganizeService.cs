@@ -11,7 +11,7 @@ using Windows.Storage;
 namespace PhotoRenameAIHash.Services;
 
 /// <summary>
-/// 整理/归档核心流程：扫描 →（AI 识别命名）→ 感知哈希去重 → 生成新名 →
+/// 整理/归档核心流程：扫描 →（AI 识别命名）→ 生成新名 →
 /// 目标冲突检测（MD5 相同则跳过，否则按策略加 _1/_2 序号）→ 执行 copy/move/rename
 /// → 写重命名日志。全程保证批量操作下文件名的唯一性与可追溯性。
 /// </summary>
@@ -49,8 +49,6 @@ public sealed class OrganizeService : IOrganizeService
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
             return report;
         }
-
-        if (req.EnableDedup) await _log.LoadDedupLibraryAsync().ConfigureAwait(false);
 
         IImageAnalysisService? ai = CreateAi(req);
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
@@ -138,7 +136,6 @@ public sealed class OrganizeService : IOrganizeService
             }
         }
 
-        if (req.EnableDedup) await _log.SaveDedupLibraryAsync().ConfigureAwait(false);
         _pts = null;
         progress.Report(new OrganizeProgress
         {
@@ -162,8 +159,6 @@ public sealed class OrganizeService : IOrganizeService
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
             return report;
         }
-
-        if (req.EnableDedup) await _log.LoadDedupLibraryAsync().ConfigureAwait(false);
 
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
@@ -248,7 +243,6 @@ public sealed class OrganizeService : IOrganizeService
             });
         }
 
-        if (req.EnableDedup) await _log.SaveDedupLibraryAsync().ConfigureAwait(false);
         _pts = null;
         progress.Report(new OrganizeProgress
         {
@@ -261,23 +255,6 @@ public sealed class OrganizeService : IOrganizeService
         PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, int index, CancellationToken ct)
     {
         string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
-        ulong aHash = req.EnableDedup ? (await _hash.TryComputeAHashAsync(f.Path, 8, ct).ConfigureAwait(false) ?? 0) : 0;
-        ulong dHash = req.EnableDedup ? (await _hash.TryComputeDHashAsync(f.Path, 8, ct).ConfigureAwait(false) ?? 0) : 0;
-
-        // 感知哈希去重
-        if (req.EnableDedup && _log.IsDuplicateAndRecord(md5, aHash, dHash, f.Path, req.AHashThreshold, req.DHashThreshold, _hash))
-        {
-            var skip = new RenameLogEntry
-            {
-                OriginalPath = f.Path,
-                OriginalName = f.Name,
-                Md5 = md5,
-                Operation = OpName(req.Mode),
-                Status = "已去重(感知哈希)",
-            };
-            if (!req.DryRun) await _log.AppendRenameLogAsync(output, skip).ConfigureAwait(false);
-            return skip;
-        }
 
         // 拍摄时间
         DateTime when = f.LastModified;
@@ -484,7 +461,7 @@ public sealed class OrganizeService : IOrganizeService
     private static void Categorize(OrganizeReport report, RenameLogEntry e)
     {
         report.Results.Add(e);
-        if (e.Status.Contains("去重") || e.Status.Contains("跳过") || e.Status.Contains("未改动"))
+        if (e.Status.Contains("跳过") || e.Status.Contains("未改动"))
             report.Skipped++;
         else if (e.Status.Contains("错误"))
             report.Failed++;

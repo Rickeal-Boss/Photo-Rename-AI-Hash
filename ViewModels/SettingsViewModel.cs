@@ -18,8 +18,6 @@ public partial class SettingsViewModel : ObservableObject
         _model = _settings.Load();
         Theme = _model.Theme;
         DefaultFolder = _model.DefaultFolder;
-        AHashThreshold = _model.AHashThreshold;
-        DHashThreshold = _model.DHashThreshold;
         Language = _model.Language;
         AiProviderIndex = (int)_model.AiProvider;
         ZhipuApiKey = _model.ZhipuApiKey;
@@ -72,12 +70,6 @@ public partial class SettingsViewModel : ObservableObject
     private string _defaultFolder = "";
 
     [ObservableProperty]
-    private int _aHashThreshold;
-
-    [ObservableProperty]
-    private int _dHashThreshold;
-
-    [ObservableProperty]
     private string _language = "";
 
     [ObservableProperty]
@@ -110,8 +102,6 @@ public partial class SettingsViewModel : ObservableObject
     private async Task SaveAsync()
     {
         _model.DefaultFolder = DefaultFolder;
-        _model.AHashThreshold = AHashThreshold;
-        _model.DHashThreshold = DHashThreshold;
         _model.Language = Language;
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;

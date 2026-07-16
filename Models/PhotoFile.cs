@@ -19,12 +19,8 @@ public class PhotoFile
     /// <summary>EXIF 拍摄时间（若可读取），否则为 null。</summary>
     public System.DateTime? DateTaken { get; set; }
 
-    /// <summary>源文件 MD5，用于冲突检测与去重判定。</summary>
+    /// <summary>源文件 MD5，用于冲突检测（内容相同则视为同一文件，跳过或加序号）。</summary>
     public string Md5 { get; set; } = "";
-
-    public ulong AHash { get; set; }
-
-    public ulong DHash { get; set; }
 
     // AI 识别结果（对应命名模板的占位符）
     public string Category { get; set; } = "";

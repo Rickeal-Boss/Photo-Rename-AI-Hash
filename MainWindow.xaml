@@ -15,7 +15,6 @@
                         IsBackButtonVisible="Collapsed">
             <NavigationView.MenuItems>
                 <NavigationViewItem Content="整理" Tag="Organize" Icon="Pictures" IsSelected="True" />
-                <NavigationViewItem Content="去重" Tag="Deduplicate" Icon="Map" />
                 <NavigationViewItem Content="设置" Tag="Settings" Icon="Setting" />
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>

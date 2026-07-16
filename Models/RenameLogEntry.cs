@@ -18,13 +18,13 @@ public class RenameLogEntry
 
     public string NewName { get; set; } = "";
 
-    /// <summary>源文件 MD5，用于冲突检测与去重判定。</summary>
+    /// <summary>源文件 MD5，用于冲突检测（内容相同则跳过或加序号）。</summary>
     public string Md5 { get; set; } = "";
 
     /// <summary>操作类型：复制 / 移动 / 重命名 / 归档。</summary>
     public string Operation { get; set; } = "";
 
-    /// <summary>处理结果状态，例如：已重命名 / 已复制 / 已移动 / 跳过(已存在) / 已去重(感知哈希) / 未改动(内容相同) / 错误。</summary>
+    /// <summary>处理结果状态，例如：已重命名 / 已复制 / 已移动 / 跳过(已存在) / 未改动(内容相同) / 错误。</summary>
     public string Status { get; set; } = "";
 
     public string Message { get; set; } = "";

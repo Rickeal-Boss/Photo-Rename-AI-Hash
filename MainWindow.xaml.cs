@@ -16,7 +16,6 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, Type> _pages = new()
     {
         ["Organize"] = typeof(Views.OrganizePage),
-        ["Deduplicate"] = typeof(Views.DeduplicatePage),
         ["Settings"] = typeof(Views.SettingsPage),
         ["About"] = typeof(Views.AboutPage),
     };
