@@ -69,7 +69,8 @@
                         </StackPanel>
                     </Grid>
 
-                    <TextBlock Text="密钥保存在本机设置文件中（明文），仅用于本地调用。"
+                    <TextBlock Text="密钥经 Windows DPAPI 加密保存在本机设置文件中（绑定当前用户，迁移 / 重装系统后不可解密，需重新填写），仅用于本地调用。"
+                               TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>

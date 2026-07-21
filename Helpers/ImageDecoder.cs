@@ -13,11 +13,18 @@ namespace PhotoRenameAIHash.Helpers;
 /// </summary>
 public static class ImageDecoder
 {
+    /// <summary>解码输入硬上限：超过此尺寸的文件直接抛异常进入「超限跳过」分支，避免单次解码把整文件读入内存造成 OOM。
+    /// 对应安全设计 §4.3.5「单图解码缓冲」控制；实际解码像素缓冲由缩放目标尺寸决定本就很小，此处仅约束输入读取。</summary>
+    private const long MaxInputBytes = 256L * 1024 * 1024; // 256 MB
+
     public static async Task<byte[]> DecodeGrayAsync(Stream source, int width, int height, CancellationToken ct = default)
     {
         using var ras = new InMemoryRandomAccessStream();
 
-        var buffer = new byte[source.Length - source.Position];
+        long remaining = source.Length - source.Position;
+        if (remaining > MaxInputBytes)
+            throw new InvalidOperationException("图片过大，已跳过解码（超过解码输入上限）。");
+        var buffer = new byte[remaining];
         int read = await source.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
         using (var writer = new DataWriter(ras.GetOutputStreamAt(0)))
         {
@@ -57,7 +64,10 @@ public static class ImageDecoder
     {
         using var ras = new InMemoryRandomAccessStream();
 
-        var buffer = new byte[source.Length - source.Position];
+        long remaining = source.Length - source.Position;
+        if (remaining > MaxInputBytes)
+            throw new InvalidOperationException("图片过大，已跳过解码（超过解码输入上限）。");
+        var buffer = new byte[remaining];
         int read = await source.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
         using (var writer = new DataWriter(ras.GetOutputStreamAt(0)))
         {

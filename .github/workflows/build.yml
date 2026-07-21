@@ -508,11 +508,12 @@ jobs:
 
 
 
-      # === 自报告：无论成败，把诊断写回 ci-diag 分支（[skip ci] 不触发新跑），
+      # === 自报告：无论成败，把诊断写回 ci-diag-report 分支（[skip ci] 不触发新跑；
+      #     注：不用 ci-diag——该分支已在证书轮换时从仓库历史清除，不应复活），
 
       #     主理人用 contents:read 即可读取失败真相，绕开 Actions:Read 权限限制 ===
 
-      - name: Self-report diagnostics to ci-diag branch
+      - name: Self-report diagnostics to ci-diag-report branch
 
         if: always()
 
@@ -586,7 +587,7 @@ jobs:
 
           git commit -m "ci: diagnostic dump [skip ci]" | Out-Null
 
-          git push --force origin HEAD:refs/heads/ci-diag
+          git push --force origin HEAD:refs/heads/ci-diag-report
 
           Write-Host "pushed diagnostics to ci-diag branch"
 

@@ -63,6 +63,12 @@ public static class ImageAnalysisHelper
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("API Key 未配置：请在「设置」中填写所选识别引擎的 Key 后再开始整理。");
 
+        // 安全：端点必须走 https，避免 API Key 与用户照片以明文 HTTP 出站（D-5）。
+        // Zhipu/通义常量端点均为 https；此处主要约束用户自填的「自定义」端点。
+        if (!endpoint.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "视觉识别端点必须使用 https（自定义引擎请在「设置」中填写以 https:// 开头的端点，避免 API Key 与照片以明文出站）。");
+
         var body = new
         {
             model = model,
