@@ -261,8 +261,16 @@ public partial class OrganizeViewModel : ObservableObject
         }
 
         Progress = p.Percent;
-        if (p.Result != null) Results.Add(p.Result);
+        // 限制界面集合增长：超出上限时滚动丢弃最旧一条，始终保留最近 MaxResults 条；
+        // 完整结果仍在服务端的 report.Results 与输出目录 rename_log.csv 中。
+        if (p.Result != null)
+        {
+            if (Results.Count >= MaxResults) Results.RemoveAt(0);
+            Results.Add(p.Result);
+        }
     }
+
+    private const int MaxResults = 2000;
 
     private void AppendLog(string line) => LogText += line + "\n";
 }

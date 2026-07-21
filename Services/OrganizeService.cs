@@ -67,8 +67,12 @@ public sealed class OrganizeService : IOrganizeService
         {
             order++;
             string curName = f.Name; // 当前文件名（含扩展名）
-            // 续传跳过：当前文件名已是某条成功记录的目标名，或该源路径此前已成功处理。
-            if (completed.DoneByName.Contains(curName) || completed.DoneBySource.Contains(f.Path))
+            // 续传跳过：源路径已成功处理（精确匹配，任意模式都安全）优先；
+            // 目标文件名匹配仅在「重命名」模式下作为辅助（重命名后文件名即新名，避免重复处理）。
+            // Copy/Move 模式不依赖 DoneByName，避免新加入且恰与旧目标同名的文件被误跳。
+            bool doneBySource = completed.DoneBySource.Contains(f.Path);
+            bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(curName);
+            if (doneBySource || doneByName)
             {
                 skippedAtStart++;
                 report.Skipped++;
@@ -102,6 +106,7 @@ public sealed class OrganizeService : IOrganizeService
             }
             catch (Exception ex)
             {
+                if (ex is OperationCanceledException) throw; // 取消立即向上传播，不进入重试逻辑
                 attempts.TryGetValue(f.Path, out int n);
                 n++;
                 if (n < maxPerFileAttempts)
@@ -172,8 +177,10 @@ public sealed class OrganizeService : IOrganizeService
         {
             ct.ThrowIfCancellationRequested();
             await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
-            // 续传跳过：当前文件名已是某条成功记录的目标名，或该源路径此前已成功处理。
-            if (completed.DoneByName.Contains(f.Name) || completed.DoneBySource.Contains(f.Path))
+            // 续传跳过：源路径精确匹配优先；目标文件名匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
+            bool doneBySource = completed.DoneBySource.Contains(f.Path);
+            bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(f.Name);
+            if (doneBySource || doneByName)
             {
                 report.Skipped++;
                 done++;
@@ -279,8 +286,9 @@ public sealed class OrganizeService : IOrganizeService
             }
         }
 
-        // 生成新名
-        string baseName = BuildName(f, req.NamingTemplate, when, index);
+        // 生成新名：未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
+        string template = ai != null ? req.NamingTemplate : "{yyyy}{MM}{dd}_{name}_{n}";
+        string baseName = BuildName(f, template, when, index);
         string candidate = baseName + Path.GetExtension(f.Name);
 
         // 目标冲突检测
@@ -368,13 +376,22 @@ public sealed class OrganizeService : IOrganizeService
     private static async Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-
-        var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir);
-        var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source);
-        await srcFile.CopyAsync(
-            backupFolder,
-            Path.GetFileName(source),
-            Windows.Storage.NameCollisionOption.GenerateUniqueName);
+        try
+        {
+            var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir);
+            var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source);
+            await srcFile.CopyAsync(
+                backupFolder,
+                Path.GetFileName(source),
+                Windows.Storage.NameCollisionOption.GenerateUniqueName);
+        }
+        catch (Exception ex)
+        {
+            // 备份失败（常见于未授予本应用「文件系统」访问权限 / 路径不可访问）：包装为明确提示，
+            // 由 RunAsync 的逐文件 try/catch 标记「错误」且不执行重命名，避免原文件丢失。
+            throw new InvalidOperationException(
+                $"备份原始文件失败（请确认已在系统设置中授予本应用「文件系统」访问权限，且备份路径可访问）：{ex.Message}", ex);
+        }
     }
 
     /// <summary>

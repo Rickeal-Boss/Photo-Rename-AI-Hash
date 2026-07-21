@@ -41,8 +41,12 @@ public sealed partial class OrganizePage : Page
         };
         picker.FileTypeFilter.Add("*");
 
-        var hwnd = WindowNative.GetWindowHandle(PhotoRenameAIHash.App.MainWindow!);
-        InitializeWithWindow.Initialize(picker, hwnd);
+        var mainWindow = PhotoRenameAIHash.App.MainWindow;
+        if (mainWindow != null)
+        {
+            var hwnd = WindowNative.GetWindowHandle(mainWindow);
+            InitializeWithWindow.Initialize(picker, hwnd);
+        }
 
         var folder = await picker.PickSingleFolderAsync();
         return folder?.Path;

@@ -93,7 +93,8 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnThemeChanged(AppTheme oldValue, AppTheme newValue)
     {
         _model.Theme = newValue;
-        ThemeHelper.Apply(PhotoRenameAIHash.App.MainWindow!, newValue);
+        var mainWindow = PhotoRenameAIHash.App.MainWindow;
+        if (mainWindow != null) ThemeHelper.Apply(mainWindow, newValue);
         StatusText = "主题已切换（下次启动也会保留）。";
         OnPropertyChanged(nameof(ThemeIndex));
     }

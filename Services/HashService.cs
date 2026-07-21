@@ -26,6 +26,6 @@ public sealed class HashService : IHashService
     public async Task<string?> TryComputeMd5Async(string filePath, CancellationToken ct = default)
     {
         try { return await ComputeMd5Async(filePath, ct).ConfigureAwait(false); }
-        catch { return null; }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return null; }
     }
 }

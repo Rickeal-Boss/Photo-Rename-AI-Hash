@@ -28,6 +28,12 @@
     -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishProfile>Properties\PublishProfiles\win10-$(Platform).pubxml</PublishProfile>
+    <!--
+      签名默认开启：本地构建/发布须存在 PhotoRenameAIHash.pfx（已被 .gitignore 排除，绝不入库）。
+      若本机暂无可签名 pfx，可显式关闭签名构建：
+        msbuild PhotoRenameAIHash.csproj /t:Publish /p:AppxPackageSigningEnabled=false ...
+      CI 中由 build.yml 按是否配置 SIGNING_PFX_B64 自动在 true/false 间切换，无需改此处。
+    -->
     <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
     <PackageCertificateKeyFile>PhotoRenameAIHash.pfx</PackageCertificateKeyFile>
     <PackageCertificateThumbprint>6A4D13BB1B469FC6E5FEA23B43FC0493A941950D</PackageCertificateThumbprint>
@@ -39,6 +45,7 @@
     <PackageReference Include="Microsoft.VCRTForwarders.140" Version="1.1.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
     <PackageReference Include="MetadataExtractor" Version="2.9.3" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <!-- Packaged self-contained: strip the WindowsAppRuntime FrameworkSdkReference so the

@@ -10,14 +10,7 @@ public class PhotoFile
 
     public System.DateTime LastModified { get; set; }
 
-    public string? NewName { get; set; }
-
-    public string? Status { get; set; }
-
     // ---- 扩展字段：供整理流程使用 ----
-
-    /// <summary>EXIF 拍摄时间（若可读取），否则为 null。</summary>
-    public System.DateTime? DateTaken { get; set; }
 
     /// <summary>源文件 MD5，用于冲突检测（内容相同则视为同一文件，跳过或加序号）。</summary>
     public string Md5 { get; set; } = "";
