@@ -1,4 +1,5 @@
 using System;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -65,8 +66,21 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
 
         // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null；
         // RateLimit 闸门在每次真实 HTTP 尝试（含重试）前生效。
-        var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
-            Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
+        string raw;
+        try
+        {
+            raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
+                Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (ex.Message.Contains("返回 403 "))
+        {
+            // NIM 已知机制：部分模型族需先在 build.nvidia.com 该模型页面点击一次「Try API」注册，
+            // Key 才获得调用权限，否则一律 403。裸状态码对用户不可理解，此处给定向修复指引。
+            throw new InvalidOperationException(
+                "NVIDIA 接口返回 403：该模型族可能尚未在你的账号下注册（或 Key 无该模型权限）。" +
+                "请先打开 build.nvidia.com 的 nemotron-3-nano-omni-30b-a3b-reasoning 模型页面点击一次「Try API」再重试。" +
+                $"原始错误：{ex.Message}", ex);
+        }
 
         var content = ImageAnalysisHelper.ExtractNemotronContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
