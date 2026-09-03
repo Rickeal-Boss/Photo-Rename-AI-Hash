@@ -27,6 +27,7 @@ public sealed class SettingsService : ISettingsService
                     // 透明解密：密钥字段若以 "enc:" 前缀存储则还原为明文，供 UI 展示/编辑
                     settings.ZhipuApiKey = Unprotect(settings.ZhipuApiKey);
                     settings.QwenApiKey = Unprotect(settings.QwenApiKey);
+                    settings.NvidiaApiKey = Unprotect(settings.NvidiaApiKey);
                     settings.CustomApiKey = Unprotect(settings.CustomApiKey);
                     return settings;
                 }
@@ -49,9 +50,11 @@ public sealed class SettingsService : ISettingsService
         // 避免污染内存中 VM 持有的 settings（TextBox 仍需显示明文）。
         var z = settings.ZhipuApiKey;
         var q = settings.QwenApiKey;
+        var n = settings.NvidiaApiKey;
         var c = settings.CustomApiKey;
         settings.ZhipuApiKey = Protect(z);
         settings.QwenApiKey = Protect(q);
+        settings.NvidiaApiKey = Protect(n);
         settings.CustomApiKey = Protect(c);
 
         var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
@@ -59,6 +62,7 @@ public sealed class SettingsService : ISettingsService
         // 还原内存对象为明文
         settings.ZhipuApiKey = z;
         settings.QwenApiKey = q;
+        settings.NvidiaApiKey = n;
         settings.CustomApiKey = c;
 
         // 原子写：先写临时文件再原地替换，避免写入中途崩溃损坏 settings.json

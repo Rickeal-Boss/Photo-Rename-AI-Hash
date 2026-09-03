@@ -216,6 +216,7 @@ public partial class OrganizeViewModel : ObservableObject
         {
             AiProvider.Zhipu => _model.ZhipuApiKey,
             AiProvider.Qwen => _model.QwenApiKey,
+            AiProvider.Nvidia => _model.NvidiaApiKey,
             AiProvider.Custom => _model.CustomApiKey,
             _ => "",
         };

@@ -40,6 +40,9 @@ public class AppSettings
 
     public string QwenApiKey { get; set; } = "";
 
+    /// <summary>NVIDIA build.nvidia.com API Key（形如 nvapi-…，官方免费档 ~40 RPM 限速已内置适配）。</summary>
+    public string NvidiaApiKey { get; set; } = "";
+
     /// <summary>自定义 OpenAI 兼容 API 地址（如 https://api.openai.com/v1/chat/completions）。</summary>
     public string CustomApiUrl { get; set; } = "";
 

@@ -22,6 +22,7 @@ public partial class SettingsViewModel : ObservableObject
         AiProviderIndex = (int)_model.AiProvider;
         ZhipuApiKey = _model.ZhipuApiKey;
         QwenApiKey = _model.QwenApiKey;
+        NvidiaApiKey = _model.NvidiaApiKey;
         CustomApiUrl = _model.CustomApiUrl;
         CustomApiModel = _model.CustomApiModel;
         CustomApiKey = _model.CustomApiKey;
@@ -44,7 +45,7 @@ public partial class SettingsViewModel : ObservableObject
         };
     }
 
-    /// <summary>Maps AiProvider -> ComboBox index (0=None, 1=Zhipu, 2=Qwen, 3=Custom).</summary>
+    /// <summary>Maps AiProvider -> ComboBox index (0=None, 1=Zhipu, 2=Qwen, 3=Custom, 4=Nvidia).</summary>
     public int AiProviderIndex
     {
         get => (int)_model.AiProvider;
@@ -79,6 +80,9 @@ public partial class SettingsViewModel : ObservableObject
     private string _qwenApiKey = "";
 
     [ObservableProperty]
+    private string _nvidiaApiKey = "";
+
+    [ObservableProperty]
     private string _customApiUrl = "";
 
     [ObservableProperty]
@@ -106,6 +110,7 @@ public partial class SettingsViewModel : ObservableObject
         _model.Language = Language;
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;
+        _model.NvidiaApiKey = NvidiaApiKey;
         _model.CustomApiUrl = CustomApiUrl;
         _model.CustomApiModel = CustomApiModel;
         _model.CustomApiKey = CustomApiKey;

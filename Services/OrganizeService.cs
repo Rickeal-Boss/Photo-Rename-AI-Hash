@@ -514,6 +514,7 @@ public sealed class OrganizeService : IOrganizeService
         {
             AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey),
             AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey),
+            AiProvider.Nvidia => new NvidiaImageAnalysisService(req.AiApiKey),
             _ => null,
         };
     }
