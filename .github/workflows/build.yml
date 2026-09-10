@@ -99,8 +99,15 @@ jobs:
 
           "CHECKPOINT:publish-start" >> ci-diagnostics.log
 
-          $sign = if ($env:SIGNING_PFX_B64) { "/p:AppxPackageSigningEnabled=true /p:PackageCertificatePassword=$env:PFX_PASSWORD" } else { "/p:AppxPackageSigningEnabled=false" }
-          Write-Host "signing args: $sign"
+          if (-not $env:SIGNING_PFX_B64) {
+            "SIGNING=DISABLED_NO_SECRET" >> ci-diagnostics.log
+            Write-Error "SIGNING_PFX_B64 未配置：禁止产出未签名 MSIX（未签名包 Add-AppxPackage 报 0x800B0100，用户无法安装）"
+            exit 1
+          }
+          $sign = '/p:AppxPackageSigningEnabled=true /p:AppxPackageSigningTimestampServer=http://timestamp.sectigo.com /p:AppxPackageSigningTimestampDigestAlgorithm=SHA256'
+          if ($env:PFX_PASSWORD) { $sign += ' /p:PackageCertificatePassword="' + $env:PFX_PASSWORD + '"' }
+          "SIGNING=enabled(timestamp=sectigo,sha256)" >> ci-diagnostics.log
+          Write-Host "signing args: /p:AppxPackageSigningEnabled=true /p:PackageCertificatePassword=***"
 
           try {
 
@@ -466,6 +473,48 @@ jobs:
 
       # === 打包为单个 zip 再上传（避免 upload-artifact 直传大目录树的尺寸/长路径问题） ===
 
+      # 签名校验（阻断式）：MSIX 只有签名成功才会写入 AppxSignature.p7x 条目，
+      # 以此为结构性判据，再用 signtool verify /pa 复核。防止任何形式的"静默无签名"复发。
+      - name: Verify MSIX signature (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:verify-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { "VERIFY=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
+
+          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+          $p7x = $zip.Entries | Where-Object { $_.FullName -eq 'AppxSignature.p7x' }
+          $zip.Dispose()
+          ("VERIFY structural p7x=" + [bool]$p7x) >> ci-diagnostics.log
+          if (-not $p7x) { Write-Error "MSIX 内无 AppxSignature.p7x -> 未签名"; exit 1 }
+
+          if ($st) {
+            & $st.FullName verify /pa $msix.FullName 2>&1 | Tee-Object -Variable vt | Out-Host
+            ($vt -join ' | ') >> ci-diagnostics.log
+            if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify 失败 (exit $LASTEXITCODE)"; exit 1 }
+          } else {
+            Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
+          }
+          "CHECKPOINT:verify-done" >> ci-diagnostics.log
+
+      # 产物级保险：用签名 pfx 重新导出 .cer 覆盖仓库版，保证 artifact 内的证书
+      # 与实际签名证书永远一致（杜绝"仓库 cer 未同步 → 0x800B0109 不受信任"复发）。
+      - name: Export signing certificate for artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+          $der = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+          [System.IO.File]::WriteAllBytes((Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.cer"), $der)
+          ("signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
+          Write-Host ("artifact cer = signing cert " + $cert.Thumbprint)
+
       - name: Package publish output as zip
 
         shell: pwsh
@@ -567,7 +616,7 @@ jobs:
             "--- publish.out.log (tail 300) ---" | Out-File -Append $log
             (Get-Content publish.out.log | Select-Object -Last 300) | Out-File -Append $log
             "--- publish.out.log (error grep) ---" | Out-File -Append $log
-            (Get-Content publish.out.log | Select-String -Pattern 'error|APPX|MakeAppx|MakePri|0x|C00C|invalid|Invalid|failed|Failed|not valid|duplicate|Duplicate|collision|Exception|warning') | Select-Object -First 120 | Out-File -Append $log
+            (Get-Content publish.out.log | Select-String -Pattern 'error|APPX|MakeAppx|MakePri|SignAppxPackage|signtool|certificate|thumbprint|0x|C00C|invalid|Invalid|failed|Failed|not valid|duplicate|Duplicate|collision|Exception|warning') | Select-Object -First 120 | Out-File -Append $log
 
           }
 

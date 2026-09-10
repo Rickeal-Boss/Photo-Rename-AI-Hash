@@ -20,6 +20,8 @@ if errorlevel 1 (
   exit /b 1
 )
 echo   OK.
+REM 自诊断：打印被信任的证书指纹，与 MSIX 实际签名证书比对，防止 0x800B0109 静默复发
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('PhotoRenameAIHash.cer'); Write-Host ('  Trusted cert thumbprint: ' + $c.Thumbprint)"
 
 echo [2/2] Installing PhotoRenameAIHash...
 echo   (The Windows App SDK runtime is bundled inside the .msix,
