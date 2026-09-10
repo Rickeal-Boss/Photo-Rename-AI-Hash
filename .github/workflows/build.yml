@@ -474,7 +474,9 @@ jobs:
       # === 打包为单个 zip 再上传（避免 upload-artifact 直传大目录树的尺寸/长路径问题） ===
 
       # 签名校验（阻断式）：MSIX 只有签名成功才会写入 AppxSignature.p7x 条目，
-      # 以此为结构性判据，再用 signtool verify /pa 复核。防止任何形式的"静默无签名"复发。
+      # 以此为结构性判据；signtool verify /pa 复核前，先把签名 pfx 导出的证书
+      # 导入本机 Root/TrustedPeople（等价于用户侧 Install.bat 的信任动作）——
+      # 自签名证书在 runner 上默认不受信任，不先信任必然误报 0x800B0109。
       - name: Verify MSIX signature (blocking)
         shell: pwsh
         run: |
@@ -483,9 +485,6 @@ jobs:
           $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msix) { "VERIFY=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
 
-          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
           $p7x = $zip.Entries | Where-Object { $_.FullName -eq 'AppxSignature.p7x' }
@@ -493,10 +492,27 @@ jobs:
           ("VERIFY structural p7x=" + [bool]$p7x) >> ci-diagnostics.log
           if (-not $p7x) { Write-Error "MSIX 内无 AppxSignature.p7x -> 未签名"; exit 1 }
 
+          # 从签名源 pfx 取证书（唯一事实来源），先信任再验证
+          $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+          ("VERIFY signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
+          foreach ($storeName in @("TrustedPeople", "Root")) {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "LocalMachine")
+            $store.Open("ReadWrite")
+            $store.Add($cert)
+            $store.Close()
+          }
+          Write-Host ("cert trusted on runner: " + $cert.Thumbprint)
+
+          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($st) {
-            & $st.FullName verify /pa $msix.FullName 2>&1 | Tee-Object -Variable vt | Out-Host
-            ($vt -join ' | ') >> ci-diagnostics.log
-            if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify 失败 (exit $LASTEXITCODE)"; exit 1 }
+            $ErrorActionPreference = 'Continue'
+            & $st.FullName verify /pa $msix.FullName | Tee-Object -Variable vt | Out-Host
+            ("VERIFY signtool_output: " + ($vt -join ' | ')) >> ci-diagnostics.log
+            $ErrorActionPreference = 'Stop'
+            if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify 失败 (exit $LASTEXITCODE)：包签名无效或与受信任证书不匹配"; exit 1 }
+            "VERIFY signtool=PASS" >> ci-diagnostics.log
           } else {
             Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
           }
