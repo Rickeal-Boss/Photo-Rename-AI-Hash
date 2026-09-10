@@ -31,7 +31,8 @@ public static class ThemeHelper
         // Light/Dark 显式分支同样正确）。
         bool isDark = (window?.Content as FrameworkElement)?.ActualTheme == ElementTheme.Dark;
 
-        var fg = isDark ? Windows.UI.Colors.White : Windows.UI.Colors.Black;
+        // WinUI 3 下 Colors 在 Microsoft.UI 命名空间（Windows.UI 是 UWP 旧命名空间，CS0234）
+        var fg = isDark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
         titleBar.ButtonForegroundColor = fg;
         titleBar.ButtonHoverForegroundColor = fg;
         titleBar.ButtonPressedForegroundColor = fg;
