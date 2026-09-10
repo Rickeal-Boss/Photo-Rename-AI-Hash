@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.UI.Xaml;
 using PhotoRenameAIHash.Models;
 using PhotoRenameAIHash.Services;
 
@@ -30,6 +31,9 @@ public partial class OrganizeViewModel : ObservableObject
         AiProviderIndex = (int)_model.AiProvider;
         OperationModeIndex = (int)_model.OperationMode;
         ConflictIndex = (int)_model.ConflictStrategy;
+        // P1-4：结果集合变化时同步空态/列表可见性
+        Results.CollectionChanged += (_, __) => UpdateResultVisibility();
+        UpdateResultVisibility();
     }
 
     [ObservableProperty] private string _sourceFolder = "";
@@ -64,10 +68,32 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private ObservableCollection<RenameLogEntry> _results = new();
 
+    // ── P1-1：任务终态（完成/失败/取消）以 InfoBar 高亮提示；新任务开始时关闭 ──
+    [ObservableProperty] private bool _statusBarOpen;
+
+    [ObservableProperty] private Microsoft.UI.Xaml.Controls.InfoBarSeverity _statusSeverity =
+        Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational;
+
+    // ── P1-4：空态与列表可见性（Results 变化时由 UpdateResultVisibility 同步维护）──
+    [ObservableProperty] private bool _hasNoResults = true;
+
+    [ObservableProperty] private Visibility _resultsVisibility = Visibility.Collapsed;
+
+    [ObservableProperty] private Visibility _noResultsVisibility = Visibility.Visible;
+
+    private void UpdateResultVisibility()
+    {
+        bool has = Results.Count > 0;
+        HasNoResults = !has;
+        ResultsVisibility = has ? Visibility.Visible : Visibility.Collapsed;
+        NoResultsVisibility = has ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     [RelayCommand]
     private async Task StartOrganizeAsync()
     {
         if (IsBusy) return;
+        StatusBarOpen = false; // P1-1：新任务入口即关闭上一轮 InfoBar（覆盖校验失败/取消等所有提前返回路径）
 
         if (string.IsNullOrWhiteSpace(SourceFolder) || !Directory.Exists(SourceFolder))
         {
@@ -91,6 +117,8 @@ public partial class OrganizeViewModel : ObservableObject
                 if (string.IsNullOrWhiteSpace(picked))
                 {
                     StatusText = "已取消：重命名实际执行前需先选择备份文件夹。";
+                    StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：取消终态
+                    StatusBarOpen = true;
                     AppendLog("已取消：未选择备份文件夹，未执行重命名。");
                     return;
                 }
@@ -102,6 +130,7 @@ public partial class OrganizeViewModel : ObservableObject
         Progress = 0;
         Results.Clear();
         LogText = "";
+        StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
         var cts = new CancellationTokenSource();
         _cts = cts;
 
@@ -111,15 +140,21 @@ public partial class OrganizeViewModel : ObservableObject
             var progress = new Progress<OrganizeProgress>(OnProgress);
             await AppServices.OrganizeService.RunAsync(req, progress, cts.Token);
             await PersistConfigAsync();
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：完成终态
+            StatusBarOpen = true;
         }
         catch (OperationCanceledException)
         {
             StatusText = "已取消。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：取消终态
+            StatusBarOpen = true;
             AppendLog("已取消。");
         }
         catch (System.Exception ex)
         {
             StatusText = "出错：" + ex.Message;
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error; // P1-1：失败终态
+            StatusBarOpen = true;
             AppendLog("出错：" + ex.Message);
         }
         finally
@@ -136,6 +171,7 @@ public partial class OrganizeViewModel : ObservableObject
     private async Task ArchiveByDateAsync()
     {
         if (IsBusy) return;
+        StatusBarOpen = false; // P1-1：新任务入口即关闭上一轮 InfoBar（覆盖校验失败/取消等所有提前返回路径）
 
         if (string.IsNullOrWhiteSpace(SourceFolder) || !Directory.Exists(SourceFolder))
         {
@@ -153,6 +189,7 @@ public partial class OrganizeViewModel : ObservableObject
         Progress = 0;
         Results.Clear();
         LogText = "";
+        StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
         var cts = new CancellationTokenSource();
         _cts = cts;
 
@@ -162,15 +199,21 @@ public partial class OrganizeViewModel : ObservableObject
             var progress = new Progress<OrganizeProgress>(OnProgress);
             await AppServices.OrganizeService.ArchiveByDateAsync(req, progress, cts.Token);
             await PersistConfigAsync();
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：完成终态
+            StatusBarOpen = true;
         }
         catch (OperationCanceledException)
         {
             StatusText = "已取消。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：取消终态
+            StatusBarOpen = true;
             AppendLog("已取消。");
         }
         catch (System.Exception ex)
         {
             StatusText = "出错：" + ex.Message;
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error; // P1-1：失败终态
+            StatusBarOpen = true;
             AppendLog("出错：" + ex.Message);
         }
         finally

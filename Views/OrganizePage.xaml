@@ -23,12 +23,14 @@
                         <TextBox Grid.Row="0" Grid.Column="1"
                                  Text="{x:Bind ViewModel.SourceFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  PlaceholderText="选择要整理的源文件夹" />
-                        <Button Grid.Row="0" Grid.Column="2" Content="浏览" Click="PickSource_Click" Margin="8,0,0,0" />
+                        <Button Grid.Row="0" Grid.Column="2" Content="浏览" Click="PickSource_Click" Margin="8,0,0,0"
+                                ToolTipService.ToolTip="选择要整理的源文件夹" />
                         <TextBlock Grid.Row="1" Grid.Column="0" Text="输出文件夹" VerticalAlignment="Center" Margin="0,0,12,0" />
                         <TextBox Grid.Row="1" Grid.Column="1"
                                  Text="{x:Bind ViewModel.OutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  PlaceholderText="整理后输出位置（重命名模式可留空）" />
-                        <Button Grid.Row="1" Grid.Column="2" Content="浏览" Click="PickOutput_Click" Margin="8,0,0,0" />
+                        <Button Grid.Row="1" Grid.Column="2" Content="浏览" Click="PickOutput_Click" Margin="8,0,0,0"
+                                ToolTipService.ToolTip="选择整理后的输出文件夹" />
                     </Grid>
                 </StackPanel>
             </Border>
@@ -94,9 +96,10 @@
                 <StackPanel Spacing="12">
                     <TextBlock Text="执行控制" Style="{StaticResource CardTitleStyle}" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
+                        <!-- P0-1：改用系统 AccentButtonStyle，亮/暗主题下前景色由系统保证对比度 -->
                         <Button Content="开始整理" Command="{x:Bind ViewModel.StartOrganizeCommand}"
-                                Background="{ThemeResource AccentFillColorDefaultBrush}"
-                                Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                Style="{StaticResource AccentButtonStyle}"
+                                ToolTipService.ToolTip="开始处理所选文件夹（模拟运行开启时仅预览）" />
                         <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}" />
                         <Button Content="取消" Command="{x:Bind ViewModel.CancelCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
@@ -111,11 +114,18 @@
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="进度" Style="{StaticResource CardTitleStyle}" />
+                    <!-- P1-1：任务终态（完成/失败/取消）以 InfoBar 高亮提示，可手动关闭 -->
+                    <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=OneWay}"
+                             Severity="{x:Bind ViewModel.StatusSeverity, Mode=OneWay}"
+                             Message="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                             IsClosable="True"
+                             AutomationProperties.LiveSetting="Polite" />
                     <ProgressBar Value="{x:Bind ViewModel.Progress, Mode=OneWay}"
                                  IsIndeterminate="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               AutomationProperties.LiveSetting="Polite" />
+                    <TextBox x:Name="LogBox" Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
                              Style="{StaticResource LogTextBoxStyle}"
                              Height="140" ScrollViewer.VerticalScrollBarVisibility="Auto" />
                 </StackPanel>
@@ -125,13 +135,19 @@
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="处理结果" Style="{StaticResource CardTitleStyle}" />
-                    <Grid ColumnDefinitions="2*,2*,Auto,Auto" Padding="0,0,0,4">
+                    <!-- P1-2+3：空态提示与结果列表互斥显示（由 VM 的 Visibility 属性驱动） -->
+                    <TextBlock Text="暂无处理记录。开始整理后，这里会显示每个文件的处理结果。"
+                               Visibility="{x:Bind ViewModel.NoResultsVisibility, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Grid ColumnDefinitions="2*,2*,Auto,Auto" Padding="0,0,0,4"
+                          Visibility="{x:Bind ViewModel.ResultsVisibility, Mode=OneWay}">
                         <TextBlock Grid.Column="0" Text="原文件名" FontWeight="SemiBold" />
                         <TextBlock Grid.Column="1" Text="新文件名" FontWeight="SemiBold" />
                         <TextBlock Grid.Column="2" Text="状态" FontWeight="SemiBold" Margin="12,0,0,0" />
                         <TextBlock Grid.Column="3" Text="MD5" FontWeight="SemiBold" Margin="12,0,0,0" />
                     </Grid>
                     <ListView ItemsSource="{x:Bind ViewModel.Results, Mode=OneWay}"
+                              Visibility="{x:Bind ViewModel.ResultsVisibility, Mode=OneWay}"
                               MaxHeight="320" ScrollViewer.VerticalScrollBarVisibility="Auto">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
@@ -146,8 +162,24 @@
                                     <TextBlock Grid.Column="1" Text="{x:Bind NewName}"
                                                Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
                                                TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Grid.Column="2" Text="{x:Bind Status}" Margin="12,0,0,0"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <!-- P1-4：状态列图标化（成功/失败/中性三态重叠，按 Model 计算属性互斥显示），
+                                         原状态文本改挂 ToolTip 以不丢失信息；
+                                         P1-4 修复：4 处 x:Bind 显式 Mode=OneTime，表明有意绑定不可变对象，
+                                         防日后 Status 加 setter 时图标不刷新 -->
+                                    <Grid Grid.Column="2" Margin="12,0,0,0" ToolTipService.ToolTip="{x:Bind Status, Mode=OneTime}">
+                                        <FontIcon Glyph="&#xE73E;" FontSize="14"
+                                                  Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                  Visibility="{x:Bind IsSuccessVisibility, Mode=OneTime}"
+                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                        <FontIcon Glyph="&#xE711;" FontSize="14"
+                                                  Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                                  Visibility="{x:Bind IsErrorVisibility, Mode=OneTime}"
+                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                        <FontIcon Glyph="&#xE946;" FontSize="14"
+                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                  Visibility="{x:Bind IsNeutralVisibility, Mode=OneTime}"
+                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                    </Grid>
                                     <TextBlock Grid.Column="3" Text="{x:Bind Md5}" Margin="12,0,0,0"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>

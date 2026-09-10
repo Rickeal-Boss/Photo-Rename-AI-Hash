@@ -5,16 +5,15 @@
     <!-- ═══════════════════════════════════════════
          主题感知背景刷子
          ═══════════════════════════════════════════ -->
-    <SolidColorBrush x:Key="PageBackgroundBrush"
-                     Color="{ThemeResource SolidBackgroundFillColorBase}" />
     <SolidColorBrush x:Key="NavPaneBackgroundBrush"
                      Color="{ThemeResource SolidBackgroundFillColorSecondary}" />
 
     <!-- ═══════════════════════════════════════════
-         隐式样式 —— Page（所有页面自动获取主题背景）
+         隐式样式 —— Page（Mica 启用时需透出系统背景；
+         内容层 Grid（MainWindow）已提供 Layer 底色保证可读性）
          ═══════════════════════════════════════════ -->
     <Style TargetType="Page">
-        <Setter Property="Background" Value="{StaticResource PageBackgroundBrush}" />
+        <Setter Property="Background" Value="Transparent" />
     </Style>
 
     <!-- ═══════════════════════════════════════════

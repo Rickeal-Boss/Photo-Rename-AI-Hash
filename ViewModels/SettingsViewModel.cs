@@ -13,6 +13,10 @@ public partial class SettingsViewModel : ObservableObject
     private readonly ISettingsService _settings = AppServices.SettingsService;
     private AppSettings _model;
 
+    // P1-2 修复：ctor 中 Theme 赋值会触发 OnThemeChanged，初始化期抑制
+    // 「主题已切换」InfoBar 误弹出（仅抑制提示，保留 _model.Theme 同步逻辑）
+    private bool _initializing = true;
+
     public SettingsViewModel()
     {
         _model = _settings.Load();
@@ -26,6 +30,8 @@ public partial class SettingsViewModel : ObservableObject
         CustomApiUrl = _model.CustomApiUrl;
         CustomApiModel = _model.CustomApiModel;
         CustomApiKey = _model.CustomApiKey;
+        OnPropertyChanged(nameof(ThemeIndex)); // 与 Theme 赋值保持一致，确保索引计算属性就绪
+        _initializing = false;
     }
 
     /// <summary>Maps AppTheme -> RadioButtons index (0=Light, 1=Dark, 2=System).</summary>
@@ -94,18 +100,32 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _statusText = "";
 
+    // P1-1：保存结果以 InfoBar 高亮提示
+    [ObservableProperty]
+    private bool _statusBarOpen;
+
+    [ObservableProperty]
+    private Microsoft.UI.Xaml.Controls.InfoBarSeverity _statusSeverity =
+        Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational;
+
     partial void OnThemeChanged(AppTheme oldValue, AppTheme newValue)
     {
+        // P1-2 修复：初始化期间的 Theme 赋值不是用户切换主题，跳过提示弹出
+        if (_initializing) return;
+
         _model.Theme = newValue;
         var mainWindow = PhotoRenameAIHash.App.MainWindow;
         if (mainWindow != null) ThemeHelper.Apply(mainWindow, newValue);
         StatusText = "主题已切换（下次启动也会保留）。";
+        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational; // P1-1：非保存终态用中性提示
+        StatusBarOpen = true;
         OnPropertyChanged(nameof(ThemeIndex));
     }
 
     [RelayCommand]
     private async Task SaveAsync()
     {
+        StatusBarOpen = false; // 先收起，避免用户手动关闭后同值赋值不再触发弹出
         _model.DefaultFolder = DefaultFolder;
         _model.Language = Language;
         _model.ZhipuApiKey = ZhipuApiKey;
@@ -117,5 +137,7 @@ public partial class SettingsViewModel : ObservableObject
 
         await _settings.SaveAsync(_model);
         StatusText = "设置已保存。";
+        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：保存成功
+        StatusBarOpen = true;
     }
 }

@@ -8,19 +8,59 @@
     mc:Ignorable="d"
     Title="Photo Rename AI · Hash">
 
-    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+    <!-- 根 Grid：Mica 启用时（Win11）代码-behind 会置空此背景让系统背景透出；
+         Win10 19041 无 Mica，保留实底避免异常底色 -->
+    <Grid x:Name="RootGrid" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+        <!-- 标题栏一体化：自绘标题区（高 48），系统按钮由 ExtendsContentIntoTitleBar + SetTitleBar 接管 -->
+        <Grid x:Name="AppTitleBar" Height="48" VerticalAlignment="Top" Background="Transparent">
+            <TextBlock Text="{x:Bind ViewModel.AppTitle, Mode=OneWay}" VerticalAlignment="Center" Margin="16,0,0,0"
+                       Style="{StaticResource CaptionTextBlockStyle}" />
+        </Grid>
+
+        <!-- P0-3：整体下移 48px，避免 SetTitleBar 拖拽区遮挡汉堡按钮 -->
         <NavigationView x:Name="NavView"
                         SelectionChanged="NavView_SelectionChanged"
-                        Header="{x:Bind ViewModel.AppTitle, Mode=OneWay}"
-                        IsBackButtonVisible="Collapsed">
+                        PaneDisplayMode="Left"
+                        IsBackButtonVisible="Auto"
+                        Margin="0,48,0,0">
             <NavigationView.MenuItems>
-                <NavigationViewItem Content="整理" Tag="Organize" Icon="Pictures" IsSelected="True" />
-                <NavigationViewItem Content="设置" Tag="Settings" Icon="Setting" />
+                <NavigationViewItem Content="整理" Tag="Organize" IsSelected="True" ToolTipService.ToolTip="整理（Ctrl+1）">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8B9;" AutomationProperties.Name="整理" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="设置" Tag="Settings" ToolTipService.ToolTip="设置（Ctrl+2）">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;" AutomationProperties.Name="设置" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Content="关于" Tag="About" Icon="Help" />
+                <NavigationViewItem Content="关于" Tag="About" ToolTipService.ToolTip="关于（Ctrl+3）">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE946;" AutomationProperties.Name="关于" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.FooterMenuItems>
-            <Frame x:Name="ContentFrame" />
+
+            <!-- P0-2：内容层——半透明 Layer 底色保证可读性，Mica 从 NavView 边缘透出 -->
+            <Grid Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="8,0,0,0">
+                <Frame x:Name="ContentFrame">
+                    <Frame.ContentTransitions>
+                        <TransitionCollection>
+                            <NavigationThemeTransition />
+                        </TransitionCollection>
+                    </Frame.ContentTransitions>
+                </Frame>
+            </Grid>
         </NavigationView>
+
+        <!-- P1-2+3：全局键盘加速键（Ctrl+1/2/3 导航、Alt+← 返回） -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="Number1" Invoked="NavAccelerator_Invoked" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number2" Invoked="NavAccelerator_Invoked" />
+            <KeyboardAccelerator Modifiers="Control" Key="Number3" Invoked="NavAccelerator_Invoked" />
+            <KeyboardAccelerator Modifiers="Menu" Key="Left" Invoked="BackAccelerator_Invoked" />
+        </Grid.KeyboardAccelerators>
     </Grid>
 </Window>

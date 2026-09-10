@@ -19,6 +19,16 @@ public sealed partial class OrganizePage : Page
         this.DataContext = ViewModel;
         // 重命名实际执行前，由 VM 通过该回调弹出备份文件夹选择
         ViewModel.BackupFolderPicker = static () => PickFolderAsync();
+        // P1-5：日志更新时自动滚动到底部（NavigationCacheMode=Required 仅构造一次，无重复订阅）
+        ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(OrganizeViewModel.LogText))
+            {
+                // VM 属性可能从非 UI 线程触发（Progress 回调经同步上下文，多数在 UI 线程，
+                // 但统一包一层 TryEnqueue 兜底，ScrollToEnd 必须在 UI 线程执行）
+                this.DispatcherQueue.TryEnqueue(() => LogBox?.ScrollToEnd());
+            }
+        };
     }
 
     private async void PickSource_Click(object sender, RoutedEventArgs e)
