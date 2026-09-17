@@ -27,8 +27,9 @@ public class AppSettings
 
     public string OutputFolder { get; set; } = "";
 
-    /// <summary>为 true 时只模拟、不改写文件。</summary>
-    public bool DryRun { get; set; }
+    /// <summary>为 true 时只模拟、不改写文件。P0-2 修复：默认 true（安全默认），
+    /// 新装用户首次使用先看到模拟预览，避免在「模拟运行」字样下真实改动文件。</summary>
+    public bool DryRun { get; set; } = true;
 
     public bool UseExifDate { get; set; } = true;
 

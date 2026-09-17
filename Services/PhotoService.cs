@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MetadataExtractor;
+using MetadataExtractor.Formats.Exif;
 using PhotoRenameAIHash.Models;
 
 namespace PhotoRenameAIHash.Services;
@@ -65,22 +66,30 @@ public sealed class PhotoService : IPhotoService
     }
 
     /// <summary>读取照片 EXIF 拍摄时间（DateTimeOriginal），失败或无 EXIF 时返回 null。</summary>
+    /// <remarks>
+    /// P0-1 修复：EXIF 日期标签的原始串形如 "2001:01:28 13:59:33"（日期段用冒号分隔），
+    /// 不是任何主流文化的合法日期格式，此前用 DateTime.TryParse 解析在 zh-CN/en-US 下
+    /// 恒定失败（实测验证）→ 所有文件静默回退文件修改时间，"按拍摄时间"名存实亡。
+    /// 现改用 MetadataExtractor 自带的 TryGetDateTime 扩展：内部按 EXIF 专用模式
+    /// （yyyy:MM:dd HH:mm:ss 等）+ InvariantCulture 解析，跨文化稳定。
+    /// 同时改为按目录类型（ExifSubIfd / ExifIfd0）精确取值：tag ID 仅在所属目录内有意义，
+    /// 旧写法用同一 tag ID 扫全部目录存在跨目录误读隐患。
+    /// </remarks>
     public DateTime? GetDateTaken(string filePath)
     {
         try
         {
             var directories = ImageMetadataReader.ReadMetadata(filePath);
-            // EXIF 标签 ID：0x9003=DateTimeOriginal, 0x9004=DateTimeDigitized, 0x0132=DateTime(file change)
-            foreach (var tag in new[] { 0x9003, 0x9004, 0x0132 })
+            // 优先级不变：0x9003 DateTimeOriginal → 0x9004 DateTimeDigitized（均在 ExifSubIfd）→ 0x0132 DateTime（Ifd0）
+            foreach (var dir in directories.OfType<ExifSubIfdDirectory>())
             {
-                foreach (var dir in directories)
-                {
-                    var raw = dir.GetDescription(tag);
-                    if (!string.IsNullOrWhiteSpace(raw) && DateTime.TryParse(raw, out var parsed))
-                    {
-                        return parsed;
-                    }
-                }
+                if (dir.TryGetDateTime(ExifDirectoryBase.TagDateTimeOriginal, out var dt)) return Normalize(dt);
+                if (dir.TryGetDateTime(ExifDirectoryBase.TagDateTimeDigitized, out dt)) return Normalize(dt);
+            }
+
+            foreach (var dir in directories.OfType<ExifIfd0Directory>())
+            {
+                if (dir.TryGetDateTime(ExifDirectoryBase.TagDateTime, out var dt)) return Normalize(dt);
             }
         }
         catch
@@ -90,4 +99,11 @@ public sealed class PhotoService : IPhotoService
 
         return null;
     }
+
+    /// <summary>
+    /// EXIF 时间无时区语义；个别带时区偏移的标签会被库解析为 Kind=Utc（内部 AdjustToUniversal），
+    /// 转回本地墙钟时间，与 LastModified（本地时间）的回退口径保持一致（见 ScanAsync 注释）。
+    /// </summary>
+    private static DateTime Normalize(DateTime dt) =>
+        dt.Kind == DateTimeKind.Utc ? dt.ToLocalTime() : dt;
 }

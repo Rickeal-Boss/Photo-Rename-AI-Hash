@@ -50,6 +50,21 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private bool _dryRun;
 
+    /// <summary>
+    /// 运行模式选项索引（P0-2 修复）：0=模拟运行，1=实际执行。
+    /// 由 DryRun 派生，供 RadioButtons 双向绑定——控件语义所见即所选，
+    /// 彻底消除旧 ToggleSwitch「标签与行为颠倒」的问题。
+    /// </summary>
+    public int RunModeIndex
+    {
+        get => DryRun ? 0 : 1;
+        set
+        {
+            DryRun = value == 0;
+            OnPropertyChanged(nameof(RunModeIndex));
+        }
+    }
+
     [ObservableProperty] private bool _useExifDate = true;
 
     [ObservableProperty] private string _backupFolder = "";
@@ -108,6 +123,19 @@ public partial class OrganizeViewModel : ObservableObject
             return;
         }
 
+        // P0-3：输出目录不得等于源目录、也不得位于源目录树内。否则递归扫描会把上一轮
+        // 生成的产物再次当作输入（其路径不在续传索引中），无 AI 回退命名场景下副本逐轮线性累积。
+        if (OperationModeIndex != (int)OperationMode.Rename && IsInsideTree(OutputFolder, SourceFolder))
+        {
+            StatusText = "已取消：输出文件夹不能与源文件夹相同或位于源文件夹内部——" +
+                         "重复运行时上一轮生成的文件会被再次当作输入，造成重复副本逐轮累积。" +
+                         "请把输出文件夹放到源文件夹之外。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：校验失败终态
+            StatusBarOpen = true;
+            AppendLog("已取消：输出文件夹位于源文件夹内部，未执行任何操作。");
+            return;
+        }
+
         // 重命名模式 + 实际执行：必须先选择备份文件夹，未选择则取消（不动任何文件）
         if ((OperationMode)OperationModeIndex == OperationMode.Rename && !DryRun)
         {
@@ -123,6 +151,16 @@ public partial class OrganizeViewModel : ObservableObject
                     return;
                 }
                 BackupFolder = picked!;
+            }
+
+            // P0-3：备份文件夹同样不得位于源目录树内——备份副本会被下一轮运行重新当作输入
+            if (IsInsideTree(BackupFolder, SourceFolder))
+            {
+                StatusText = "已取消：备份文件夹不能位于源文件夹内部——备份出的副本会在下次运行时被再次当作输入。请另选源文件夹之外的备份文件夹。";
+                StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：校验失败终态
+                StatusBarOpen = true;
+                AppendLog("已取消：备份文件夹位于源文件夹内部，未执行重命名。");
+                return;
             }
         }
 
@@ -182,6 +220,18 @@ public partial class OrganizeViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(OutputFolder) || !Directory.Exists(OutputFolder))
         {
             StatusText = "请选择有效输出文件夹。";
+            return;
+        }
+
+        // P0-3：归档同理——输出（yyyy/yyyy-MM-dd 子目录）在源目录树内会把归档产物再次当输入累积
+        if (IsInsideTree(OutputFolder, SourceFolder))
+        {
+            StatusText = "已取消：输出文件夹不能与源文件夹相同或位于源文件夹内部——" +
+                         "归档产物会被下次运行再次当作输入，造成重复副本逐轮累积。" +
+                         "请把输出文件夹放到源文件夹之外。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning; // P1-1：校验失败终态
+            StatusBarOpen = true;
+            AppendLog("已取消：输出文件夹位于源文件夹内部，未执行任何操作。");
             return;
         }
 
@@ -317,4 +367,25 @@ public partial class OrganizeViewModel : ObservableObject
     private const int MaxResults = 2000;
 
     private void AppendLog(string line) => LogText += line + "\n";
+
+    /// <summary>
+    /// 判断 candidate 是否等于 baseDir 或位于 baseDir 目录树内部（P0-3 校验的判定核心）。
+    /// 归一化全路径后比较，兼容大小写差异、尾部斜杠与根目录（如 D:\）写法；
+    /// 路径非法时按"在树内"处理（宁误拦不放过，避免数据放大）。
+    /// </summary>
+    private static bool IsInsideTree(string candidate, string baseDir)
+    {
+        try
+        {
+            string c = Path.GetFullPath(candidate).TrimEnd('\\', '/');
+            string b = Path.GetFullPath(baseDir).TrimEnd('\\', '/');
+
+            if (string.Equals(c, b, StringComparison.OrdinalIgnoreCase)) return true;
+            return c.StartsWith(b + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return true;
+        }
+    }
 }

@@ -6,7 +6,7 @@ on:
 
   push:
 
-    branches: [main, Hy, pfx]
+    branches: [main, Hy, pfx, fix]
 
   workflow_dispatch:
 
@@ -104,7 +104,11 @@ jobs:
             Write-Error "SIGNING_PFX_B64 未配置：禁止产出未签名 MSIX（未签名包 Add-AppxPackage 报 0x800B0100，用户无法安装）"
             exit 1
           }
-          $sign = '/p:AppxPackageSigningEnabled=true /p:AppxPackageSigningTimestampServer=http://timestamp.sectigo.com /p:AppxPackageSigningTimestampDigestAlgorithm=SHA256'
+          # P1-9 修复：MSIX 签名时间戳属性名为 AppxPackageSigningTimestampServerUrl（原写成
+          # AppxPackageSigningTimestampServer 属无效属性，静默不生效）。注意：WASDK 1.5 的
+          # 构建目标即使属性名正确也可能忽略时间戳（上游 bug，1.6 修复），故下方另有
+          # signtool 补时间戳重签步骤兜底。
+          $sign = '/p:AppxPackageSigningEnabled=true /p:AppxPackageSigningTimestampServerUrl=http://timestamp.sectigo.com /p:AppxPackageSigningTimestampDigestAlgorithm=SHA256'
           if ($env:PFX_PASSWORD) { $sign += ' /p:PackageCertificatePassword="' + $env:PFX_PASSWORD + '"' }
           "SIGNING=enabled(timestamp=sectigo,sha256)" >> ci-diagnostics.log
           Write-Host "signing args: /p:AppxPackageSigningEnabled=true /p:PackageCertificatePassword=***"
@@ -477,6 +481,45 @@ jobs:
       # 以此为结构性判据；signtool verify /pa 复核前，先把签名 pfx 导出的证书
       # 导入本机 Root/TrustedPeople（等价于用户侧 Install.bat 的信任动作）——
       # 自签名证书在 runner 上默认不受信任，不先信任必然误报 0x800B0109。
+      # =====================================================================
+      # P1-9 兜底：WASDK 1.5 的 SignAppxPackage 构建目标即使传入正确的
+      # AppxPackageSigningTimestampServerUrl 也可能忽略时间戳（上游已知问题，
+      # 1.6 才修复）。无时间戳的签名在证书过期后会被 Windows 拒绝安装。
+      # 此步用 Windows SDK 的 signtool 对 MSIX 做带 RFC3161 时间戳的重签
+      # （重签即替换既有签名），失败自动重试并切换备用时间戳服务器，阻断式。
+      # =====================================================================
+      - name: Re-sign MSIX with RFC3161 timestamp (signtool)
+        shell: pwsh
+        env:
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
+        run: |
+          "CHECKPOINT:timestamp-resign-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { "RESIGN=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
+
+          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $st) { Write-Error "未找到 signtool.exe"; exit 1 }
+
+          $pwdArgs = @()
+          if ($env:PFX_PASSWORD) { $pwdArgs = @('/p', $env:PFX_PASSWORD) }
+
+          $servers = @('http://timestamp.sectigo.com', 'http://timestamp.digicert.com')
+          $signed = $false
+          foreach ($ts in $servers) {
+            for ($i = 1; $i -le 3; $i++) {
+              & $st.FullName sign /f PhotoRenameAIHash.pfx @pwdArgs /fd SHA256 /tr $ts /td SHA256 $msix.FullName | Tee-Object -Variable out | Out-Host
+              if ($LASTEXITCODE -eq 0) { Write-Host "时间戳重签成功 (server=$ts, attempt=$i)"; $signed = $true; break }
+              Write-Warning "重签失败 (server=$ts, attempt=$i, exit=$LASTEXITCODE)，稍后重试"
+              Start-Sleep -Seconds 5
+            }
+            if ($signed) { break }
+          }
+          ("RESIGN ok=" + $signed) >> ci-diagnostics.log
+          if (-not $signed) { Write-Error "时间戳重签失败：所有时间戳服务器均不可达或签名被拒"; exit 1 }
+          "CHECKPOINT:timestamp-resign-done" >> ci-diagnostics.log
+
       - name: Verify MSIX signature (blocking)
         shell: pwsh
         run: |
@@ -517,6 +560,38 @@ jobs:
             Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
           }
           "CHECKPOINT:verify-done" >> ci-diagnostics.log
+
+      # =====================================================================
+      # P0-4 校验（阻断式）：确认 MSIX 内已含 .NET 运行时（pubxml SelfContained=true 生效）。
+      # 若缺失则发布链路已退回"框架依赖"而无人察觉——未装 .NET 8 的机器安装后将无法启动。
+      # =====================================================================
+      - name: Verify self-contained .NET runtime in MSIX (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:selfcontained-verify-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { "SCVERIFY=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+          $names = $zip.Entries.FullName
+          $zip.Dispose()
+          $required = @('coreclr.dll','hostfxr.dll','hostpolicy.dll','System.Private.CoreLib.dll')
+          $missing = @()
+          foreach ($r in $required) {
+            $found = $names | Where-Object { $_ -eq $r -or $_.EndsWith('/' + $r) }
+            if (-not $found) { $missing += $r }
+          }
+          ("SCVERIFY msix_size=" + $msix.Length + " entries=" + $names.Count) >> ci-diagnostics.log
+          Write-Host ("MSIX 大小: " + [math]::Round($msix.Length/1MB,1) + " MB, 条目数: " + $names.Count)
+          if ($missing.Count -gt 0) {
+            ("SCVERIFY missing=" + ($missing -join ',')) >> ci-diagnostics.log
+            Write-Error ("MSIX 内缺失 .NET 运行时文件: " + ($missing -join ', ') + " —— SelfContained=true 未生效，请检查发布配置")
+            exit 1
+          }
+          Write-Host "OK: .NET 运行时已随包自包含 (coreclr/hostfxr/hostpolicy/CoreLib 就位)"
+          "CHECKPOINT:selfcontained-verify-done" >> ci-diagnostics.log
 
       # 产物级保险：用签名 pfx 重新导出 .cer 覆盖仓库版，保证 artifact 内的证书
       # 与实际签名证书永远一致（杜绝"仓库 cer 未同步 → 0x800B0109 不受信任"复发）。
