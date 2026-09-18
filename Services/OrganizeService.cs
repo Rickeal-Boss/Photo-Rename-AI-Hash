@@ -350,7 +350,11 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         // 生成新名：未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
-        string template = ai != null ? req.NamingTemplate : "{yyyy}{MM}{dd}_{name}_{n}";
+        // 模板为空（用户清空「命名规则」输入框，或 settings.json 中该字段为 null）时回退到默认模板：
+        // 否则 BuildName 返回空串，最终文件名只剩扩展名（如 ".jpg"），批量文件还会互相撞名。
+        string template = ai != null && !string.IsNullOrWhiteSpace(req.NamingTemplate)
+            ? req.NamingTemplate
+            : "{yyyy}{MM}{dd}_{name}_{n}";
         string baseName = BuildName(f, template, when, index);
         string candidate = baseName + Path.GetExtension(f.Name);
 
