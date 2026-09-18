@@ -30,8 +30,8 @@ PhotoRenameAIHash/
 │  ├─ SettingsService.cs     # Local JSON persistence
 │  └─ AppServices.cs         # Singleton service locator
 ├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, RateGate, ThemeHelper, DpiHelper
-├─ ViewModels/               # Main / Organize / Deduplicate / Settings / About (CommunityToolkit.Mvvm)
-├─ Views/                    # Organize / Deduplicate / Settings / About pages (XAML + code-behind)
+├─ ViewModels/               # Main / Organize / Settings / About (CommunityToolkit.Mvvm)
+├─ Views/                    # Organize / Settings / About pages (XAML + code-behind)
 └─ Styles/Styles.xaml        # Shared styles & resources
 ```
 
@@ -39,8 +39,8 @@ PhotoRenameAIHash/
 - **Navigation**: `NavigationView` + `Frame.Navigate(Type)` in code-behind; view models are
   injected via a lightweight service locator (`AppServices`).
 - **Theming**: `ThemeHelper.Apply(window, AppTheme)` sets `RequestedTheme` (Light/Dark/Default).
-- **Hashing**: `Windows.Graphics.Imaging.BitmapDecoder` resizes the image to an 8×8 (aHash) or
-  9×8 (dHash) `Gray8` buffer; no native dependencies.
+- **MD5 hashing**: `HashService` computes content MD5 (via `System.Security.Cryptography`)
+  for conflict detection and the rename log; no native dependencies.
 
 ## Build & Run
 
