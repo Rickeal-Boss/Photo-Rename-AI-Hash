@@ -149,6 +149,7 @@
                     <ProgressBar Value="{x:Bind ViewModel.Progress, Mode=OneWay}"
                                  IsIndeterminate="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.StatusLineVisibility, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                AutomationProperties.LiveSetting="Polite" />
                     <TextBox x:Name="LogBox" Text="{x:Bind ViewModel.LogText, Mode=OneWay}"

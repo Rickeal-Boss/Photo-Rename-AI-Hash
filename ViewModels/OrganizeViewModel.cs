@@ -102,11 +102,18 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private Visibility _noResultsVisibility = Visibility.Visible;
 
+    /// <summary>
+    /// 进度区常驻状态行的可见性（D-2.6）：运行期 InfoBar 关闭、由该行承载实时状态；
+    /// 终态由 InfoBar 横幅承载同一文案，此处收起以避免同一句话重复展示两遍。
+    /// </summary>
+    public Visibility StatusLineVisibility => StatusBarOpen ? Visibility.Collapsed : Visibility.Visible;
+
     partial void OnStatusBarOpenChanged(bool value)
     {
         // 打开终态横幅时把当前状态文本快照给它；所有终态路径都是「先设 StatusText 再置 StatusBarOpen=true」，
         // 因此此处取到的即终态文案。
         if (value) StatusBarMessage = StatusText;
+        OnPropertyChanged(nameof(StatusLineVisibility)); // D-2.6：终态收起进度区状态行，避免与 InfoBar 同句重复
     }
 
     private void UpdateResultVisibility()
