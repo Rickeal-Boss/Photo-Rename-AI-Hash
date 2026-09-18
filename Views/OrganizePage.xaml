@@ -81,8 +81,12 @@
                             <RadioButton Content="实际执行（真实改动文件）" />
                         </RadioButtons>
                     </Grid>
-                    <TextBlock Text="「模拟运行」不改动任何文件，仅预览结果；「实际执行」会真实复制/移动/重命名，请确认模式后再开始。"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <!-- A-10：模拟运行同样会调用识别接口（预览需要真实文件名），此处明示，避免用户误以为零消耗 -->
+                    <TextBlock TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        「模拟运行」不改动任何文件，仅预览结果；「实际执行」会真实复制/移动/重命名，请确认模式后再开始。
+                        注意：两种模式都会调用识别接口并产生 API 消耗（预览需要真实文件名），模拟运行省去的只是写文件操作。
+                    </TextBlock>
                     <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
                     <CheckBox Content="使用照片拍摄时间（EXIF）作为日期来源；无 EXIF 时回退文件修改时间"
                               IsChecked="{x:Bind ViewModel.UseExifDate, Mode=TwoWay}" />
