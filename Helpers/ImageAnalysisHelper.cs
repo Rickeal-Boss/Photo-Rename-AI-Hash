@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -16,7 +17,9 @@ namespace PhotoRenameAIHash.Helpers;
 /// </summary>
 public static class ImageAnalysisHelper
 {
-    private static readonly HttpClient Http = new();
+    // A-09：默认 HttpClient.Timeout 为 100s，叠加 15 次重试后单文件最坏等待 ≈28 分钟（服务端挂起时）。
+    // 视觉接口正常响应 <20s，收紧到 60s 让挂起快速失败，重试语义与总时长可控。
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
     public static async Task<string?> EncodeAsJpegDataUrlAsync(string path, int maxDim, CancellationToken ct)
     {
@@ -85,7 +88,9 @@ public static class ImageAnalysisHelper
                 }
             },
             temperature = 0.3,
-            max_tokens = 400,
+            // C-04-5：400 对开启思考的模型（智谱 GLM-4.6V 系列等）会被思维链吃光导致 content 为空；
+            // 官方建议 ≥1024，此处给足输出预算防 JSON 截断。
+            max_tokens = 1024,
         };
 
         return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), gate, ct);
@@ -152,6 +157,17 @@ public static class ImageAnalysisHelper
                 var respText = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                 int code = (int)resp.StatusCode;
 
+                // 429 里可能承载平台业务错误码：账户欠费/额度耗尽/套餐到期/无权限属永久错误，
+                // 重试无意义（否则单文件会空转 15 次 ×15s 再被上层重排 10 次）。此处按业务码短路。
+                // 仅对 429 生效，5xx 保持原有重试语义。
+                if (code == 429 && IsPermanentBusinessCode(respText, out var bizCode))
+                {
+                    var permSnippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
+                    throw new HttpRequestException(
+                        $"视觉识别接口返回 429（业务错误码 {bizCode}：账户欠费 / 额度耗尽 / 套餐到期或无权限，重试无意义）：{permSnippet}",
+                        null, resp.StatusCode);
+                }
+
                 // 429 限流 / 5xx 服务端错误：固定等待 15 秒后重试，期间不做任何重命名
                 if (code == 429 || code >= 500)
                 {
@@ -192,11 +208,53 @@ public static class ImageAnalysisHelper
     }
 
     /// <summary>
-    /// 从 OpenAI 兼容响应体中抽取 message content。
+    /// 平台（如智谱）在 HTTP 429 中返回的「账户级永久错误」业务码：重试无法恢复，应立即失败。
+    /// 参考智谱错误码表：1113 欠费、1308 已达使用上限、1309 套餐到期、1311 无该模型权限、
+    /// 1315 Key 类型不匹配、1316~1321 各类周期/套餐上限。1302（并发超限）与 1305（平台过载）
+    /// 属瞬时可恢复，<b>不在此集合内</b>，保持原有 15×15s 重试。
+    /// </summary>
+    private static readonly HashSet<string> PermanentBusinessCodes = new(StringComparer.Ordinal)
+    {
+        "1113", "1308", "1309", "1311", "1315", "1316", "1317", "1318", "1319", "1320", "1321",
+    };
+
+    /// <summary>尝试从响应体解析 error.code（字符串或数字皆可）；命中永久错误码时返回 true 并回传业务码。</summary>
+    private static bool IsPermanentBusinessCode(string respText, out string bizCode)
+    {
+        bizCode = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(respText);
+            if (doc.RootElement.TryGetProperty("error", out var err) &&
+                err.TryGetProperty("code", out var c))
+            {
+                string v = c.ValueKind == JsonValueKind.String ? (c.GetString() ?? "") : c.ToString();
+                if (v.Length > 0 && PermanentBusinessCodes.Contains(v))
+                {
+                    bizCode = v;
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // 响应体非 JSON 或结构不符：按「非永久错误」处理，保持原有重试语义
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 从 OpenAI 兼容响应体中抽取 message content，并兼容「思考型模型」的多种返回形态：
+    /// content 为空时依次回退 <c>message.reasoning_content</c>（智谱 GLM-4.6V 系列命名）与
+    /// <c>message.reasoning</c>（NVIDIA NIM 命名），随后剥离内联 &lt;think&gt; 段。
+    /// 若正文为空且 <c>finish_reason == "length"</c>，说明输出预算被思维链耗尽，
+    /// 抛出可归因的明确异常（而非让上层误判为「模型不按要求返回 JSON」）。
     /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因。
     /// </summary>
     public static string ExtractContent(string raw)
     {
+        string content;
+        string finishReason = "";
         try
         {
             using var doc = JsonDocument.Parse(raw);
@@ -209,11 +267,15 @@ public static class ImageAnalysisHelper
                 throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? err.GetRawText()));
             }
 
-            return root
-                .GetProperty("choices")[0]
-                .GetProperty("message")
-                .GetProperty("content")
-                .GetString() ?? "";
+            var choice = root.GetProperty("choices")[0];
+            var message = choice.GetProperty("message");
+
+            content = ReadMessageString(message, "content");
+            if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning_content");
+            if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning");
+
+            if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                finishReason = fr.GetString() ?? "";
         }
         catch (InvalidOperationException)
         {
@@ -223,51 +285,28 @@ public static class ImageAnalysisHelper
         {
             throw new InvalidOperationException("解析视觉识别响应失败：" + ex.Message, ex);
         }
+
+        var text = StripThink(content).Trim();
+        if (text.Length == 0 && string.Equals(finishReason, "length", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "视觉识别输出被 max_tokens 截断（finish_reason=length）且正文为空：模型可能开启了思考模式，" +
+                "已耗尽输出预算。请关闭思考模式或提高最大输出 tokens 后重试。");
+
+        return text;
     }
+
+    /// <summary>安全读取 message 上的字符串字段；缺失或非字符串时返回空串。</summary>
+    private static string ReadMessageString(JsonElement message, string key)
+        => message.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String
+            ? (v.GetString() ?? "")
+            : "";
 
     /// <summary>
-    /// Nemotron reasoning 响应的内容抽取：优先 <c>choices[0].message.content</c>（最终答案）；
-    /// 若 content 为空（如 thinking 未被请求体开关完全关闭）则回退 <c>message.reasoning</c>
-    /// （官方 reasoning 字段，NIM 命名为 <c>reasoning</c> 而非 OpenAI 的 <c>reasoning_content</c>），
-    /// 思维链中通常也夹带最终 JSON。同时剥离可能内联的 &lt;think&gt;…&lt;/think&gt; 段。
-    /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因。
+    /// Nemotron reasoning 响应的内容抽取：行为已统一到 <see cref="ExtractContent"/>——
+    /// 优先 <c>message.content</c>，为空回退 <c>message.reasoning</c>，并剥离内联 &lt;think&gt; 段。
+    /// 保留本方法名以维持既有调用点不变。
     /// </summary>
-    public static string ExtractNemotronContent(string raw)
-    {
-        string content;
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("error", out var err))
-            {
-                var msg = err.ValueKind == JsonValueKind.String
-                    ? err.GetString()
-                    : (err.TryGetProperty("message", out var m) ? m.GetString() : null);
-                throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? err.GetRawText()));
-            }
-
-            var message = root.GetProperty("choices")[0].GetProperty("message");
-            content = message.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String
-                ? c.GetString() ?? ""
-                : "";
-            if (string.IsNullOrWhiteSpace(content) &&
-                message.TryGetProperty("reasoning", out var r) && r.ValueKind == JsonValueKind.String)
-            {
-                content = r.GetString() ?? "";
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException("解析视觉识别响应失败：" + ex.Message, ex);
-        }
-
-        return StripThink(content).Trim();
-    }
+    public static string ExtractNemotronContent(string raw) => ExtractContent(raw);
 
     /// <summary>剥离模型输出中可能内联的 &lt;think&gt;…&lt;/think&gt; 推理段（大小写不敏感）；
     /// 只有未闭合的 &lt;think&gt; 时把其后内容整体视为推理段丢弃（正常情况下不会出现：
