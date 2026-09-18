@@ -14,13 +14,16 @@
         <!-- 标题栏一体化：自绘标题区（高 48），系统按钮由 ExtendsContentIntoTitleBar + SetTitleBar 接管 -->
         <Grid x:Name="AppTitleBar" Height="48" VerticalAlignment="Top" Background="Transparent">
             <TextBlock Text="{x:Bind ViewModel.AppTitle, Mode=OneWay}" VerticalAlignment="Center" Margin="16,0,0,0"
-                       Style="{StaticResource CaptionTextBlockStyle}" />
+                       FontSize="14" FontWeight="SemiBold"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
         </Grid>
 
         <!-- P0-3：整体下移 48px，避免 SetTitleBar 拖拽区遮挡汉堡按钮 -->
+        <!-- D-1.2：Left 常驻导航栏默认约 320px，是内容区横向控件组溢出的直接诱因，收紧到 240px -->
         <NavigationView x:Name="NavView"
                         SelectionChanged="NavView_SelectionChanged"
                         PaneDisplayMode="Left"
+                        OpenPaneLength="240"
                         IsBackButtonVisible="Auto"
                         IsSettingsVisible="False"
                         Margin="0,48,0,0">

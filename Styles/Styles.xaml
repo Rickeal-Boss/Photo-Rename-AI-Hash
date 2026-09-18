@@ -5,8 +5,18 @@
     <!-- ═══════════════════════════════════════════
          主题感知背景刷子
          ═══════════════════════════════════════════ -->
+    <!-- 当前未被引用，保留待用 -->
     <SolidColorBrush x:Key="NavPaneBackgroundBrush"
                      Color="{ThemeResource SolidBackgroundFillColorSecondary}" />
+
+    <!-- ═══════════════════════════════════════════
+         统一栅格与间距规范（全页面共用，避免三页各一套标准）
+         ═══════════════════════════════════════════ -->
+    <x:Double x:Key="PageContentMaxWidth">880</x:Double>
+    <Thickness x:Key="PagePadding">24,20,24,32</Thickness>
+    <x:Double x:Key="PageSpacing">16</x:Double>
+    <x:Double x:Key="CardSpacing">12</x:Double>
+    <Thickness x:Key="PageTitleMargin">0,0,0,8</Thickness>
 
     <!-- ═══════════════════════════════════════════
          隐式样式 —— Page（Mica 启用时需透出系统背景；
@@ -25,11 +35,10 @@
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
     </Style>
 
-    <Thickness x:Key="PagePadding">24,24,24,24</Thickness>
-
     <!-- ═══════════════════════════════════════════
          章节标题
          ═══════════════════════════════════════════ -->
+    <!-- 当前未被引用，保留待用 -->
     <Style x:Key="SectionHeaderStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="14" />
         <Setter Property="FontWeight" Value="SemiBold" />
@@ -45,7 +54,7 @@
         <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="Padding" Value="16" />
+        <Setter Property="Padding" Value="16,14,16,16" />
     </Style>
 
     <!-- 卡片标题 -->

@@ -45,6 +45,13 @@ public sealed partial class MainWindow : Window
 
         // P1-2+3：返回按钮走统一返回逻辑
         NavView.BackRequested += (_, __) => GoBack();
+
+        // D-1.1：给窗口一个合理初始尺寸——默认尺寸偏小，而 NavigationView 为 Left 常驻模式，
+        // 内容区会被导航栏挤压（OrganizePage 的横向控件组在窄宽度下会溢出裁剪）。
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(1180, 820));
+
+        // 最小窗口尺寸约束：OverlappedPresenter.PreferredMinimumWidth/Height 需 Windows App SDK 1.7+，
+        // 本项目锁定 1.5（Microsoft.WindowsAppSDK 1.5.240428000），该 API 不存在，故此处不做最小尺寸限制。
     }
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
