@@ -845,9 +845,11 @@ jobs:
 
 
 
-      - name: Upload build artifact
+      # 阻断式：staging 步已保证 artifact/ 内三件产物齐备（缺任一即已 exit 1），
+      # 此时上传失败只剩网络/配额等瞬时因素。若继续 continue-on-error，
+      # 会出现「CI 全绿但用户拿不到安装包」的静默失败——产物即交付物，宁可红灯。
 
-        continue-on-error: true
+      - name: Upload build artifact
 
         uses: actions/upload-artifact@v4
 
