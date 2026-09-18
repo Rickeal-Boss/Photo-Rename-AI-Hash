@@ -141,7 +141,7 @@
                     <TextBlock Text="进度" Style="{StaticResource CardTitleStyle}" />
                     <!-- P1-1：任务终态（完成/失败/取消）以 InfoBar 高亮提示，可手动关闭 -->
                     <!-- D-2.6：InfoBar 绑专用 StatusBarMessage（终态快照），与下方常驻 StatusText 分工，避免同句重复展示 -->
-                    <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=OneWay}"
+                    <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=TwoWay}"
                              Severity="{x:Bind ViewModel.StatusSeverity, Mode=OneWay}"
                              Message="{x:Bind ViewModel.StatusBarMessage, Mode=OneWay}"
                              IsClosable="True"
