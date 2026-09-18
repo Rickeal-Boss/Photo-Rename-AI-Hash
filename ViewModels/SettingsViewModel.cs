@@ -147,7 +147,8 @@ public partial class SettingsViewModel : ObservableObject
         var pendingProvider = (AiProvider)AiProviderIndex;
         _model = _settings.Load();
         _model.Theme = Theme;
-        _model.DefaultFolder = DefaultFolder;
+        // A-07：DefaultFolder 由整理页拥有（整理运行结束时写入），本页不再回写，
+        // 避免用构造时快照把它静默回退；本页仅只读展示，导航回页时由 SyncOwnedFieldsFromDisk 同步。
         _model.Language = Language;
         _model.AiProvider = pendingProvider;
         _model.ZhipuApiKey = ZhipuApiKey;
@@ -164,5 +165,15 @@ public partial class SettingsViewModel : ObservableObject
         StatusText = "设置已保存。";
         StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：保存成功
         StatusBarOpen = true;
+    }
+
+    /// <summary>
+    /// A-07：设置页为 Required 缓存、整会话只构造一次，而 <see cref="AppSettings.DefaultFolder"/>
+    /// 由整理页拥有（整理运行结束时写入）。每次导航回本页时从磁盘同步该字段，
+    /// 避免用陈旧快照把它写回；同时该字段在 UI 上改为只读展示。
+    /// </summary>
+    public void SyncOwnedFieldsFromDisk()
+    {
+        DefaultFolder = _settings.Load().DefaultFolder;
     }
 }

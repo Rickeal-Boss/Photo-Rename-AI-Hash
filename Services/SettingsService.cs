@@ -3,6 +3,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Models;
 
@@ -13,6 +14,10 @@ public sealed class SettingsService : ISettingsService
     private static readonly string FilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "PhotoRenameAIHash", "settings.json");
+
+    /// <summary>A-08：整理任务结束的持久化与用户点「保存设置」可能并发，固定 tmp 名会互相争用，
+    /// 加进程内串行锁保证同一时刻只有一次 SaveAsync 在写盘。</summary>
+    private static readonly SemaphoreSlim _saveLock = new(1, 1);
 
     public AppSettings Load()
     {
@@ -41,35 +46,46 @@ public sealed class SettingsService : ISettingsService
         return new AppSettings();
     }
 
-    public Task SaveAsync(AppSettings settings)
+    /// <summary>
+    /// 原子写 settings.json。A-08：整理任务结束的持久化与用户点「保存设置」可能并发，
+    /// 固定 tmp 名会互相争用（一方 File.Move 失败被上层 catch 显示为「出错」）。加进程内串行锁。
+    /// </summary>
+    public async Task SaveAsync(AppSettings settings)
     {
-        var dir = Path.GetDirectoryName(FilePath)!;
-        Directory.CreateDirectory(dir);
+        await _saveLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var dir = Path.GetDirectoryName(FilePath)!;
+            Directory.CreateDirectory(dir);
 
-        // 加密仅作用于落盘内容：先在共享对象上暂存密文、序列化、写盘，再还原明文，
-        // 避免污染内存中 VM 持有的 settings（TextBox 仍需显示明文）。
-        var z = settings.ZhipuApiKey;
-        var q = settings.QwenApiKey;
-        var n = settings.NvidiaApiKey;
-        var c = settings.CustomApiKey;
-        settings.ZhipuApiKey = Protect(z);
-        settings.QwenApiKey = Protect(q);
-        settings.NvidiaApiKey = Protect(n);
-        settings.CustomApiKey = Protect(c);
+            // 加密仅作用于落盘内容：先在共享对象上暂存密文、序列化、写盘，再还原明文，
+            // 避免污染内存中 VM 持有的 settings（TextBox 仍需显示明文）。
+            var z = settings.ZhipuApiKey;
+            var q = settings.QwenApiKey;
+            var n = settings.NvidiaApiKey;
+            var c = settings.CustomApiKey;
+            settings.ZhipuApiKey = Protect(z);
+            settings.QwenApiKey = Protect(q);
+            settings.NvidiaApiKey = Protect(n);
+            settings.CustomApiKey = Protect(c);
 
-        var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
 
-        // 还原内存对象为明文
-        settings.ZhipuApiKey = z;
-        settings.QwenApiKey = q;
-        settings.NvidiaApiKey = n;
-        settings.CustomApiKey = c;
+            // 还原内存对象为明文
+            settings.ZhipuApiKey = z;
+            settings.QwenApiKey = q;
+            settings.NvidiaApiKey = n;
+            settings.CustomApiKey = c;
 
-        // 原子写：先写临时文件再原地替换，避免写入中途崩溃损坏 settings.json
-        var tmp = FilePath + ".tmp";
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, FilePath, overwrite: true);
-        return Task.CompletedTask;
+            // 原子写：先写临时文件再原地替换，避免写入中途崩溃损坏 settings.json
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, FilePath, overwrite: true);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     /// <summary>
