@@ -173,6 +173,22 @@ jobs:
 
       # 本步为必需步：改写后回读校验，确保 0 处残留 x64。
 
+      # ---------------------------------------------------------------------
+
+      # ⚠️ 范围警告（B-01 / A-01）：本步只作用于 bin 下的 loose exe 输出。MSIX 模式下
+
+      #    Publish 在同一次 msbuild 进程内直接产出 .msix，loose 输出【不入 artifact】，
+
+      #    也就是说本步的改写从未作用于用户实际拿到的 .msix。包内 exe 的合规性由紧随
+
+      #    其后的 "Assert embedded manifest inside MSIX (blocking)" 只读断言步核验。
+
+      # ⚠️ 严禁把本步的 <dpiAwareness> / <longPathAware> 删除正则套用到 .msix 内的 exe：
+
+      #    app.manifest 里合法的 PerMonitorV2 声明会被 <dpiAwareness[^>]*>.*?</dpiAwareness>
+
+      #    一并删掉，直接改包会立刻引入 P7 DPI 回归（125%+ 缩放整窗位图拉伸、文字发虚）。
+
       # =====================================================================
 
       - name: Fix embedded manifest (processorArchitecture x64 -> amd64)
@@ -296,6 +312,94 @@ jobs:
           }
 
           "CHECKPOINT:manifestfix-done" >> ci-diagnostics.log
+
+
+
+      # =====================================================================
+
+      # B-01 断言（阻断式，只读）：核验【用户实际拿到的 .msix】内 exe 的内嵌 manifest。
+
+      # 上面 "Fix embedded manifest" 步只改 bin 下的 loose exe，而 MSIX 模式下 Publish
+
+      # 直接产出 .msix、loose 输出不入 artifact —— 此前 CI 从未真正校验过包内 exe。
+
+      # 本步把「包内 exe 的内嵌 manifest 是否合规」变成可验证事实：若包内出现
+
+      # processorArchitecture="x64"，用户双击 exe 会报"并行配置不正确"，必须阻断。
+
+      # dpiAwareness / longPathAware 仅记录计数（不判定），用于判断 P7 相关声明存在性。
+
+      # ⚠️ 本步【只读】：不解压、不重打包、不修改 .msix。
+
+      # ⚠️ 严禁在此处或任何地方新增"直接修改 .msix 内 exe 的 manifest"逻辑：
+
+      #    上面的 <dpiAwareness[^>]*>.*?</dpiAwareness> 删除正则会把 app.manifest 里
+
+      #    合法的 PerMonitorV2 声明一并删掉，直接改包会引入 P7 DPI 回归
+
+      #    （125%+ 缩放整窗位图拉伸、文字发虚）。
+
+      # =====================================================================
+
+      - name: Assert embedded manifest inside MSIX (blocking)
+
+        shell: pwsh
+
+        run: |
+
+          "CHECKPOINT:msix-manifest-assert-start" >> ci-diagnostics.log
+
+          $ErrorActionPreference = 'Stop'
+
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+          if (-not $msix) { "MSIXMANIFEST=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix（无法校验包内 exe 的内嵌 manifest）"; exit 1 }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+
+          $entry = $zip.Entries | Where-Object { $_.Name -eq 'PhotoRenameAIHash.exe' } | Select-Object -First 1
+
+          if (-not $entry) { $zip.Dispose(); "MSIXMANIFEST=NO_EXE_ENTRY" >> ci-diagnostics.log; Write-Error ("MSIX 内未找到 PhotoRenameAIHash.exe 条目，断言无意义（包: " + $msix.Name + ")"); exit 1 }
+
+          $entryName = $entry.FullName
+
+          # 只读该条目字节到内存，不解压到磁盘（避免污染工作区）
+
+          $ms = New-Object System.IO.MemoryStream
+
+          $st = $entry.Open()
+
+          $st.CopyTo($ms)
+
+          $st.Dispose()
+
+          $bytes = $ms.ToArray()
+
+          $ms.Dispose()
+
+          $zip.Dispose()
+
+          $s = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+          $x64 = ([regex]::Matches($s, 'processorArchitecture="x64"')).Count
+
+          $amd = ([regex]::Matches($s, 'processorArchitecture="amd64"')).Count
+
+          $dpi = ([regex]::Matches($s, 'dpiAwareness')).Count
+
+          $lpa = ([regex]::Matches($s, 'longPathAware')).Count
+
+          $line = "MSIXMANIFEST exe=" + $entryName + " x64=" + $x64 + " amd64=" + $amd + " dpiAwareness=" + $dpi + " longPathAware=" + $lpa
+
+          $line >> ci-diagnostics.log
+
+          Write-Host $line
+
+          if ($x64 -ne 0) { Write-Error ("包内 exe 内嵌 manifest 仍含 processorArchitecture=""x64"" x" + $x64 + "（MSIX: " + $msix.Name + "）：SxS activation context 非法枚举，用户双击 exe 会报""并行配置不正确""。注意现有修补步改的是 loose 文件、不作用于包内，需在打包链路层面修复。"); exit 1 }
+
+          "CHECKPOINT:msix-manifest-assert-done" >> ci-diagnostics.log
 
 
 
