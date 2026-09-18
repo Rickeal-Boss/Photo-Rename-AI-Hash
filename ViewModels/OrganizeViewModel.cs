@@ -60,7 +60,9 @@ public partial class OrganizeViewModel : ObservableObject
         get => DryRun ? 0 : 1;
         set
         {
-            DryRun = value == 0;
+            var v = value < 0 ? 0 : (value > 1 ? 1 : value); // 越界值钳制到合法选项
+            if (DryRun == (v == 0) && RunModeIndex == v) return; // 值未变化时不触发通知
+            DryRun = v == 0;
             OnPropertyChanged(nameof(RunModeIndex));
         }
     }

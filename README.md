@@ -19,7 +19,7 @@ It is the WinUI 3 rewrite of the original Go-based `Photo-rename-AI` tool, follo
 
 ```
 PhotoRenameAIHash/
-├─ PhotoRenameAIHash.csproj   # .NET 8 + WinUI 3 (unpackaged)
+├─ PhotoRenameAIHash.csproj   # .NET 8 + WinUI 3 (packaged MSIX, self-contained)
 ├─ app.manifest              # DPI-aware / long-path declaration + WinAppSDK dependency
 ├─ App.xaml / .cs            # Entry point, global resource dictionaries
 ├─ MainWindow.xaml / .cs     # NavigationView + Frame host
@@ -46,9 +46,7 @@ PhotoRenameAIHash/
 ## Build & Run
 
 ### Prerequisites
-- [.NET 8 SDK](https://dotnet.microsoft.com/download)
-- [Windows App SDK (WinUI 3) runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
-  (the unpackaged app loads the framework from the installed runtime)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download) (build-time only)
 
 ### Local build
 ```bash
@@ -58,10 +56,14 @@ dotnet build  PhotoRenameAIHash.csproj -c Release -p:Platform=x64
 ```
 
 ### CI
-Pushing to `main` triggers GitHub Actions (`windows-latest`, .NET 8) which builds the
-unpackaged executable and uploads it as the `PhotoRenameAIHash-windows` artifact.
+Pushing to `main` / `pfx` / `fix` triggers GitHub Actions (`windows-latest`, .NET 8) which
+publishes a **self-contained, signed MSIX** (both the Windows App SDK and the .NET 8 runtime
+are bundled inside the package — no runtime prerequisites on the target machine) and uploads
+it as the `PhotoRenameAIHash-msix` artifact together with the signing certificate (`PhotoRenameAIHash.cer`).
 
 ## Notes
-- The project builds **unpackaged** (`<WindowsPackageType>None</WindowsPackageType>`) to keep CI
-  simple — no MSIX signing required.
-- EXIF-based date parsing falls back to file last-write time when metadata is unavailable.
+- The project ships as a **self-contained MSIX** (`WindowsAppSDKSelfContained=true` +
+  `SelfContained=true`): end users install with `Add-AppxPackage` only (see `Install.bat`),
+  no separate .NET / Windows App SDK runtime install is needed.
+- EXIF-based date parsing uses the photo's original capture time (`DateTimeOriginal`) and falls
+  back to file last-write time when metadata is unavailable (toggleable on the Organize page).

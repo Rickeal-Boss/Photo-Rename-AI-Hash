@@ -495,8 +495,9 @@ jobs:
         run: |
           "CHECKPOINT:timestamp-resign-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'
-          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $msix) { "RESIGN=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
+          # 对 bin 下发现的全部 .msix 重签（防 AppPackages 目录中同时存在多架构/多变体包时漏签）
+          $msixes = @(Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending)
+          if ($msixes.Count -eq 0) { "RESIGN=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
 
           $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
                 Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -506,18 +507,20 @@ jobs:
           if ($env:PFX_PASSWORD) { $pwdArgs = @('/p', $env:PFX_PASSWORD) }
 
           $servers = @('http://timestamp.sectigo.com', 'http://timestamp.digicert.com')
-          $signed = $false
-          foreach ($ts in $servers) {
-            for ($i = 1; $i -le 3; $i++) {
-              & $st.FullName sign /f PhotoRenameAIHash.pfx @pwdArgs /fd SHA256 /tr $ts /td SHA256 $msix.FullName | Tee-Object -Variable out | Out-Host
-              if ($LASTEXITCODE -eq 0) { Write-Host "时间戳重签成功 (server=$ts, attempt=$i)"; $signed = $true; break }
-              Write-Warning "重签失败 (server=$ts, attempt=$i, exit=$LASTEXITCODE)，稍后重试"
-              Start-Sleep -Seconds 5
+          foreach ($msix in $msixes) {
+            $signed = $false
+            foreach ($ts in $servers) {
+              for ($i = 1; $i -le 3; $i++) {
+                & $st.FullName sign /f PhotoRenameAIHash.pfx @pwdArgs /fd SHA256 /tr $ts /td SHA256 $msix.FullName | Tee-Object -Variable out | Out-Host
+                if ($LASTEXITCODE -eq 0) { Write-Host "时间戳重签成功: $($msix.Name) (server=$ts, attempt=$i)"; $signed = $true; break }
+                Write-Warning "重签失败 ($($msix.Name), server=$ts, attempt=$i, exit=$LASTEXITCODE)，稍后重试"
+                Start-Sleep -Seconds 5
+              }
+              if ($signed) { break }
             }
-            if ($signed) { break }
+            ("RESIGN " + $msix.Name + " ok=" + $signed) >> ci-diagnostics.log
+            if (-not $signed) { Write-Error "时间戳重签失败：$($msix.Name) 所有时间戳服务器均不可达或签名被拒"; exit 1 }
           }
-          ("RESIGN ok=" + $signed) >> ci-diagnostics.log
-          if (-not $signed) { Write-Error "时间戳重签失败：所有时间戳服务器均不可达或签名被拒"; exit 1 }
           "CHECKPOINT:timestamp-resign-done" >> ci-diagnostics.log
 
       - name: Verify MSIX signature (blocking)

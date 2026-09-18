@@ -104,6 +104,9 @@ public sealed class PhotoService : IPhotoService
     /// EXIF 时间无时区语义；个别带时区偏移的标签会被库解析为 Kind=Utc（内部 AdjustToUniversal），
     /// 转回本地墙钟时间，与 LastModified（本地时间）的回退口径保持一致（见 ScanAsync 注释）。
     /// </summary>
-    private static DateTime Normalize(DateTime dt) =>
-        dt.Kind == DateTimeKind.Utc ? dt.ToLocalTime() : dt;
+    private static DateTime Normalize(DateTime dt)
+    {
+        if (dt.Kind == DateTimeKind.Utc) dt = dt.ToLocalTime();
+        return DateTime.SpecifyKind(dt, DateTimeKind.Unspecified); // 统一 Unspecified 语义，避免下游隐式时区换算
+    }
 }
