@@ -22,7 +22,7 @@ PhotoRenameAIHash/
 ├─ app.manifest              # DPI-aware / long-path declaration + WinAppSDK dependency
 ├─ App.xaml / .cs            # Entry point, global resource dictionaries
 ├─ MainWindow.xaml / .cs     # NavigationView + Frame host
-├─ Models/                   # PhotoFile, AppSettings, OrganizeTypes, RenameLogEntry
+├─ Models/                   # AiProvider, AppSettings, ConflictStrategy, ImageAnalysisResult, OperationMode, OrganizeTypes, PhotoFile, RenameLogEntry
 ├─ Services/
 │  ├─ Interfaces/            # IHashService, IPhotoService, ISettingsService
 │  ├─ HashService.cs         # MD5 content hashing (conflict detection / rename log)

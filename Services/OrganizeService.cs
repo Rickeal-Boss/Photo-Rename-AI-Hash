@@ -589,7 +589,8 @@ internal sealed class PauseTokenSource
         }
         finally
         {
-            reg.DisposeAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+            // P1-1 复核修正：async 上下文中正确 await ValueTask 释放注册
+            await reg.DisposeAsync().ConfigureAwait(false);
         }
     }
 }

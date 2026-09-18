@@ -142,11 +142,14 @@ public partial class SettingsViewModel : ObservableObject
         // P1-A 修复：_model 是页面构造时的快照（页面 Required 缓存后整会话不刷新），
         // 直接整文件保存会静默回退整理页等其它来源刚写入的配置。保存前先重读磁盘，
         // 只覆盖本页拥有的字段，其余字段（整理配置等）以磁盘最新值为准。
+        // 注意：AiProviderIndex 的 getter 读取 _model.AiProvider，必须先在重读前捕获
+        // UI 当前选择，否则重读后 getter 会取到磁盘旧值（P0-1 修复）。
+        var pendingProvider = (AiProvider)AiProviderIndex;
         _model = _settings.Load();
         _model.Theme = Theme;
         _model.DefaultFolder = DefaultFolder;
         _model.Language = Language;
-        _model.AiProvider = (AiProvider)AiProviderIndex;
+        _model.AiProvider = pendingProvider;
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;
         _model.NvidiaApiKey = NvidiaApiKey;
@@ -155,6 +158,9 @@ public partial class SettingsViewModel : ObservableObject
         _model.CustomApiKey = CustomApiKey;
 
         await _settings.SaveAsync(_model);
+        // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新
+        OnPropertyChanged(nameof(AiProviderIndex));
+        OnPropertyChanged(nameof(CustomProviderVisibility));
         StatusText = "设置已保存。";
         StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：保存成功
         StatusBarOpen = true;
