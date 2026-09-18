@@ -88,6 +88,10 @@ public partial class OrganizeViewModel : ObservableObject
     // ── P1-1：任务终态（完成/失败/取消）以 InfoBar 高亮提示；新任务开始时关闭 ──
     [ObservableProperty] private bool _statusBarOpen;
 
+    /// <summary>InfoBar 专用消息：仅在终态（StatusBarOpen 打开）时与 StatusText 同步，
+    /// 与进度区下方常驻的 StatusText 分工——前者是「终态横幅」，后者是「实时状态行」，避免同句重复展示。</summary>
+    [ObservableProperty] private string _statusBarMessage = "";
+
     [ObservableProperty] private Microsoft.UI.Xaml.Controls.InfoBarSeverity _statusSeverity =
         Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational;
 
@@ -97,6 +101,13 @@ public partial class OrganizeViewModel : ObservableObject
     [ObservableProperty] private Visibility _resultsVisibility = Visibility.Collapsed;
 
     [ObservableProperty] private Visibility _noResultsVisibility = Visibility.Visible;
+
+    partial void OnStatusBarOpenChanged(bool value)
+    {
+        // 打开终态横幅时把当前状态文本快照给它；所有终态路径都是「先设 StatusText 再置 StatusBarOpen=true」，
+        // 因此此处取到的即终态文案。
+        if (value) StatusBarMessage = StatusText;
+    }
 
     private void UpdateResultVisibility()
     {

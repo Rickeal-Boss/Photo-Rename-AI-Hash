@@ -11,7 +11,7 @@
     NavigationCacheMode="Required">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24" Spacing="16" MaxWidth="960">
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageSpacing}" MaxWidth="{StaticResource PageContentMaxWidth}">
             <TextBlock Text="整理" Style="{StaticResource PageTitleStyle}" />
 
             <!-- 路径设置 -->
@@ -35,13 +35,67 @@
                 </StackPanel>
             </Border>
 
+            <!-- 操作模式（D-2.10：先定「做什么」再定「怎么命名」，故置于识别引擎之前） -->
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="操作模式" Style="{StaticResource CardTitleStyle}" />
+                    <!-- D-2.2：原为单行横向 StackPanel，三组控件最小宽 ≈800px > 卡片可用 ≈780px，
+                         必然溢出裁剪（P0-2 只验证了控件语义、未验证布局）。改为两行 Grid：
+                         第一行两个下拉并排，第二行 RadioButtons 独占整行。 -->
+                    <Grid ColumnSpacing="24" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="模式" VerticalAlignment="Center" />
+                            <ComboBox SelectedIndex="{x:Bind ViewModel.OperationModeIndex, Mode=TwoWay}" MinWidth="160">
+                                <ComboBoxItem Content="复制 (copy)" />
+                                <ComboBoxItem Content="移动 (move)" />
+                                <ComboBoxItem Content="重命名 (rename)" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="冲突处理" VerticalAlignment="Center" />
+                            <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictIndex, Mode=TwoWay}" MinWidth="200">
+                                <ComboBoxItem Content="自动重命名(加 _1/_2)" />
+                                <ComboBoxItem Content="跳过" />
+                                <ComboBoxItem Content="覆盖" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <!-- P0-2 修复：原 ToggleSwitch 的 OffContent/OnContent 与 IsOn(DryRun) 绑定语义完全颠倒
+                             （DryRun=true 显示「实际执行」），且默认值恰在真实执行状态。改为双选项单选，
+                             所见即所选，杜绝标签语义反转。 -->
+                        <RadioButtons Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                                      SelectedIndex="{x:Bind ViewModel.RunModeIndex, Mode=TwoWay}"
+                                      MaxColumns="2">
+                            <RadioButton Content="模拟运行（仅预览）" />
+                            <RadioButton Content="实际执行（真实改动文件）" />
+                        </RadioButtons>
+                    </Grid>
+                    <TextBlock Text="「模拟运行」不改动任何文件，仅预览结果；「实际执行」会真实复制/移动/重命名，请确认模式后再开始。"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
+                    <CheckBox Content="使用照片拍摄时间（EXIF）作为日期来源；无 EXIF 时回退文件修改时间"
+                              IsChecked="{x:Bind ViewModel.UseExifDate, Mode=TwoWay}" />
+                </StackPanel>
+            </Border>
+
             <!-- 识别引擎 / 命名规则 -->
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
                     <TextBlock Text="识别引擎 / 命名规则" Style="{StaticResource CardTitleStyle}" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <TextBlock Text="识别引擎" VerticalAlignment="Center" />
-                        <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="200">
+                        <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" MinWidth="240">
                             <ComboBoxItem Content="无（按日期/序号命名）" />
                             <ComboBoxItem Content="智谱 GLM-4.6V-Flash" />
                             <ComboBoxItem Content="通义千问 Qwen-VL" />
@@ -60,46 +114,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- 操作模式 -->
-            <Border Style="{StaticResource CardStyle}">
-                <StackPanel Spacing="12">
-                    <TextBlock Text="操作模式" Style="{StaticResource CardTitleStyle}" />
-                    <StackPanel Orientation="Horizontal" Spacing="24">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="模式" VerticalAlignment="Center" />
-                            <ComboBox SelectedIndex="{x:Bind ViewModel.OperationModeIndex, Mode=TwoWay}" Width="160">
-                                <ComboBoxItem Content="复制 (copy)" />
-                                <ComboBoxItem Content="移动 (move)" />
-                                <ComboBoxItem Content="重命名 (rename)" />
-                            </ComboBox>
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="冲突处理" VerticalAlignment="Center" />
-                            <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictIndex, Mode=TwoWay}" Width="200">
-                                <ComboBoxItem Content="自动重命名(加 _1/_2)" />
-                                <ComboBoxItem Content="跳过" />
-                                <ComboBoxItem Content="覆盖" />
-                            </ComboBox>
-                        </StackPanel>
-                        <!-- P0-2 修复：原 ToggleSwitch 的 OffContent/OnContent 与 IsOn(DryRun) 绑定语义完全颠倒
-                             （DryRun=true 显示「实际执行」），且默认值恰在真实执行状态。改为双选项单选，
-                             所见即所选，杜绝标签语义反转。 -->
-                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                            <RadioButtons SelectedIndex="{x:Bind ViewModel.RunModeIndex, Mode=TwoWay}"
-                                          MaxColumns="2">
-                                <RadioButton Content="模拟运行（仅预览，不改动文件）" />
-                                <RadioButton Content="实际执行（将真实复制/移动/重命名）" />
-                            </RadioButtons>
-                        </StackPanel>
-                    </StackPanel>
-                    <TextBlock Text="「模拟运行」不改动任何文件，仅预览结果；「实际执行」会真实改动文件，请确认模式后再开始。"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
-                    <CheckBox Content="使用照片拍摄时间（EXIF）作为日期来源；无 EXIF 时回退文件修改时间"
-                              IsChecked="{x:Bind ViewModel.UseExifDate, Mode=TwoWay}" />
-                </StackPanel>
-            </Border>
-
             <!-- 执行控制 -->
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
@@ -115,6 +129,8 @@
                         <Button Content="{x:Bind ViewModel.PauseButtonText, Mode=OneWay}"
                                 Command="{x:Bind ViewModel.PauseToggleCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                        <Button Content="打开输出文件夹" Click="OpenOutput_Click"
+                                ToolTipService.ToolTip="在资源管理器中打开输出位置" />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -124,9 +140,10 @@
                 <StackPanel Spacing="8">
                     <TextBlock Text="进度" Style="{StaticResource CardTitleStyle}" />
                     <!-- P1-1：任务终态（完成/失败/取消）以 InfoBar 高亮提示，可手动关闭 -->
+                    <!-- D-2.6：InfoBar 绑专用 StatusBarMessage（终态快照），与下方常驻 StatusText 分工，避免同句重复展示 -->
                     <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=OneWay}"
                              Severity="{x:Bind ViewModel.StatusSeverity, Mode=OneWay}"
-                             Message="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                             Message="{x:Bind ViewModel.StatusBarMessage, Mode=OneWay}"
                              IsClosable="True"
                              AutomationProperties.LiveSetting="Polite" />
                     <ProgressBar Value="{x:Bind ViewModel.Progress, Mode=OneWay}"
@@ -136,7 +153,7 @@
                                AutomationProperties.LiveSetting="Polite" />
                     <TextBox x:Name="LogBox" Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
                              Style="{StaticResource LogTextBoxStyle}"
-                             Height="140" ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                             MinHeight="120" MaxHeight="240" ScrollViewer.VerticalScrollBarVisibility="Auto" />
                 </StackPanel>
             </Border>
 
@@ -148,7 +165,7 @@
                     <TextBlock Text="暂无处理记录。开始整理后，这里会显示每个文件的处理结果。"
                                Visibility="{x:Bind ViewModel.NoResultsVisibility, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <Grid ColumnDefinitions="2*,2*,Auto,Auto" Padding="0,0,0,4"
+                    <Grid ColumnDefinitions="*,*,Auto,110" Padding="0,0,0,4"
                           Visibility="{x:Bind ViewModel.ResultsVisibility, Mode=OneWay}">
                         <TextBlock Grid.Column="0" Text="原文件名" FontWeight="SemiBold" />
                         <TextBlock Grid.Column="1" Text="新文件名" FontWeight="SemiBold" />
@@ -166,7 +183,7 @@
                         </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="m:RenameLogEntry">
-                                <Grid ColumnDefinitions="2*,2*,Auto,Auto">
+                                <Grid ColumnDefinitions="*,*,Auto,110">
                                     <TextBlock Grid.Column="0" Text="{x:Bind OriginalName}" TextTrimming="CharacterEllipsis" />
                                     <TextBlock Grid.Column="1" Text="{x:Bind NewName}"
                                                Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
@@ -174,22 +191,24 @@
                                     <!-- P1-4：状态列图标化（成功/失败/中性三态重叠，按 Model 计算属性互斥显示），
                                          原状态文本改挂 ToolTip 以不丢失信息；
                                          P1-4 修复：4 处 x:Bind 显式 Mode=OneTime，表明有意绑定不可变对象，
-                                         防日后 Status 加 setter 时图标不刷新 -->
-                                    <Grid Grid.Column="2" Margin="12,0,0,0" ToolTipService.ToolTip="{x:Bind Status, Mode=OneTime}">
+                                         防日后 Status 加 setter 时图标不刷新；
+                                         A-12：状态绑定改用 StatusTip（状态+错误详情），让异常原文可见 -->
+                                    <Grid Grid.Column="2" Margin="12,0,0,0" ToolTipService.ToolTip="{x:Bind StatusTip, Mode=OneTime}">
                                         <FontIcon Glyph="&#xE73E;" FontSize="14"
                                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                                   Visibility="{x:Bind IsSuccessVisibility, Mode=OneTime}"
-                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                                  AutomationProperties.Name="{x:Bind StatusTip, Mode=OneTime}" />
                                         <FontIcon Glyph="&#xE711;" FontSize="14"
                                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                                                   Visibility="{x:Bind IsErrorVisibility, Mode=OneTime}"
-                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                                  AutomationProperties.Name="{x:Bind StatusTip, Mode=OneTime}" />
                                         <FontIcon Glyph="&#xE946;" FontSize="14"
                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                   Visibility="{x:Bind IsNeutralVisibility, Mode=OneTime}"
-                                                  AutomationProperties.Name="{x:Bind Status, Mode=OneTime}" />
+                                                  AutomationProperties.Name="{x:Bind StatusTip, Mode=OneTime}" />
                                     </Grid>
-                                    <TextBlock Grid.Column="3" Text="{x:Bind Md5}" Margin="12,0,0,0"
+                                    <TextBlock Grid.Column="3" Text="{x:Bind Md5Short}" Margin="12,0,0,0"
+                                               ToolTipService.ToolTip="{x:Bind Md5, Mode=OneTime}"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
                             </DataTemplate>

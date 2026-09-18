@@ -72,6 +72,36 @@ public sealed partial class OrganizePage : Page
         if (folder != null) ViewModel.OutputFolder = folder;
     }
 
+    private async void OpenOutput_Click(object sender, RoutedEventArgs e)
+    {
+        // 重命名模式输出即源目录；其余模式用输出目录。为空或不存在则回退源目录。
+        var path = ViewModel.OutputFolder;
+        if (string.IsNullOrWhiteSpace(path) || !System.IO.Directory.Exists(path))
+            path = ViewModel.SourceFolder;
+
+        if (string.IsNullOrWhiteSpace(path) || !System.IO.Directory.Exists(path))
+        {
+            return; // 无有效目录：静默忽略（按钮为便捷入口，不做打断式提示）
+        }
+
+        try
+        {
+            await Windows.System.Launcher.LaunchFolderPathAsync(path);
+        }
+        catch
+        {
+            // 某些环境（策略限制/路径不可访问）下 LaunchFolderPathAsync 不可用，退化为 explorer
+            try
+            {
+                System.Diagnostics.Process.Start("explorer.exe", $"\"{path}\"");
+            }
+            catch
+            {
+                // 两者均失败则忽略，不影响主流程
+            }
+        }
+    }
+
     private static async Task<string?> PickFolderAsync()
     {
         var picker = new FolderPicker
