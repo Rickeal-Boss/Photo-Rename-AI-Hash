@@ -32,6 +32,13 @@ public class RenameLogEntry
 
     // ── 以下为界面展示用只读计算属性（P1-4 结果列表图标化三态互斥）──
 
+    /// <summary>状态 + 错误详情，供列表 ToolTip 展示（A-12：异常原文 Message 此前在 UI 完全不可见，
+    /// 用户只看到红色图标却不知是图片损坏、路径过长还是限流）。</summary>
+    public string StatusTip => string.IsNullOrWhiteSpace(Message) ? Status : Status + "：" + Message;
+
+    /// <summary>MD5 前 8 位：列表列宽有限，完整值另挂 ToolTip（避免 32 字符 Auto 列挤压文件名列）。</summary>
+    public string Md5Short => string.IsNullOrEmpty(Md5) ? "" : Md5.Substring(0, Math.Min(8, Md5.Length));
+
     /// <summary>成功态：已复制 / 已移动 / 已重命名（兼容「成功」字样）。</summary>
     public bool IsSuccess =>
         Status.Contains("成功") || Status.Contains("已复制") ||
