@@ -1,7 +1,7 @@
 # Photo-Rename-AI-Hash
 
-A modern Windows desktop application for **photo organization and perceptual-hash
-duplicate detection**, built with **WinUI 3 + Windows App SDK** and **C#/XAML**.
+A modern Windows desktop application for **photo organization (batch rename / copy /
+move / archive by date)**, built with **WinUI 3 + Windows App SDK** and **C#/XAML**.
 
 It is the WinUI 3 rewrite of the original Go-based `Photo-rename-AI` tool, following the
 **MVVM** pattern with responsive navigation, data binding, and light/dark theme support.
@@ -11,8 +11,7 @@ It is the WinUI 3 rewrite of the original Go-based `Photo-rename-AI` tool, follo
 | Page | Description |
 |------|-------------|
 | **整理 (Organize)** | Pick a folder, preview new filenames from a date/pattern rule, and batch-rename. |
-| **去重 (Deduplicate)** | Scan a folder, compute `aHash` / `dHash` perceptual hashes, group near-duplicates by a tunable Hamming-distance threshold, and delete the extras. |
-| **设置 (Settings)** | Theme (Light / Dark / System), default folder, hash thresholds, language — persisted to local JSON. |
+| **设置 (Settings)** | Theme (Light / Dark / System), default folder, language, AI vision engine & API keys — persisted to local JSON. |
 | **关于 (About)** | Version and description. |
 
 ## Architecture
@@ -23,14 +22,14 @@ PhotoRenameAIHash/
 ├─ app.manifest              # DPI-aware / long-path declaration + WinAppSDK dependency
 ├─ App.xaml / .cs            # Entry point, global resource dictionaries
 ├─ MainWindow.xaml / .cs     # NavigationView + Frame host
-├─ Models/                   # PhotoFile, DuplicateGroup, AppSettings, RenameItem
+├─ Models/                   # PhotoFile, AppSettings, OrganizeTypes, RenameLogEntry
 ├─ Services/
 │  ├─ Interfaces/            # IHashService, IPhotoService, ISettingsService
-│  ├─ HashService.cs         # Pure-C# aHash/dHash + Hamming distance
-│  ├─ PhotoService.cs        # Folder scan, duplicate grouping, rename
+│  ├─ HashService.cs         # MD5 content hashing (conflict detection / rename log)
+│  ├─ PhotoService.cs        # Folder scan, EXIF date-taken, rename
 │  ├─ SettingsService.cs     # Local JSON persistence
 │  └─ AppServices.cs         # Singleton service locator
-├─ Helpers/                  # ImageDecoder (Gray8 decode), ThemeHelper
+├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, RateGate, ThemeHelper, DpiHelper
 ├─ ViewModels/               # Main / Organize / Deduplicate / Settings / About (CommunityToolkit.Mvvm)
 ├─ Views/                    # Organize / Deduplicate / Settings / About pages (XAML + code-behind)
 └─ Styles/Styles.xaml        # Shared styles & resources

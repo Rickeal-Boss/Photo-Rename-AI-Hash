@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -66,6 +67,18 @@ public partial class SettingsViewModel : ObservableObject
     /// <summary>当前选中的是否为「自定义」引擎。</summary>
     public bool IsCustomProvider => _model.AiProvider == AiProvider.Custom;
 
+    /// <summary>语言选项索引（P2-8）：0=中文(zh-CN)，1=English(en-US)。替代自由文本，避免无效值。</summary>
+    public int LanguageIndex
+    {
+        get => (Language ?? "").StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+        set
+        {
+            var v = value < 0 ? 0 : (value > 1 ? 1 : value);
+            Language = v == 0 ? "zh-CN" : "en-US";
+            OnPropertyChanged(nameof(LanguageIndex));
+        }
+    }
+
     /// <summary>自定义引擎区域可见性。</summary>
     public Visibility CustomProviderVisibility =>
         IsCustomProvider ? Visibility.Visible : Visibility.Collapsed;
@@ -126,8 +139,14 @@ public partial class SettingsViewModel : ObservableObject
     private async Task SaveAsync()
     {
         StatusBarOpen = false; // 先收起，避免用户手动关闭后同值赋值不再触发弹出
+        // P1-A 修复：_model 是页面构造时的快照（页面 Required 缓存后整会话不刷新），
+        // 直接整文件保存会静默回退整理页等其它来源刚写入的配置。保存前先重读磁盘，
+        // 只覆盖本页拥有的字段，其余字段（整理配置等）以磁盘最新值为准。
+        _model = _settings.Load();
+        _model.Theme = Theme;
         _model.DefaultFolder = DefaultFolder;
         _model.Language = Language;
+        _model.AiProvider = (AiProvider)AiProviderIndex;
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;
         _model.NvidiaApiKey = NvidiaApiKey;

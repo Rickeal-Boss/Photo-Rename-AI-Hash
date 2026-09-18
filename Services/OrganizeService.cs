@@ -200,7 +200,7 @@ public sealed class OrganizeService : IOrganizeService
                 string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
                 if (!req.DryRun) Directory.CreateDirectory(destDir);
 
-                string? resolved = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
+                var (resolved, targetMd5) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
                 RenameLogEntry entry;
                 if (resolved == null)
                 {
@@ -215,7 +215,7 @@ public sealed class OrganizeService : IOrganizeService
                 }
                 else
                 {
-                    string status = await ExecuteAsync(req, f.Path, resolved, md5, "归档", ct).ConfigureAwait(false);
+                    string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
                     entry = new RenameLogEntry
                     {
                         OriginalPath = f.Path,
@@ -291,8 +291,8 @@ public sealed class OrganizeService : IOrganizeService
         string baseName = BuildName(f, template, when, index);
         string candidate = baseName + Path.GetExtension(f.Name);
 
-        // 目标冲突检测
-        string? resolved = await ResolveTargetAsync(output, candidate, md5, req.Conflict, ct).ConfigureAwait(false);
+        // 目标冲突检测（P2-7：一并取回目标 MD5，ExecuteAsync 直接复用，避免重复计算）
+        var (resolved, targetMd5) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, ct).ConfigureAwait(false);
         if (resolved == null)
         {
             var skip = new RenameLogEntry
@@ -315,7 +315,7 @@ public sealed class OrganizeService : IOrganizeService
             await BackupOriginalAsync(req.BackupFolder, f.Path, ct).ConfigureAwait(false);
         }
 
-        string status = await ExecuteAsync(req, f.Path, resolved, md5, OpName(req.Mode), ct).ConfigureAwait(false);
+        string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, OpName(req.Mode), ct).ConfigureAwait(false);
         var entry = new RenameLogEntry
         {
             OriginalPath = f.Path,
@@ -334,15 +334,15 @@ public sealed class OrganizeService : IOrganizeService
     /// 执行实际的 copy/move/rename。
     /// - 若目标已存在且内容相同(MD5)，视为已存在、不重复写入；
     /// - Overwrite 模式直接覆盖；其余模式目标已处理为唯一名。
+    /// P2-7：<paramref name="targetMd5"/> 为 ResolveTargetAsync 阶段算得的目标 MD5
+    /// （内容相同时即源 MD5），直接复用其结论，不再重复计算一次目标 MD5。
     /// </summary>
-    private async Task<string> ExecuteAsync(OrganizeRequest req, string source, string target, string md5, string opName, CancellationToken ct)
+    private async Task<string> ExecuteAsync(OrganizeRequest req, string source, string target, string? targetMd5, string md5, string opName, CancellationToken ct)
     {
-        if (File.Exists(target) && !string.IsNullOrEmpty(md5))
-        {
-            string existing = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
-            if (existing == md5)
-                return "未改动(内容相同)";
-        }
+        // ResolveTarget 已判定「目标存在且内容与源相同」时直接复用结论；
+        // Overwrite 路径下 targetMd5 是旧内容 MD5 ≠ 源 md5，不会被误判。
+        if (File.Exists(target) && !string.IsNullOrEmpty(targetMd5) && targetMd5 == md5)
+            return "未改动(内容相同)";
 
         if (req.DryRun)
             return "模拟(" + opName + ")";
@@ -399,25 +399,27 @@ public sealed class OrganizeService : IOrganizeService
     /// - 不存在 → 直接返回；
     /// - 存在且内容相同(MD5) → 返回该路径（调用方按「未改动」处理）；
     /// - 存在且内容不同 → 按策略：Skip 返回 null（跳过），Overwrite 返回该路径，AutoRename 追加 _1/_2 直到唯一（同样以 MD5 判定是否重复内容）。
+    /// P2-7：目标已存在时一并返回其 MD5，供 ExecuteAsync 复用，避免每文件重复计算 MD5。
     /// </summary>
-    private async Task<string?> ResolveTargetAsync(string output, string candidate, string md5, ConflictStrategy conflict, CancellationToken ct)
+    private async Task<(string? Target, string? TargetMd5)> ResolveTargetAsync(string output, string candidate, string md5, ConflictStrategy conflict, CancellationToken ct)
     {
         string target = Path.Combine(output, candidate);
-        if (!File.Exists(target)) return target;
+        if (!File.Exists(target)) return (target, null);
 
         string existing = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
         if (!string.IsNullOrEmpty(md5) && md5 == existing)
-            return target; // 内容相同，无需动作
+            return (target, existing); // 内容相同，无需动作
 
         return conflict switch
         {
-            ConflictStrategy.Skip => null,
-            ConflictStrategy.Overwrite => target,
+            ConflictStrategy.Skip => (null, null),
+            ConflictStrategy.Overwrite => (target, existing),
             _ => await SuffixUntilFreeAsync(output, candidate, md5, ct).ConfigureAwait(false),
         };
     }
 
-    private async Task<string> SuffixUntilFreeAsync(string output, string candidate, string md5, CancellationToken ct)
+    /// <summary>P2-7：返回最终空位目标路径；窗口内 MD5 命中相同内容时一并传出该目标 MD5。</summary>
+    private async Task<(string Target, string? TargetMd5)> SuffixUntilFreeAsync(string output, string candidate, string md5, CancellationToken ct)
     {
         string name = Path.GetFileNameWithoutExtension(candidate);
         string ext = Path.GetExtension(candidate);
@@ -427,12 +429,12 @@ public sealed class OrganizeService : IOrganizeService
         {
             string em = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
             if (!string.IsNullOrEmpty(md5) && md5 == em)
-                return target; // 该序号名下已是相同内容
+                return (target, em); // 该序号名下已是相同内容
             target = Path.Combine(output, $"{name}_{i}{ext}");
             if (++i > 9999) break;
         }
 
-        return target;
+        return (target, null);
     }
 
     private static string BuildName(PhotoFile f, string template, DateTime when, int index)
@@ -562,24 +564,32 @@ internal sealed class PauseTokenSource
         waiter?.TrySetResult(true);
     }
 
-    public Task WaitWhilePausedAsync(CancellationToken ct)
+    public async Task WaitWhilePausedAsync(CancellationToken ct)
     {
         TaskCompletionSource<bool>? waiter;
         lock (_gate)
         {
-            if (!_paused) return Task.CompletedTask;
+            if (!_paused) return;
             waiter = _waiter;
         }
 
-        if (waiter == null) return Task.CompletedTask;
-        if (ct.IsCancellationRequested)
+        if (waiter == null) return;
+
+        // P2-10：注册必须释放，否则暂停期间每个文件都会残留一个回调直到 Token 结束。
+        // 取消时唤醒等待，使循环顶部的 ThrowIfCancellationRequested 能抛出，避免暂停态下取消死锁。
+        CancellationTokenRegistration reg = default;
+        if (ct.CanBeCanceled)
         {
-            waiter.TrySetResult(true);
-            return Task.CompletedTask;
+            reg = ct.Register(static s => ((TaskCompletionSource<bool>)s!).TrySetResult(true), waiter);
         }
 
-        // 取消时放行，使循环顶部的 ThrowIfCancellationRequested 能抛出，避免暂停态下取消死锁。
-        ct.Register(() => waiter.TrySetResult(true));
-        return waiter.Task;
+        try
+        {
+            await waiter.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            reg.DisposeAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+        }
     }
 }

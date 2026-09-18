@@ -9,7 +9,7 @@ public enum AppTheme
 
 public class AppSettings
 {
-    public const string AppVersion = "1.0.0";
+    public const string AppVersion = "3.0.1";
 
     public AppTheme Theme { get; set; } = AppTheme.System;
 

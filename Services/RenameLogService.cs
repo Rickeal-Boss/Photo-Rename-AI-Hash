@@ -42,7 +42,9 @@ public sealed class RenameLogService
                 Csv(entry.Message),
             }));
 
-            File.AppendAllText(path, sb.ToString());
+            // P2-4：UTF-8 带 BOM——新文件落盘时写入 BOM（Excel 直接打开中文不乱码），
+            // 追加已有文件时不会重复写 BOM。
+            File.AppendAllText(path, sb.ToString(), new UTF8Encoding(true));
         }
         catch
         {
@@ -65,7 +67,7 @@ public sealed class RenameLogService
             var csvFiles = new List<string>();
             if (!string.IsNullOrWhiteSpace(outputFolder) && Directory.Exists(outputFolder))
             {
-                csvFiles.Add(Path.Combine(outputFolder, "rename_log.csv"));
+                // P2-5：根目录文件已包含在 AllDirectories 递归枚举结果中，无需重复添加（否则会被解析两次）。
                 csvFiles.AddRange(Directory.EnumerateFiles(outputFolder, "rename_log.csv", SearchOption.AllDirectories));
             }
 

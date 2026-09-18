@@ -336,6 +336,9 @@ public partial class OrganizeViewModel : ObservableObject
 
     private async Task PersistConfigAsync()
     {
+        // P1-A 修复：_model 是 BuildRequest 时（任务开始）加载的快照，长任务期间设置页
+        // 可能刚保存过密钥等配置。保存前重读磁盘，只覆盖整理页拥有的字段，避免覆盖其它来源的改动。
+        _model = _settings.Load();
         _model.DefaultFolder = SourceFolder;
         _model.OutputFolder = OutputFolder;
         _model.NamingTemplate = NamingTemplate;

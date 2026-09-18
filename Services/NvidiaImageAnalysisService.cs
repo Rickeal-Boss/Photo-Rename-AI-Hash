@@ -72,7 +72,7 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
             raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
                 Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
         }
-        catch (HttpRequestException ex) when (ex.Message.Contains("返回 403 "))
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
         {
             // NIM 已知机制：部分模型族需先在 build.nvidia.com 该模型页面点击一次「Try API」注册，
             // Key 才获得调用权限，否则一律 403。裸状态码对用户不可理解，此处给定向修复指引。

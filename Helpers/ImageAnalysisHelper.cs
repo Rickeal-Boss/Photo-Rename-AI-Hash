@@ -162,15 +162,17 @@ public static class ImageAnalysisHelper
                         continue;
                     }
                     var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
+                    // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），调用方按状态码判定而非解析文案
                     throw new HttpRequestException(
-                        $"视觉识别接口限流/错误（{code} {resp.StatusCode}），已尝试 {maxAttempts} 次仍失败：{snippet}");
+                        $"视觉识别接口限流/错误（{code} {resp.StatusCode}），已尝试 {maxAttempts} 次仍失败：{snippet}", null, resp.StatusCode);
                 }
 
                 if (!resp.IsSuccessStatusCode)
                 {
                     var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
+                    // P2-9：携带状态码，调用方按状态码判定而非解析文案
                     throw new HttpRequestException(
-                        $"视觉识别接口返回 {code} {resp.StatusCode}：{snippet}");
+                        $"视觉识别接口返回 {code} {resp.StatusCode}：{snippet}", null, resp.StatusCode);
                 }
 
                 return respText;

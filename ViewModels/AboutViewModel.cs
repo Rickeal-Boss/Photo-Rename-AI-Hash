@@ -6,7 +6,21 @@ namespace PhotoRenameAIHash.ViewModels;
 public partial class AboutViewModel : ObservableObject
 {
     [ObservableProperty]
-    private string _version = AppSettings.AppVersion;
+    private string _version = ResolveVersion();
+
+    /// <summary>P2-2：版本以 MSIX 包清单为事实源；未打包（本地调试）回退常量。</summary>
+    private static string ResolveVersion()
+    {
+        try
+        {
+            var v = Windows.ApplicationModel.Package.Current.Id.Version;
+            return $"{v.Major}.{v.Minor}.{v.Build}.{v.Revision}";
+        }
+        catch
+        {
+            return AppSettings.AppVersion;
+        }
+    }
 
     [ObservableProperty]
     private string _description =

@@ -17,18 +17,31 @@ public static class ImageDecoder
     /// 对应安全设计 §4.3.5「单图解码缓冲」控制；实际解码像素缓冲由缩放目标尺寸决定本就很小，此处仅约束输入读取。</summary>
     private const long MaxInputBytes = 256L * 1024 * 1024; // 256 MB
 
+    /// <summary>把输入流循环读满到内存（ReadAsync 允许短读，必须循环），超过 maxBytes 抛异常。</summary>
+    private static async Task<byte[]> ReadCappedAsync(Stream source, long maxBytes, CancellationToken ct)
+    {
+        using var ms = new MemoryStream();
+        var buf = new byte[81920];
+        long total = 0;
+        int n;
+        while ((n = await source.ReadAsync(buf.AsMemory(0, buf.Length), ct).ConfigureAwait(false)) > 0)
+        {
+            total += n;
+            if (total > maxBytes)
+                throw new InvalidOperationException("图片过大，已跳过解码（超过解码输入上限）。");
+            await ms.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false);
+        }
+        return ms.ToArray();
+    }
+
     public static async Task<byte[]> DecodeGrayAsync(Stream source, int width, int height, CancellationToken ct = default)
     {
         using var ras = new InMemoryRandomAccessStream();
 
-        long remaining = source.Length - source.Position;
-        if (remaining > MaxInputBytes)
-            throw new InvalidOperationException("图片过大，已跳过解码（超过解码输入上限）。");
-        var buffer = new byte[remaining];
-        int read = await source.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+        var bytes = await ReadCappedAsync(source, MaxInputBytes, ct).ConfigureAwait(false);
         using (var writer = new DataWriter(ras.GetOutputStreamAt(0)))
         {
-            writer.WriteBytes(buffer.AsSpan(0, read).ToArray());
+            writer.WriteBytes(bytes);
             await writer.StoreAsync().AsTask(ct).ConfigureAwait(false);
             await writer.FlushAsync().AsTask(ct).ConfigureAwait(false);
         }
@@ -64,14 +77,10 @@ public static class ImageDecoder
     {
         using var ras = new InMemoryRandomAccessStream();
 
-        long remaining = source.Length - source.Position;
-        if (remaining > MaxInputBytes)
-            throw new InvalidOperationException("图片过大，已跳过解码（超过解码输入上限）。");
-        var buffer = new byte[remaining];
-        int read = await source.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+        var bytes = await ReadCappedAsync(source, MaxInputBytes, ct).ConfigureAwait(false);
         using (var writer = new DataWriter(ras.GetOutputStreamAt(0)))
         {
-            writer.WriteBytes(buffer.AsSpan(0, read).ToArray());
+            writer.WriteBytes(bytes);
             await writer.StoreAsync().AsTask(ct).ConfigureAwait(false);
             await writer.FlushAsync().AsTask(ct).ConfigureAwait(false);
         }

@@ -1,9 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using PhotoRenameAIHash.Helpers;
-using PhotoRenameAIHash.Models;
-using PhotoRenameAIHash.Services;
 using PhotoRenameAIHash.ViewModels;
 using System;
 using System.Collections.Generic;
@@ -37,8 +34,7 @@ public sealed partial class MainWindow : Window
             ContentFrame.Navigate(first);
         }
 
-        var settings = AppServices.SettingsService.Load();
-        ThemeHelper.Apply(this, settings.Theme);
+        // P2-12：主题由 App.OnLaunched 统一应用（窗口显示前），此处不再重复 Load settings。
 
         // P0-2：Mica 背景——仅 Win11（Build 22000+）启用；Win10 保持实底背景，规避无 Mica 时的异常底色
         if (Environment.OSVersion.Version.Build >= 22000)

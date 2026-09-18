@@ -26,10 +26,12 @@
                 </RadioButtons>
             </sc:SettingsCard>
 
-            <!-- 语言 -->
+            <!-- 语言（P2-8：改为下拉，替代自由文本，避免无效值） -->
             <sc:SettingsCard Header="语言">
-                <TextBox Text="{x:Bind ViewModel.Language, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="220" />
+                <ComboBox SelectedIndex="{x:Bind ViewModel.LanguageIndex, Mode=TwoWay}" Width="220">
+                    <ComboBoxItem Content="中文" />
+                    <ComboBoxItem Content="English" />
+                </ComboBox>
             </sc:SettingsCard>
 
             <!-- 默认文件夹 -->

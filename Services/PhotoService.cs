@@ -13,7 +13,7 @@ namespace PhotoRenameAIHash.Services;
 public sealed class PhotoService : IPhotoService
 {
     private static readonly string[] ImageExt =
-        { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp" };
+        { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".heic", ".heif", ".jfif" };
 
     public async Task<IReadOnlyList<PhotoFile>> ScanAsync(string folder, CancellationToken ct = default)
     {

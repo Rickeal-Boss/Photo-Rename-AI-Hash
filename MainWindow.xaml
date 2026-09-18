@@ -22,6 +22,7 @@
                         SelectionChanged="NavView_SelectionChanged"
                         PaneDisplayMode="Left"
                         IsBackButtonVisible="Auto"
+                        IsSettingsVisible="False"
                         Margin="0,48,0,0">
             <NavigationView.MenuItems>
                 <NavigationViewItem Content="整理" Tag="Organize" IsSelected="True" ToolTipService.ToolTip="整理（Ctrl+1）">
