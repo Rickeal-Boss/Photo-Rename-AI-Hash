@@ -11,15 +11,26 @@
     NavigationCacheMode="Required">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24" Spacing="4" MaxWidth="720">
-            <TextBlock Text="设置" Style="{StaticResource PageTitleStyle}" Margin="0,0,0,16" />
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="4" MaxWidth="{StaticResource PageContentMaxWidth}">
+            <!-- D-3.5：标题行右侧常驻「保存设置」，避免长页需滚到底才能保存 -->
+            <Grid Margin="{StaticResource PageTitleMargin}" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="设置" Style="{StaticResource PageTitleStyle}" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Content="保存设置" Command="{x:Bind ViewModel.SaveCommand}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="将当前设置保存到本机" />
+            </Grid>
 
             <!-- 主题 -->
             <sc:SettingsCard Header="主题">
                 <sc:SettingsCard.Description>
                     浅色 / 深色 / 跟随系统，切换立即生效并保留。
                 </sc:SettingsCard.Description>
-                <RadioButtons SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
+                <RadioButtons SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}" MaxColumns="3">
                     <RadioButton Content="浅色" />
                     <RadioButton Content="深色" />
                     <RadioButton Content="跟随系统" />
@@ -34,15 +45,15 @@
                 </ComboBox>
             </sc:SettingsCard>
 
-            <!-- 默认文件夹 -->
-            <sc:SettingsCard Header="默认文件夹">
-                <TextBox Text="{x:Bind ViewModel.DefaultFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="220" />
+            <!-- 默认文件夹（D-3.4：该字段由整理页拥有并写入，本页改为只读展示） -->
+            <sc:SettingsCard Header="默认文件夹" Description="在「整理」页选择源文件夹后自动记录，此处仅供查看。">
+                <TextBox Text="{x:Bind ViewModel.DefaultFolder, Mode=OneWay}"
+                         IsReadOnly="True" MinWidth="320" />
             </sc:SettingsCard>
 
             <!-- 识别引擎 -->
             <sc:SettingsCard Header="识别引擎" Description="AI 视觉识别所用引擎，密钥在下方对应卡片填写。">
-                <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" Width="240">
+                <ComboBox SelectedIndex="{x:Bind ViewModel.AiProviderIndex, Mode=TwoWay}" MinWidth="240">
                     <ComboBoxItem Content="无（按日期/序号命名）" />
                     <ComboBoxItem Content="智谱 GLM-4.6V-Flash" />
                     <ComboBoxItem Content="通义千问 Qwen-VL" />
@@ -100,11 +111,7 @@
                 </sc:SettingsExpander.Items>
             </sc:SettingsExpander>
 
-            <!-- 保存 -->
-            <Button Content="保存设置" Command="{x:Bind ViewModel.SaveCommand}"
-                    Style="{StaticResource AccentButtonStyle}"
-                    Margin="0,12,0,0"
-                    ToolTipService.ToolTip="将当前设置保存到本机" />
+            <!-- D-3.5：「保存设置」按钮已上移至标题行右侧，此处不再重复 -->
             <!-- P1-1：保存结果以 InfoBar 提示（含主题切换提示，替代原状态 TextBlock） -->
             <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=OneWay}"
                      Severity="{x:Bind ViewModel.StatusSeverity, Mode=OneWay}"
@@ -114,6 +121,7 @@
 
             <TextBlock Text="密钥经 Windows DPAPI 加密保存在本机设置文件中（绑定当前用户，迁移 / 重装系统后不可解密，需重新填写），仅用于本地调用。"
                        TextWrapping="Wrap"
+                       MaxWidth="640"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
     </ScrollViewer>

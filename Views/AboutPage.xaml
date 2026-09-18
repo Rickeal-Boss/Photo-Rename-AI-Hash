@@ -10,24 +10,40 @@
     NavigationCacheMode="Required">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24" Spacing="12" MaxWidth="560">
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="{StaticResource PageSpacing}" MaxWidth="{StaticResource PageContentMaxWidth}">
             <TextBlock Text="关于" Style="{StaticResource PageTitleStyle}" />
-            <TextBlock Text="{x:Bind ViewModel.Version, Mode=OneWay}" FontWeight="SemiBold" />
-            <TextBlock Text="{x:Bind ViewModel.Description, Mode=OneWay}" TextWrapping="Wrap" />
+            <!-- D-4.3：版本行带标签、字号提升 -->
+            <TextBlock FontSize="16" FontWeight="SemiBold">
+                <Run Text="版本 " /><Run Text="{x:Bind ViewModel.Version, Mode=OneWay}" />
+            </TextBlock>
+            <TextBlock Text="{x:Bind ViewModel.Description, Mode=OneWay}" TextWrapping="Wrap" MaxWidth="640" />
 
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="DPI 缩放自诊" Style="{StaticResource CardTitleStyle}" />
-                    <TextBlock TextWrapping="Wrap">
-                        <Run Text="当前缩放：" /><Run Text="{x:Bind DpiScaleText, Mode=OneWay}" FontWeight="SemiBold" />
-                    </TextBlock>
-                    <TextBlock TextWrapping="Wrap">
-                        <Run Text="DPI 感知模式：" /><Run Text="{x:Bind DpiAwarenessText, Mode=OneWay}" FontWeight="SemiBold" />
-                    </TextBlock>
-                    <TextBlock TextWrapping="Wrap">
-                        <Run Text="启动期强制 PMv2：" /><Run Text="{x:Bind DpiForceText, Mode=OneWay}" FontWeight="SemiBold" />
-                    </TextBlock>
+                    <!-- D-4.2：原三行 Run 拼接在折行时标签与值会错位，改为两列 Grid 对齐 -->
+                    <Grid ColumnSpacing="12" RowSpacing="4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="当前缩放" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind DpiScaleText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="DPI 感知模式" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{x:Bind DpiAwarenessText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="启动期强制 PMv2" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{x:Bind DpiForceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                    </Grid>
                     <TextBlock TextWrapping="Wrap"
+                               MaxWidth="640"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                FontSize="12">
                         若“当前缩放”与系统显示设置中的缩放比例一致（例如系统为 150% 时此处显示 150%），说明进程 DPI 感知正常（Per-Monitor v2），文字由 DirectWrite 矢量渲染，应锐利。若此处显示 100% 而系统为 125% 以上，说明 .exe 兼容性被手动设为“系统/系统(增强)”覆盖了感知，Windows 会位图拉伸整窗 → 文字发虚。
