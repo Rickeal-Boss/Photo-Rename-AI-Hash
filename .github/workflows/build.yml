@@ -48,6 +48,70 @@ jobs:
 
 
 
+      # =====================================================================
+
+      # A-16 版本一致性断言（阻断式，只读）。
+
+      # 版本号靠人工在 Package.appxmanifest(<Identity Version=x.y.z.w>) 与
+
+      # Models/AppSettings.cs(AppVersion="x.y.z") 两处同步，此前无任何断言：
+
+      # 一旦漏改，会出现"关于页显示旧版本 / 商店清单显示新版本"的错位。
+
+      # 位置选在 Setup MSBuild 之后、Restore 之前：只依赖两个源文件，放在最贵的
+
+      # Restore/Publish 之前可尽早失败，避免白跑 ~10 分钟构建。
+
+      # =====================================================================
+
+      - name: Assert version consistency (manifest vs AppSettings) (blocking)
+
+        shell: pwsh
+
+        run: |
+
+          "CHECKPOINT:version-assert-start" >> ci-diagnostics.log
+
+          $ErrorActionPreference = 'Stop'
+
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE "Package.appxmanifest"
+
+          $settingsPath = Join-Path $env:GITHUB_WORKSPACE "Models/AppSettings.cs"
+
+          if (-not (Test-Path $manifestPath)) { Write-Error "缺少 Package.appxmanifest"; exit 1 }
+
+          if (-not (Test-Path $settingsPath)) { Write-Error "缺少 Models/AppSettings.cs"; exit 1 }
+
+          $m = Get-Content $manifestPath -Raw
+
+          $s = Get-Content $settingsPath -Raw
+
+          # 只在 <Identity ...> 元素内取 Version，避免误匹配 MinVersion/MaxVersionTested
+
+          $identity = [regex]::Match($m, '<Identity\b[^>]*>', [System.Text.RegularExpressions.RegexOptions]::Singleline).Value
+
+          $mv = [regex]::Match($identity, 'Version="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+
+          if (-not $mv) { Write-Error "Package.appxmanifest 的 <Identity> 未找到 Version=x.y.z.w"; exit 1 }
+
+          $av = [regex]::Match($s, 'AppVersion\s*=\s*"([^"]+)"').Groups[1].Value
+
+          if (-not $av) { Write-Error "Models/AppSettings.cs 未找到 AppVersion"; exit 1 }
+
+          $m3 = ($mv -split '\.')[0..2] -join '.'
+
+          $line = "VERSION manifest=" + $mv + " app=" + $av
+
+          $line >> ci-diagnostics.log
+
+          Write-Host $line
+
+          if ($m3 -ne $av) { Write-Error ("版本不一致：Package.appxmanifest Version=" + $mv + "（前三段 " + $m3 + "）!= Models/AppSettings.cs AppVersion=" + $av + "。发版时需同步修改两处。"); exit 1 }
+
+          "CHECKPOINT:version-assert-done" >> ci-diagnostics.log
+
+
+
       - name: Restore
 
         shell: pwsh
@@ -713,23 +777,71 @@ jobs:
           ("signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
           Write-Host ("artifact cer = signing cert " + $cert.Thumbprint)
 
-      - name: Package publish output as zip
+      # =====================================================================
+
+      # A-15 产物 staging（阻断式）：把 msix + cer + Install.bat 扁平放到 artifact/ 同层。
+
+      # 原实现直接给 upload-artifact 传多 pattern，而 v4 会取多 pattern 的「最近公共祖先」
+
+      # 作为 artifact 根：patterns（**/AppPackages/**/*.msix + PhotoRenameAIHash.cer +
+
+      # Install.bat）的公共祖先是仓库根 -> 下载解压后 .msix 落在深层
+
+      # bin/.../AppPackages/.../ 下，而 Install.bat 在根目录用
+
+      # `dir /b PhotoRenameAIHash*_x64.msix` 查找 -> 报 "msix not found"。
+
+      # 扁平 staging 后三者同层，Install.bat 可正确找到包。
+
+      # A-14：原名 "Package publish output as zip" 与实现不符（已不产 zip，只做存在性
+
+      # 校验），且自报告仍打印 zip_exists=False 误导排障，故一并更名 + 改造。
+
+      # =====================================================================
+
+      - name: Stage release artifacts (msix + cer + Install.bat)
 
         shell: pwsh
 
         run: |
 
-          "CHECKPOINT:package-start" >> ci-diagnostics.log
+          "CHECKPOINT:stage-start" >> ci-diagnostics.log
 
           $ErrorActionPreference = 'Stop'
 
-          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Select-Object -First 1
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
           if (-not $msix) { Write-Error "未找到 .msix（MSIX 发布失败，请检查上面的 Publish 日志）"; exit 1 }
 
-          Write-Host ("已生成 MSIX: " + $msix.FullName + " (" + [System.IO.File]::ReadAllBytes($msix.FullName).Length + " bytes)")
+          $stage = Join-Path $env:GITHUB_WORKSPACE "artifact"
 
-          "CHECKPOINT:package-done" >> ci-diagnostics.log
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          Copy-Item $msix.FullName -Destination $stage -Force
+
+          $cer = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.cer"
+
+          $bat = Join-Path $env:GITHUB_WORKSPACE "Install.bat"
+
+          if (-not (Test-Path $cer)) { Write-Error "缺少 PhotoRenameAIHash.cer（应已提交或被 Export signing certificate 步生成）"; exit 1 }
+
+          if (-not (Test-Path $bat)) { Write-Error "缺少 Install.bat（应已提交到仓库根）"; exit 1 }
+
+          Copy-Item $cer -Destination $stage -Force
+
+          Copy-Item $bat -Destination $stage -Force
+
+          $files = @(Get-ChildItem $stage -File)
+
+          foreach ($f in $files) { Write-Host ("  staged: " + $f.Name + " (" + $f.Length + " bytes)") }
+
+          ("STAGE msix=" + $msix.Name + " size=" + $msix.Length + " files=" + $files.Count) >> ci-diagnostics.log
+
+          Write-Host ("STAGE msix=" + $msix.Name + " size=" + $msix.Length + " files=" + $files.Count)
+
+          "CHECKPOINT:stage-done" >> ci-diagnostics.log
 
 
 
@@ -743,13 +855,13 @@ jobs:
 
           name: PhotoRenameAIHash-msix
 
-          path: |
+          # A-15：改传已扁平 staging 的 artifact/ 单层目录。原多 pattern 写法会被
 
-            **/AppPackages/**/*.msix
+          # upload-artifact v4 按「最近公共祖先」重排目录树，导致 .msix 落到深层子目录
 
-            PhotoRenameAIHash.cer
+          # 而 Install.bat 在根 -> `dir /b PhotoRenameAIHash*_x64.msix` 找不到包。
 
-            Install.bat
+          path: artifact/*
 
           if-no-files-found: error
 
@@ -802,9 +914,21 @@ jobs:
 
           }
 
-          $zip = "PhotoRenameAIHash-windows.zip"
+          # A-14：原此处打印 zip_exists（指向早已不产的 PhotoRenameAIHash-windows.zip），
 
-          ("zip_exists=" + (Test-Path $zip)) | Out-File -Append $log
+          # 恒为 False，误导排障。改为报告实际产物 .msix 的存在性与大小。
+
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          ("msix_found=" + [bool]$msix) | Out-File -Append $log
+
+          if ($msix) {
+
+            ("msix_name=" + $msix.Name) | Out-File -Append $log
+
+            ("msix_bytes=" + $msix.Length) | Out-File -Append $log
+
+          }
 
           if (Test-Path publish.out.log) {
 
