@@ -76,7 +76,16 @@ public sealed class OrganizeService : IOrganizeService
             {
                 skippedAtStart++;
                 report.Skipped++;
-                progress.Report(new OrganizeProgress { LogLine = $"{curName} 跳过(日志已完成)" });
+                // B-06②：续传跳过同样产出结果行，避免「跳过」只在汇总里计数、结果列表却缺行
+                var skipEntry = new RenameLogEntry
+                {
+                    OriginalPath = f.Path,
+                    OriginalName = f.Name,
+                    Operation = OpName(req.Mode),
+                    Status = "跳过(日志已完成)",
+                };
+                report.Results.Add(skipEntry);
+                progress.Report(new OrganizeProgress { Result = skipEntry, LogLine = $"{curName} 跳过(日志已完成)" });
                 continue;
             }
             queue.Enqueue((f, order));
@@ -84,6 +93,12 @@ public sealed class OrganizeService : IOrganizeService
 
         var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
+
+        // A-01：重试会把同一文件重新入队，但重试只应针对「AI 之后」的失败（目标被占用、
+        // 备份失败、路径异常等）。缓存成功结果，避免单文件最坏 10 次重复计费与请求放大；
+        // AI 自身失败（异常）不入缓存，重试仍会重新请求（瞬时故障需要重试）。
+        var aiCache = new Dictionary<string, ImageAnalysisResult>(StringComparer.OrdinalIgnoreCase);
+        var md5Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int done = skippedAtStart; // 已跳过的也算进度推进
 
         _pts = new PauseTokenSource();
@@ -94,7 +109,7 @@ public sealed class OrganizeService : IOrganizeService
             var (f, index) = queue.Dequeue();
             try
             {
-                var entry = await ProcessOneAsync(f, req, output, ai, index, ct).ConfigureAwait(false);
+                var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache).ConfigureAwait(false);
                 Categorize(report, entry);
                 done++;
                 progress.Report(new OrganizeProgress
@@ -184,9 +199,24 @@ public sealed class OrganizeService : IOrganizeService
             {
                 report.Skipped++;
                 done++;
-                progress.Report(new OrganizeProgress { LogLine = $"{f.Name} 跳过(日志已完成)" });
+                // A-05：归档模式的续传跳过也产出结果行，与整理模式口径一致（否则结果列表行数与汇总不符）
+                var skipEntry = new RenameLogEntry
+                {
+                    OriginalPath = f.Path,
+                    OriginalName = f.Name,
+                    Operation = "归档",
+                    Status = "跳过(日志已完成)",
+                };
+                report.Results.Add(skipEntry);
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    Result = skipEntry,
+                    LogLine = $"{f.Name} 跳过(日志已完成)",
+                });
                 continue;
             }
+            RenameLogEntry? entry = null;
             try
             {
                 string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
@@ -201,7 +231,6 @@ public sealed class OrganizeService : IOrganizeService
                 if (!req.DryRun) Directory.CreateDirectory(destDir);
 
                 var (resolved, targetMd5) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
-                RenameLogEntry entry;
                 if (resolved == null)
                 {
                     entry = new RenameLogEntry
@@ -234,18 +263,20 @@ public sealed class OrganizeService : IOrganizeService
             catch (Exception ex)
             {
                 report.Failed++;
-                report.Results.Add(new RenameLogEntry
+                entry = new RenameLogEntry
                 {
                     OriginalName = f.Name,
                     Status = "错误",
                     Message = ex.Message,
-                });
+                };
+                report.Results.Add(entry);
             }
 
             done++;
             progress.Report(new OrganizeProgress
             {
                 Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
                 LogLine = $"{f.Name} 已归档进度 {done}/{files.Count}",
             });
         }
@@ -259,9 +290,15 @@ public sealed class OrganizeService : IOrganizeService
     }
 
     private async Task<RenameLogEntry> ProcessOneAsync(
-        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, int index, CancellationToken ct)
+        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, int index, CancellationToken ct,
+        Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache)
     {
-        string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
+        // A-01：MD5 结果缓存——重试时复用，避免对同一文件重复计算（大图 MD5 为全文件读取）。
+        if (!md5Cache.TryGetValue(f.Path, out var md5))
+        {
+            md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
+            md5Cache[f.Path] = md5;
+        }
 
         // 拍摄时间
         DateTime when = f.LastModified;
@@ -271,10 +308,15 @@ public sealed class OrganizeService : IOrganizeService
             if (ex.HasValue) when = ex.Value;
         }
 
-        // AI 识别
+        // AI 识别（结果缓存：重试复用，避免重复计费）
         if (ai != null)
         {
-            var res = await ai.AnalyzeAsync(f.Path, req.Language, ct).ConfigureAwait(false);
+            if (!aiCache.TryGetValue(f.Path, out var res))
+            {
+                res = await ai.AnalyzeAsync(f.Path, req.Language, ct).ConfigureAwait(false);
+                if (res != null) aiCache[f.Path] = res;
+            }
+
             if (res != null)
             {
                 f.Category = res.Category;
@@ -437,12 +479,16 @@ public sealed class OrganizeService : IOrganizeService
         return (target, null);
     }
 
+    /// <summary>最终文件基名长度上限：单字段 40 字符 × 6 字段模板 + 分隔符 + 扩展名 + 目录深度
+    /// 可能超过 MAX_PATH（app.manifest 已按既定取舍移除 longPathAware），此处整体收口。</summary>
+    private const int MaxBaseNameLength = 180;
+
     private static string BuildName(PhotoFile f, string template, DateTime when, int index)
     {
         string San(string v) => Sanitize(v);
         string Ai(string v) => string.IsNullOrWhiteSpace(v) ? "unknown" : San(v);
 
-        return (template ?? "")
+        var built = (template ?? "")
             .Replace("{yyyy}", when.ToString("yyyy"))
             .Replace("{MM}", when.ToString("MM"))
             .Replace("{dd}", when.ToString("dd"))
@@ -458,6 +504,12 @@ public sealed class OrganizeService : IOrganizeService
             .Replace("{action}", Ai(f.Action))
             .Replace("{subtitle}", Ai(f.Subtitle))
             .Replace("{source}", Ai(f.SourceTag));
+
+        // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException
+        if (built.Length > MaxBaseNameLength)
+            built = built.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.');
+
+        return built;
     }
 
     private static readonly char[] Invalid = Path.GetInvalidFileNameChars();
