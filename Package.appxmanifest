@@ -3,9 +3,11 @@
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap rescap">
+  <!-- 前三段必须与 Models/AppSettings.cs 的 AppVersion 一致（CI 有阻断式断言）。
+       发版需递增第四段或前段，否则 MSIX 覆盖升级语义失效。 -->
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="3.0.1.0" />
+            Version="3.1.0.0" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>
