@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PhotoRenameAIHash.Helpers;
 using PhotoRenameAIHash.Models;
 using Windows.Storage;
 
@@ -117,6 +118,26 @@ public sealed class OrganizeService : IOrganizeService
                     Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                     Result = entry,
                     LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
+                });
+            }
+            catch (AiPermanentException ex)
+            {
+                // 永久性 AI 错误（欠费 / 额度耗尽 / 无权限 / 模型不存在）：重试无法恢复，
+                // 直接标记失败且不再入队，避免对同一文件刷 10 行「重试」并白白占用 UI 进度。
+                report.Failed++;
+                done++;
+                var permEntry = new RenameLogEntry
+                {
+                    OriginalName = f.Name,
+                    Status = "错误",
+                    Message = ex.Message,
+                };
+                report.Results.Add(permEntry);
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    Result = permEntry,
+                    LogLine = $"{f.Name} [错误] {ex.Message}",
                 });
             }
             catch (Exception ex)

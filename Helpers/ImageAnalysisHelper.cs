@@ -163,9 +163,11 @@ public static class ImageAnalysisHelper
                 if (code == 429 && IsPermanentBusinessCode(respText, out var bizCode))
                 {
                     var permSnippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
-                    throw new HttpRequestException(
-                        $"视觉识别接口返回 429（业务错误码 {bizCode}：账户欠费 / 额度耗尽 / 套餐到期或无权限，重试无意义）：{permSnippet}",
-                        null, resp.StatusCode);
+                    // 抛专用类型而非 HttpRequestException：让 OrganizeService 能按「类型」判定永久错误并跳过
+                    // 文件级重排队，同时不误伤「瞬时限流重试耗尽」（那也是 HttpRequestException(429)，
+                    // 属用户已裁定的有意重试设计）。
+                    throw new AiPermanentException(
+                        $"视觉识别接口返回 429（业务错误码 {bizCode}：账户欠费 / 额度耗尽 / 套餐到期或无权限，重试无意义）：{permSnippet}");
                 }
 
                 // 429 限流 / 5xx 服务端错误：固定等待 15 秒后重试，期间不做任何重命名
