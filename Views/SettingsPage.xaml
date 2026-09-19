@@ -82,7 +82,7 @@
 
             <!-- NVIDIA API Key -->
             <sc:SettingsCard Header="NVIDIA API Key"
-                             Description="Key 形如 nvapi-…，于 build.nvidia.com 生成；官方免费档 ~40 RPM 限速已内置适配（本引擎自动节流，不影响其它引擎）。">
+                             Description="Key 形如 nvapi-…，于 build.nvidia.com 生成；本引擎内置自动节流（30 RPM），不影响其它引擎。">
                 <sc:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE72E;" AutomationProperties.Name="密钥" />
                 </sc:SettingsCard.HeaderIcon>

@@ -8,9 +8,11 @@ namespace PhotoRenameAIHash.Helpers;
 /// <summary>
 /// 进程级滑动窗口限流闸门：任意 rolling window 内最多放行 <see cref="_maxRequests"/> 次请求，
 /// 超出则异步等待窗口内最早一次请求滑出后再放行（不占线程，支持取消）。
-/// 由「NVIDIA Nemotron」引擎独享一枚实例（官方免费档 ~40 RPM，按 nvapi key 账户级共享），
+/// 实例现由 <see cref="AiProviderProfiles"/> 持有（各供应商策略档的 <c>Gate</c> 字段）：
+/// 目前只有 NVIDIA 档默认带闸门（60 秒 30 次）；自定义引擎可由用户在「设置」里填
+///「每分钟请求上限」而挂上闸门；智谱/通义档不带闸门（见各自的档位注释）。
 /// 在每次真实 HTTP 尝试（含重试）前取名额，主动把请求速率压在限流之下而非被动吃 429；
-/// 闸门只作用于持有它的引擎，其它引擎（智谱/通义/自定义）的调用策略完全不受影响。
+/// 闸门只作用于持有它的档位，其它引擎的调用策略完全不受影响。
 /// </summary>
 public sealed class RateGate
 {
@@ -19,7 +21,7 @@ public sealed class RateGate
     private readonly Queue<DateTimeOffset> _stamps = new();
     private readonly SemaphoreSlim _mutex = new(1, 1);
 
-    /// <param name="maxRequests">窗口内允许的最大请求数（如 40）。</param>
+    /// <param name="maxRequests">窗口内允许的最大请求数（如 NVIDIA 档的 30）。</param>
     /// <param name="window">滑动窗口长度（如 1 分钟）。</param>
     public RateGate(int maxRequests, TimeSpan window)
     {
