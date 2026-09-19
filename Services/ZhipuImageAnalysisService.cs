@@ -33,7 +33,10 @@ public sealed class ZhipuImageAnalysisService : IImageAnalysisService
         if (dataUrl == null)
             // 损坏文件或缺少编解码器（如 HEIC）是逐文件的确定性失败：
             // 既定口径要求「逐文件报错、不影响其它文件」，但不需要对同一坏文件重试 10 次。
-            throw new AiPermanentException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
+            // 故 isBatchLevel: false：不重试，但也不参与批次熔断。
+            throw new AiPermanentException(
+                $"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}",
+                isBatchLevel: false);
 
         // 自定义请求体：照片命名无需思维链，显式关闭思考模式（智谱参数为顶层 thinking.type，
         // 取值 enabled/disabled —— 注意不是 NVIDIA NIM 的 chat_template_kwargs.enable_thinking），

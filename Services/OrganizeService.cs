@@ -157,19 +157,24 @@ public sealed class OrganizeService : IOrganizeService
                     throw;
                 }
 
-                // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
-                // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
-                consecutivePermanent++;
-                if (consecutivePermanent >= 3)
+                // 仅「对整批成立」的永久错误才累计熔断：
+                // 逐文件永久错误（如单个文件无法解码）按既定口径只记该文件的错误、继续处理其它文件。
+                if (ex.IsBatchLevel)
                 {
-                    // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
-                    // 只把「整批继续」的终止时机提前。
-                    progress.Report(new OrganizeProgress
+                    // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
+                    // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
+                    consecutivePermanent++;
+                    if (consecutivePermanent >= 3)
                     {
-                        LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
-                                  $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
-                    });
-                    throw;
+                        // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
+                        // 只把「整批继续」的终止时机提前。
+                        progress.Report(new OrganizeProgress
+                        {
+                            LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
+                                      $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
+                        });
+                        throw;
+                    }
                 }
             }
             catch (Exception ex)
@@ -498,7 +503,7 @@ public sealed class OrganizeService : IOrganizeService
             throw new PermanentOperationException(
                 $"写入失败：目标驱动器磁盘空间不足（0x{hr:X8}）。请清理磁盘或更换输出文件夹后再试。" +
                 "（输出目录可能残留不完整文件，请检查。）",
-                isEnvironmentError: true, ex);
+                isEnvironmentError: true, inner: ex);
         }
     }
 
@@ -547,14 +552,14 @@ public sealed class OrganizeService : IOrganizeService
                 throw new PermanentOperationException(
                     $"备份失败：写入时磁盘空间不足（0x{hr:X8}）。请清理磁盘或更换备份文件夹后再试。" +
                     "（备份目录可能残留不完整文件，请检查。）",
-                    isEnvironmentError: true, ex);
+                    isEnvironmentError: true, inner: ex);
             }
 
             // 其余失败（未授予文件系统访问权限 / 路径不可访问 / 文件被占用等）：保留原引导语义，
             // 但改抛永久错误——备份失败是阻断性的，重排队重试无意义。
             throw new PermanentOperationException(
                 "备份原始文件失败（请确认已在系统设置中授予本应用「文件系统」访问权限，且备份路径可访问）：" + ex.Message,
-                isEnvironmentError: true, ex);
+                isEnvironmentError: true, inner: ex);
         }
     }
 

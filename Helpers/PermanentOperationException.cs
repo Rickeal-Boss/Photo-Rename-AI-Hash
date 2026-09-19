@@ -17,9 +17,19 @@ public class PermanentOperationException : Exception
     /// </summary>
     public bool IsEnvironmentError { get; }
 
-    public PermanentOperationException(string message, bool isEnvironmentError = false, Exception? inner = null)
+    /// <summary>
+    /// 该错误是否对「整批」成立（而非仅当前这一个文件）。
+    /// <c>true</c>（默认）：账户欠费 / 额度耗尽 / 模型不存在 / 参数非法 / 401/403/404 —— 对同批每个文件都成立。
+    /// <c>false</c>：仅逐文件成立，例如某个文件本身损坏或缺少编解码器（HEIC）——
+    /// 应当「该文件的失败不重试，但继续处理其它文件」，不得计入批次熔断。
+    /// </summary>
+    public bool IsBatchLevel { get; }
+
+    public PermanentOperationException(string message, bool isEnvironmentError = false,
+                                       bool isBatchLevel = true, Exception? inner = null)
         : base(message, inner)
     {
         IsEnvironmentError = isEnvironmentError;
+        IsBatchLevel = isBatchLevel;
     }
 }

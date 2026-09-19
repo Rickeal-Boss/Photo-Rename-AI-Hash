@@ -14,7 +14,10 @@ namespace PhotoRenameAIHash.Helpers;
 /// </summary>
 public sealed class AiPermanentException : PermanentOperationException
 {
-    public AiPermanentException(string message) : base(message, isEnvironmentError: false)
+    /// <param name="isBatchLevel">默认 true（账户/模型配置类，对整批成立）；
+    /// 传入 false 表示仅逐文件成立（如图片本身无法解码），不参与批次熔断。</param>
+    public AiPermanentException(string message, bool isBatchLevel = true)
+        : base(message, isEnvironmentError: false, isBatchLevel: isBatchLevel)
     {
     }
 }

@@ -41,7 +41,10 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
         if (dataUrl == null)
             // 损坏文件或缺少编解码器（如 HEIC）是逐文件的确定性失败：
             // 既定口径要求「逐文件报错、不影响其它文件」，但不需要对同一坏文件重试 10 次。
-            throw new AiPermanentException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
+            // 故 isBatchLevel: false：不重试，但也不参与批次熔断。
+            throw new AiPermanentException(
+                $"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}",
+                isBatchLevel: false);
 
         // 自定义请求体：reasoning 模型官方约束——显式关闭 thinking；max_tokens 给足余量防 JSON 截断。
         // image_url 用 base64 data URL（官方文档明确支持），与其它引擎共用同一图片压缩管线。
