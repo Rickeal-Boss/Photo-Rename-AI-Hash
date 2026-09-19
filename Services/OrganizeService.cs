@@ -245,6 +245,9 @@ public sealed class OrganizeService : IOrganizeService
         {
             progress.Report(new OrganizeProgress
             {
+                // 必须带 Percent：OnProgress 是 Progress = p.Percent 无条件赋值，
+                // 不带则会把已完成到 100% 的进度条打回 0（本方法末尾的完成汇总才会再设回 100）。
+                Percent = 100,
                 LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
                           "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
             });
@@ -411,6 +414,8 @@ public sealed class OrganizeService : IOrganizeService
         {
             progress.Report(new OrganizeProgress
             {
+                // 同 RunAsync：此处进度已达 100%，不带 Percent 会被 VM 的无条件赋值打回 0。
+                Percent = 100,
                 LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
                           "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
             });
