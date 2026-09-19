@@ -17,6 +17,12 @@ public partial class OrganizeViewModel : ObservableObject
     private AppSettings _model;
     private CancellationTokenSource? _cts;
 
+    /// <summary>
+    /// 最近一次「与磁盘对齐」时的引擎索引。用于区分两种「当前值 ≠ 磁盘值」：
+    /// 值陈旧（应同步） vs 用户在整理页手动改过（不应覆盖）——见 <see cref="SyncProviderFromDisk"/>。
+    /// </summary>
+    private int _syncedProviderIndex;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -29,6 +35,7 @@ public partial class OrganizeViewModel : ObservableObject
         DryRun = _model.DryRun;
         UseExifDate = _model.UseExifDate;
         AiProviderIndex = (int)_model.AiProvider;
+        _syncedProviderIndex = AiProviderIndex; // 构造即视为已与磁盘对齐
         OperationModeIndex = (int)_model.OperationMode;
         ConflictIndex = (int)_model.ConflictStrategy;
         // P1-4：结果集合变化时同步空态/列表可见性
@@ -359,6 +366,28 @@ public partial class OrganizeViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 导航进入整理页时，把引擎选择同步为磁盘最新值（由 <c>OrganizePage.OnNavigatedTo</c> 调用）。
+    /// 背景：本 VM 是 <see cref="AppServices.OrganizeVm"/> 单例，<c>AiProviderIndex</c> 只在构造时
+    /// 初始化一次；用户在「设置」页改引擎并保存后，整理页（含它自己的引擎下拉框）仍是会话开始时的旧值
+    /// → 设置页显示 A、实际生效 B（P33 谎报），连带新填的 RPM 上限也被整体忽略。
+    /// <b>不做「无条件以磁盘覆盖」</b>：整理页自己也有引擎下拉框（OrganizePage.xaml 的 ComboBox），
+    /// 用户可在当次手动改选；若当前值已偏离上次同步值即判定为手动改过，同步跳过，
+    /// 避免「整理页选了 A → 切到别页再回来被改回 B」。
+    /// </summary>
+    public void SyncProviderFromDisk()
+    {
+        int disk = (int)_settings.Load().AiProvider;
+        if (disk == AiProviderIndex)
+        {
+            _syncedProviderIndex = disk; // 已一致（含「手动值刚被持久化」的情况）：重新对齐基线
+            return;
+        }
+        if (AiProviderIndex != _syncedProviderIndex) return; // 用户手动改过 → 保留其当次选择
+        AiProviderIndex = disk;
+        _syncedProviderIndex = disk;
+    }
+
     private OrganizeRequest BuildRequest()
     {
         _model = _settings.Load(); // 单例 VM 可能滞后于「设置」页改动，每次构建请求时刷新密钥/端点
@@ -405,6 +434,8 @@ public partial class OrganizeViewModel : ObservableObject
         _model.OperationMode = (OperationMode)OperationModeIndex;
         _model.ConflictStrategy = (ConflictStrategy)ConflictIndex;
         await _settings.SaveAsync(_model);
+        // 当次选择已落盘 → 与磁盘重新对齐，之后的「设置页改引擎」才应同步进整理页
+        _syncedProviderIndex = AiProviderIndex;
     }
 
     private void OnProgress(OrganizeProgress p)

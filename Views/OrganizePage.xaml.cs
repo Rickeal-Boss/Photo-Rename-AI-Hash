@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 using PhotoRenameAIHash.Services;
 using PhotoRenameAIHash.ViewModels;
 using System.Threading.Tasks;
@@ -33,6 +34,17 @@ public sealed partial class OrganizePage : Page
                 this.DispatcherQueue.TryEnqueue(() => ScrollLogToEnd());
             }
         };
+    }
+
+    /// <summary>
+    /// 每次导航进入本页（本页为 NavigationCacheMode=Required，实例复用但本回调仍会触发）
+    /// 把引擎选择同步为磁盘最新值：VM 是单例，其 AiProviderIndex 不会自动感知「设置」页的保存，
+    /// 不同步就会出现「设置页显示 A、整理页实际用 B」的谎报。
+    /// </summary>
+    protected override void OnNavigatedTo(NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+        ViewModel.SyncProviderFromDisk();
     }
 
     // WinUI 3 TextBox 自动滚到底：经可视树找到内部 ScrollViewer 后 ChangeView（禁用动画避免高频抖动）
