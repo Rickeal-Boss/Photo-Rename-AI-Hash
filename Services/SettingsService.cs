@@ -11,7 +11,18 @@ namespace PhotoRenameAIHash.Services;
 
 public sealed class SettingsService : ISettingsService
 {
+    /// <summary>
+    /// 配置文件路径：<c>%USERPROFILE%\.PhotoRenameAIHash\settings.json</c>。
+    /// 刻意放在用户 Profile 根目录下而不是 AppData：MSIX 会对 <c>%LOCALAPPDATA%</c> /
+    /// <c>%APPDATA%</c> 做写虚拟化并把它们纳入包数据，<b>卸载 / 重置应用时会被系统一并删除</b>；
+    /// Profile 根目录不参与写虚拟化，卸载后配置与 API Key 仍然保留。
+    /// </summary>
     private static readonly string FilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".PhotoRenameAIHash", "settings.json");
+
+    /// <summary>旧版配置路径（<c>%LOCALAPPDATA%\PhotoRenameAIHash\settings.json</c>）：仅用于一次性迁出，不再写入。</summary>
+    private static readonly string LegacyFilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "PhotoRenameAIHash", "settings.json");
 
@@ -29,6 +40,8 @@ public sealed class SettingsService : ISettingsService
     public AppSettings Load()
     {
         LastLoadHadUndecryptableKeys = false; // 标志只反映最近一次 Load，每次加载前先重置
+        TryMigrateFromLegacyPath();           // 首次启动时把旧版配置迁到新路径（失败静默）
+
         try
         {
             if (File.Exists(FilePath))
@@ -64,6 +77,10 @@ public sealed class SettingsService : ISettingsService
         await _saveLock.WaitAsync().ConfigureAwait(false);
         try
         {
+            // 与 Load 同样先尝试迁移：整理结束的持久化可能早于任何一次 Load，
+            // 不迁移的话旧配置会被这次保存直接「顶掉」（新路径被写成当前内存模型）。
+            TryMigrateFromLegacyPath();
+
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
 
@@ -96,6 +113,40 @@ public sealed class SettingsService : ISettingsService
         finally
         {
             _saveLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 一次性迁移：把旧版 <c>%LOCALAPPDATA%\PhotoRenameAIHash\settings.json</c> 复制到新路径。
+    /// 老用户升级后如果丢配置，等于用一个新的 P0 换掉旧的 P0，所以必须做。
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>触发条件：<b>新路径不存在</b> 且 <b>旧路径存在</b>。新路径已存在说明已迁移过或是全新安装，不再动。</item>
+    /// <item>只做<b>文件级复制</b>、不解析 JSON：避免与 DPAPI 解密耦合（迁移发生在解密之前），
+    /// 也避免反序列化 / 再序列化过程中把读不懂的字段写丢。</item>
+    /// <item><b>保留旧文件不删</b>：用 Copy 而不是 Move。万一新路径后续写失败或迁移出的文件损坏，
+    /// 用户的原始配置仍在旧位置，可手工取回。</item>
+    /// <item>全程 try/catch 且 catch 里<b>不抛、不记录失败状态</b>：迁移失败的最坏结果只是
+    /// 「按新配置（默认值）启动」，绝不能导致启动失败或设置不可用。</item>
+    /// </list>
+    /// </remarks>
+    private static void TryMigrateFromLegacyPath()
+    {
+        try
+        {
+            if (File.Exists(FilePath) || !File.Exists(LegacyFilePath)) return;
+
+            var dir = Path.GetDirectoryName(FilePath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+            // overwrite: false —— 并发（Load 与 SaveAsync 同时首次触发）时后来的那次会抛 IOException，
+            // 被下面的 catch 静默吞掉，不会覆盖已迁好的文件
+            File.Copy(LegacyFilePath, FilePath, overwrite: false);
+        }
+        catch
+        {
+            // 迁移失败（无权限 / 磁盘满 / 文件被占用 / 并发竞争）：静默回退到正常加载流程
         }
     }
 
