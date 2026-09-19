@@ -29,8 +29,11 @@ public static class ImageAnalysisHelper
             var b64 = await ImageDecoder.EncodeResizedJpegAsync(fs, maxDim, ct).ConfigureAwait(false);
             return "data:image/jpeg;base64," + b64;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // 取消必须原样上抛：EncodeResizedJpegAsync 内部 ct 感知，取消时抛 OCE。
+            // 此前被裸 catch 吞成 null，四个引擎都会报「无法解码图片」，归因完全错误
+            // （写法与 Services/HashService.cs 的 TryComputeMd5Async 一致）。
             return null;
         }
     }

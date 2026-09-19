@@ -410,6 +410,7 @@ public sealed class OrganizeService : IOrganizeService
                 }
                 catch (Exception ex)
                 {
+                    if (ex is OperationCanceledException) throw; // 与 RunAsync 对齐：取消立即向上传播，不记成「错误」
                     report.Failed++;
                     entry = new RenameLogEntry
                     {
