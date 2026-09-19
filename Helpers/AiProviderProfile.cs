@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net.Http.Headers;
@@ -251,11 +252,14 @@ public static class RetryAfterParser
             if (any) return Positive(TimeSpan.FromSeconds(total), out delay);
         }
 
-        // 5) RFC3339 绝对时刻（Anthropic 的 reset 头）：换算为相对现在的时长
+        // 5) 绝对时刻（Anthropic 的 reset 头用 RFC3339）：换算为相对现在的时长。
+        //    顺带覆盖 HTTP-date（RFC1123，如 "Wed, 21 Oct 2015 07:28:00 GMT"）——
+        //    DateTimeOffset.TryParse 能识别 GMT 后缀，不是「解析失败」：
+        //    过去时刻 → at - now 为负 → Positive 拒收；未来时刻 → 正确换算成剩余时长。
         if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at))
             return Positive(at - now, out delay);
 
-        // 6) 其它（含 HTTP-date 与任何病态值）：解析失败
+        // 6) 其余病态值（无法归入以上任何一种格式）：解析失败
         return false;
     }
 
@@ -305,6 +309,16 @@ public static class AiProviderProfiles
     /// 进程级共享：同一 key 的额度本就是跨批次连续计费的。
     /// </summary>
     private static readonly RateGate NvidiaGate = new(30, TimeSpan.FromMinutes(1));
+
+    /// <summary>
+    /// 自定义端点（host + RPM）→ 闸门实例的进程级缓存。
+    /// <b>必须缓存</b>：<see cref="RateGate"/> 的滑动窗口记录在实例字段 <c>_stamps</c> 里，
+    /// 每次调用都 new 一枚闸门 → 队列恒为空 → <c>_stamps.Count &lt; _maxRequests</c> 恒真 → 一次都不等待，
+    /// 用户填的「每分钟请求上限」会静默失效（P18：静默失败才是真凶）。
+    /// 按 (host, rpm) 组合建键：同一端点改了 RPM 上限会拿到新闸门，不会沿用旧的窗口记录。
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, RateGate> CustomGates =
+        new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 智谱（open.bigmodel.cn）策略档。
@@ -402,13 +416,16 @@ public static class AiProviderProfiles
     };
 
     /// <summary>按枚举取策略档；<c>Custom</c> 会按端点 host 嗅探（见 <see cref="ForCustom"/>）。</summary>
-    public static AiProviderProfile For(AiProvider provider, string endpoint = "")
+    /// <param name="provider">引擎枚举。</param>
+    /// <param name="endpoint">自定义引擎的端点 URL（仅 <c>Custom</c> 使用）。</param>
+    /// <param name="rpmLimit">自定义引擎的每分钟请求上限（仅 <c>Custom</c> 使用）；0 / null = 不限。</param>
+    public static AiProviderProfile For(AiProvider provider, string endpoint = "", int? rpmLimit = null)
         => provider switch
         {
             AiProvider.Zhipu => Zhipu,
             AiProvider.Qwen => Qwen,
             AiProvider.Nvidia => Nvidia,
-            AiProvider.Custom => ForCustom(endpoint, null),
+            AiProvider.Custom => ForCustom(endpoint, rpmLimit),
             _ => Generic,
         };
 
@@ -425,10 +442,10 @@ public static class AiProviderProfiles
             host = uri.Host;
 
         AiProviderProfile profile;
-        if (Contains(host, "open.bigmodel.cn")) profile = Zhipu;
-        else if (Contains(host, "dashscope.aliyuncs.com")) profile = Qwen;
-        else if (Contains(host, "api.anthropic.com")) profile = Anthropic;
-        else if (Contains(host, "generativelanguage.googleapis.com")) profile = Gemini;
+        if (HostMatches(host, "open.bigmodel.cn")) profile = Zhipu;
+        else if (HostMatches(host, "dashscope.aliyuncs.com")) profile = Qwen;
+        else if (HostMatches(host, "api.anthropic.com")) profile = Anthropic;
+        else if (HostMatches(host, "generativelanguage.googleapis.com")) profile = Gemini;
         // 以下三家均为 OpenAI 兼容且无结构化错误码，统一走通用档：
         // - api.openai.com：错误体有结构化 code，但限流类均可重试，靠状态码足够
         // - api.moonshot.cn（Kimi）：同 OpenAI 兼容
@@ -440,11 +457,13 @@ public static class AiProviderProfiles
 
         if (!rpmLimit.HasValue || rpmLimit.Value <= 0) return profile;
 
-        // init 属性不可变：需要新构造一份档位（不能用 with——with 对非 record 的 class 不适用）
+        // init 属性不可变：需要新构造一份档位（不能用 with——with 对非 record 的 class 不适用）。
+        // 闸门必须走进程级缓存（见 CustomGates 注释）：每次 new 都会让滑动窗口清零、限速静默失效。
         return new AiProviderProfile
         {
             Name = profile.Name + "(rpm<= " + rpmLimit.Value.ToString(CultureInfo.InvariantCulture) + ")",
-            Gate = new RateGate(rpmLimit.Value, TimeSpan.FromMinutes(1)),
+            Gate = CustomGates.GetOrAdd(host + "|" + rpmLimit.Value.ToString(CultureInfo.InvariantCulture),
+                _ => new RateGate(rpmLimit.Value, TimeSpan.FromMinutes(1))),
             Retry = profile.Retry,
             RetryAfterHeaders = profile.RetryAfterHeaders,
             RetryAfterFromJson = profile.RetryAfterFromJson,
@@ -452,8 +471,18 @@ public static class AiProviderProfiles
         };
     }
 
-    private static bool Contains(string host, string keyword)
-        => host.Length > 0 && host.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
+    /// <summary>
+    /// host 与供应商关键字是否匹配：<b>精确相等或其子域</b>。
+    /// 不能用子串匹配（<c>host.IndexOf(keyword) &gt;= 0</c>）——那样
+    /// <c>notapi.anthropic.com.attacker.cn</c> 会命中 <c>api.anthropic.com</c>，
+    /// 把 <see cref="AiPermanentRuleSet.RetryAfterAbsentOn429IsPermanent"/> 这个
+    /// 「误判即熔断整批」（P26）的高危开关授予伪造 host。
+    /// 子域放行是必要的：官方网关本身会用子域（如 <c>open.bigmodel.cn</c> 的同族域名）。
+    /// </summary>
+    private static bool HostMatches(string host, string keyword)
+        => host.Length > 0 &&
+           (host.Equals(keyword, StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith("." + keyword, StringComparison.OrdinalIgnoreCase));
 
     private static string[] Union(string[] a, string[] b)
     {

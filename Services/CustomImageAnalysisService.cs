@@ -15,7 +15,12 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
     private readonly string _endpoint;
     private readonly string _model;
     private readonly string _apiKey;
-    private readonly int _rpmLimit;
+
+    /// <summary>本实例的策略档：<b>必须在构造函数里建一次</b>，不能在 <see cref="AnalyzeAsync"/> 里
+    /// 逐图调用 <see cref="AiProviderProfiles.ForCustom"/>——闸门是进程级缓存的（见
+    /// <c>AiProviderProfiles.CustomGates</c>），但档位对象每次都会重建；逐图重建虽不至于让限速失效，
+    /// 却会重复做 host 嗅探与字典查找，且让「闸门是跨调用存活的共享实例」这一事实在调用点不可见。</summary>
+    private readonly AiProviderProfile _profile;
 
     /// <param name="endpoint">完整的 chat/completions 端点 URL</param>
     /// <param name="model">模型名，如 gpt-4o</param>
@@ -27,7 +32,9 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
         _endpoint = endpoint;
         _model = model;
         _apiKey = apiKey;
-        _rpmLimit = rpmLimit;
+        // 端点 host 嗅探（智谱/阿里/Anthropic/Gemini 各有档位，未命中走通用档）；
+        // 填了「每分钟请求上限」时在档位基础上挂闸门（闸门实例进程级共享，跨图片、跨批次生效）。
+        _profile = AiProviderProfiles.For(AiProvider.Custom, endpoint, rpmLimit);
     }
 
     public async Task<ImageAnalysisResult?> AnalyzeAsync(string imagePath, string language, CancellationToken ct = default)
@@ -41,12 +48,10 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
                 $"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}",
                 isBatchLevel: false);
 
-        // 走端点 host 嗅探出的策略档（智谱/阿里/Anthropic/Gemini 各有档位，未命中走通用档）；
-        // 用户在设置里填了「每分钟请求上限」时，在该档位基础上覆盖闸门。
+        // 用构造函数里建好的策略档（闸门实例进程级共享，跨图片/跨批次累计计数，限速才真的生效）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language), dataUrl,
-            AiProviderProfiles.For(AiProvider.Custom, _endpoint, _rpmLimit), ct).ConfigureAwait(false);
+            ImageAnalysisHelper.BuildPrompt(language), dataUrl, _profile, ct).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);

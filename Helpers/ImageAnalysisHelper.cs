@@ -147,10 +147,16 @@ public static class ImageAnalysisHelper
                 // 不抛 AiPermanentException：保留外层「单文件重排队」兜底（P17）。
                 var netDelay = ComputeDelay(profile, attempt, null, null);
                 if (attempt >= pol.MaxAttempts || sw.Elapsed + netDelay > pol.TotalBudget)
+                {
+                    // 必须区分「次数耗尽」与「退避预算耗尽」并打印累计秒数：
+                    // 只说「限流/失败」会误导用户以为再等等就好（P23）。
+                    var netWhy = attempt >= pol.MaxAttempts
+                        ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
+                        : $"累计 {sw.Elapsed.TotalSeconds:F0}s 已耗尽退避预算 {pol.TotalBudget.TotalSeconds:F0}s";
                     throw new InvalidOperationException(
-                        $"调用视觉识别接口失败（网络/连通性，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s" +
-                        $"（已达最大次数 {pol.MaxAttempts} 或退避预算 {pol.TotalBudget.TotalSeconds:F0}s））：{ex.Message}。" +
-                        "请检查网络与端点 URL 是否正确。", ex);
+                        $"调用视觉识别接口失败（网络/连通性，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，" +
+                        $"{netWhy}）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
+                }
 
                 await Task.Delay(netDelay, ct).ConfigureAwait(false);
                 attempt++;
@@ -183,10 +189,12 @@ public static class ImageAnalysisHelper
                         // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），
                         // 调用方按状态码判定而非解析文案。异常文案必须区分「次数耗尽」与「退避预算耗尽」
                         // 并给出累计秒数——只说「限流」会误导用户以为再等等就好（P23）。
+                        var why = attempt >= pol.MaxAttempts
+                            ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
+                            : $"累计 {sw.Elapsed.TotalSeconds:F0}s 已耗尽退避预算 {pol.TotalBudget.TotalSeconds:F0}s";
                         throw new HttpRequestException(
                             $"视觉识别接口限流/错误（{code} {resp.StatusCode}），" +
-                            $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s" +
-                            $"（已达最大次数 {pol.MaxAttempts} 或退避预算 {pol.TotalBudget.TotalSeconds:F0}s）：{Snippet(respText)}",
+                            $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，{why}：{Snippet(respText)}",
                             null, resp.StatusCode);
                     }
 
