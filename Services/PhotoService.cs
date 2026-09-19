@@ -162,7 +162,9 @@ public sealed class PhotoService : IPhotoService
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhotoRenameAIHash");
-            Directory.CreateDirectory(dir);
+            // 全限定 System.IO.Directory：本文件同时 using 了 MetadataExtractor，
+            // 后者也有 Directory 类型（EXIF 目录项），裸写会触发 CS0104 歧义
+            System.IO.Directory.CreateDirectory(dir);
             File.AppendAllText(Path.Combine(dir, "scan.log"),
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
         }
