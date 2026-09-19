@@ -197,7 +197,6 @@ public partial class OrganizeViewModel : ObservableObject
             var req = BuildRequest();
             var progress = new Progress<OrganizeProgress>(OnProgress);
             await AppServices.OrganizeService.RunAsync(req, progress, cts.Token);
-            await PersistConfigAsync();
             StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：完成终态
             StatusBarOpen = true;
         }
@@ -222,6 +221,18 @@ public partial class OrganizeViewModel : ObservableObject
             IsPaused = false;
             PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
+
+            // 配置属于用户输入（源/输出文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
+            // 取消 / 失败 / 环境错误中止时同样应落盘，否则用户刚填好的路径与模板会随一次失败一起丢失。
+            // 包 try/catch：持久化失败不得掩盖主流程的异常或终态。
+            try
+            {
+                await PersistConfigAsync();
+            }
+            catch (System.Exception pex)
+            {
+                AppendLog("配置保存失败：" + pex.Message);
+            }
         }
     }
 
@@ -268,7 +279,6 @@ public partial class OrganizeViewModel : ObservableObject
             var req = BuildRequest();
             var progress = new Progress<OrganizeProgress>(OnProgress);
             await AppServices.OrganizeService.ArchiveByDateAsync(req, progress, cts.Token);
-            await PersistConfigAsync();
             StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：完成终态
             StatusBarOpen = true;
         }
@@ -293,6 +303,18 @@ public partial class OrganizeViewModel : ObservableObject
             IsPaused = false;
             PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
+
+            // 配置属于用户输入（源/输出文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
+            // 取消 / 失败 / 环境错误中止时同样应落盘，否则用户刚填好的路径与模板会随一次失败一起丢失。
+            // 包 try/catch：持久化失败不得掩盖主流程的异常或终态。
+            try
+            {
+                await PersistConfigAsync();
+            }
+            catch (System.Exception pex)
+            {
+                AppendLog("配置保存失败：" + pex.Message);
+            }
         }
     }
 
