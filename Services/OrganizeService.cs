@@ -83,6 +83,9 @@ public sealed class OrganizeService : IOrganizeService
         if (string.IsNullOrWhiteSpace(req.SourceFolder) || !Directory.Exists(req.SourceFolder))
         {
             progress.Report(new OrganizeProgress { Message = "源文件夹无效。" });
+            // 早退发生在 _pts 创建之前、try/finally 不会执行：必须在这里清掉待应用标记。
+            // 否则它会残留到下一批次（用户没点过暂停，下一批一创建令牌却被应用 → 一启动就暂停）。
+            _pendingPause = false;
             return report;
         }
 
@@ -90,6 +93,8 @@ public sealed class OrganizeService : IOrganizeService
             (string.IsNullOrWhiteSpace(output) || !Directory.Exists(output)))
         {
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
+            // 同「源文件夹无效」：早退不会经过 try/finally，此处必须清掉待应用标记，避免污染下一批次。
+            _pendingPause = false;
             return report;
         }
 
@@ -322,12 +327,17 @@ public sealed class OrganizeService : IOrganizeService
         if (string.IsNullOrWhiteSpace(req.SourceFolder) || !Directory.Exists(req.SourceFolder))
         {
             progress.Report(new OrganizeProgress { Message = "源文件夹无效。" });
+            // 早退发生在 _pts 创建之前、try/finally 不会执行：必须在这里清掉待应用标记。
+            // 否则它会残留到下一批次（用户没点过暂停，下一批一创建令牌却被应用 → 一启动就暂停）。
+            _pendingPause = false;
             return report;
         }
 
         if (string.IsNullOrWhiteSpace(req.OutputFolder) || !Directory.Exists(req.OutputFolder))
         {
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
+            // 同「源文件夹无效」：早退不会经过 try/finally，此处必须清掉待应用标记，避免污染下一批次。
+            _pendingPause = false;
             return report;
         }
 
