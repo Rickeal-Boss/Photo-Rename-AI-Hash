@@ -1303,16 +1303,23 @@ jobs:
 
           git push --force origin ci-diag-tmp:refs/heads/ci-diag-report
 
+          # 先把 push 的退出码存下来：本步没有显式 exit，步骤退出码由 $LASTEXITCODE
+          # 决定（GH Actions 的 pwsh 模板会在脚本末尾 exit $LASTEXITCODE）。
+          # 下面切回分支时会清一次 $LASTEXITCODE，若不先存，push 失败会被洗成绿勾 ——
+          # 而本步还有 continue-on-error，连黄感叹号都不会有：诊断根本没留档却全绿。
+          # 那正好抵消 bea1a52「诊断留档失败不得把绿构建刷红」的初衷：
+          # 原设计是「失败可见但不红」，被洗成绿勾就变成「失败不可见」。
+
+          $pushCode = $LASTEXITCODE
+
           Write-Host "pushed diagnostics to ci-diag branch"
 
           # 切回触发分支再收尾：否则 job 尾声的 Post Checkout（clean: true）会在
           # orphan 分支上做清理，语义变脏甚至留下噪声。
-          # 注意（pwsh 7.4 起）：$PSNativeCommandUseErrorActionPreference 默认为 $true，
-          # 在 $ErrorActionPreference='Stop' 下原生命令非 0 退出会抛终止错误 ——
-          # 若直接写 git switch -f，一旦切不回去（push 事件下 checkout 是 detached
-          # HEAD，本地根本没有 $back 这个分支），既走不到下面那行兜底，也会让
-          # 「已推送」这句标记不执行：最终表现是黄感叹号 + 看不出诊断到底留没留档。
-          # 切不回去的代价远小于信号被污染，故此处显式降级并清掉退出码。
+          # 注：$PSNativeCommandUseErrorActionPreference 默认为 $false（Learn 默认值表；
+          # PowerShell-Docs #10752 据源码 InitialSessionState.cs 佐证），即当前默认下
+          # git switch -f 失败并不会抛终止错误、下面那行兜底走得到。
+          # 但 7.4 期间该默认值口径被来回改过，此处显式降级 + 清退出码是零成本保险。
 
           $back = $env:GITHUB_REF_NAME
 
@@ -1325,4 +1332,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $LASTEXITCODE = 0
+
+          exit $pushCode
 
