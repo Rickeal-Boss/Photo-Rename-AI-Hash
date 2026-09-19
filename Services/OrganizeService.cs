@@ -22,20 +22,58 @@ public sealed class OrganizeService : IOrganizeService
 
     private PauseTokenSource? _pts;
 
-    /// <summary>当前是否处于暂停状态（供 UI 显示「继续」）。</summary>
-    public bool IsPaused => _pts?.IsPaused ?? false;
+    /// <summary>
+    /// 「用户点了暂停，但当时暂停令牌还没创建」的待应用标记。
+    /// 令牌要到方法内（校验 / 构造 AI / 扫描之前）才 new，在此之前 _pts 为 null，
+    /// Pause() 只能把请求记在这里，等创建点补应用（见 <see cref="ApplyPendingPause"/>）。
+    /// volatile：写发生在 UI 线程（点暂停），读发生在工作线程与 UI 的 IsPaused 上。
+    /// </summary>
+    private volatile bool _pendingPause;
 
-    /// <summary>协作式暂停：挂起处理循环，保留已扫描的工作队列与状态，可随时继续（区别于 Cancel 的硬取消）。</summary>
-    public void Pause() => _pts?.Pause();
+    /// <summary>
+    /// 当前是否处于暂停状态（供 UI 显示「继续」）。
+    /// <b>必须把 <c>_pendingPause</c> 一起算进来</b>：否则用户点暂停只置了待应用标记，本属性仍返回 false
+    /// → 界面显示「当前阶段暂不支持暂停」，但稍后创建点把暂停应用上了、循环真的挂起
+    /// → 批次已暂停、界面却说不支持（谎报，与 e813471 修掉的是同一类问题）。
+    /// </summary>
+    public bool IsPaused => _pts?.IsPaused == true || _pendingPause;
 
-    /// <summary>继续被暂停的处理循环。</summary>
-    public void Resume() => _pts?.Resume();
+    /// <summary>
+    /// 协作式暂停：挂起处理循环，保留已扫描的工作队列与状态，可随时继续（区别于 Cancel 的硬取消）。
+    /// 令牌尚未创建时（批次未开始、或已开始但仍在校验 / 构造 AI 阶段）先把请求记到
+    /// <see cref="_pendingPause"/>，由创建点补应用，避免这一段窗口内点暂停被静默丢弃。
+    /// </summary>
+    public void Pause()
+    {
+        if (_pts != null) _pts.Pause();
+        else _pendingPause = true;
+    }
+
+    /// <summary>继续被暂停的处理循环：同时清掉待应用标记，避免下一批次一开始就莫名处于暂停。</summary>
+    public void Resume()
+    {
+        _pendingPause = false;
+        _pts?.Resume();
+    }
+
+    /// <summary>
+    /// 把「令牌创建之前点下的暂停」补应用到刚创建的令牌上，并清除待应用标记。
+    /// 先应用再清标记：否则中间会有一瞬 <see cref="IsPaused"/> 两边都不成立、读成 false。
+    /// </summary>
+    private void ApplyPendingPause()
+    {
+        if (!_pendingPause) return;
+        _pts?.Pause();           // 状态已由令牌承载，IsPaused 读 _pts.IsPaused 仍为 true
+        _pendingPause = false;
+    }
 
     public async Task<OrganizeReport> RunAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
         // 兜底清理：若上一批在「令牌已创建、try 尚未进入」的阶段异常退出（如扫描期间取消），
         // finally 来不及把 _pts 置空。此处清掉陈旧令牌，避免它让 IsPaused 在新批次开始前误报 true。
+        // 注意：这里<b>不清</b> _pendingPause——用户可能在进入本方法之前就点了暂停，那份请求
+        // 要留到创建点补应用；清掉会让界面（已按 pending 显示「已暂停」）与循环实际行为再次对不上。
         _pts = null;
         // 日志服务是进程级单例、失败计数跨批次累加，故记录批次开始时的基线，
         // 只统计本批次新产生的写入失败，避免把历史累计值报给用户。
@@ -61,6 +99,7 @@ public sealed class OrganizeService : IOrganizeService
         // 静默 no-op，导致「开始后的扫描 / 加载索引窗口内点暂停」完全失效、UI 却谎报已暂停。
         // 上移后这两个窗口内点暂停即可生效：扫描本身不检查暂停，扫描一结束、处理任何文件之前就挂起。
         _pts = new PauseTokenSource();
+        ApplyPendingPause(); // 补应用「令牌创建之前」（校验 / 构造 AI 阶段）点下的暂停
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
@@ -246,6 +285,7 @@ public sealed class OrganizeService : IOrganizeService
         finally
         {
             _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
+            _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
         }
 
         // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
@@ -274,6 +314,7 @@ public sealed class OrganizeService : IOrganizeService
     {
         var report = new OrganizeReport();
         // 同 RunAsync：清掉上一批可能残留的暂停令牌，避免 IsPaused 在新批次开始前误报 true。
+        // 同 RunAsync：此处不清 _pendingPause（用户可能在进入本方法之前已点暂停，需留到创建点补应用）。
         _pts = null;
         // 与 RunAsync 同口径：失败计数是进程级单例的累计值，取基线后只统计本批次新增。
         int logFailBefore = _log.FailedWrites;
@@ -295,6 +336,7 @@ public sealed class OrganizeService : IOrganizeService
 
         // 同 RunAsync：暂停令牌必须在扫描之前创建，否则扫描 / 加载索引窗口内点暂停是静默 no-op。
         _pts = new PauseTokenSource();
+        ApplyPendingPause(); // 同 RunAsync：补应用令牌创建之前点下的暂停
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
@@ -431,6 +473,7 @@ public sealed class OrganizeService : IOrganizeService
         finally
         {
             _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
+            _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
         }
 
         // 归档模式同样写 rename_log.csv（分散在各日期子目录），写盘失败的静默风险与 RunAsync 相同。
