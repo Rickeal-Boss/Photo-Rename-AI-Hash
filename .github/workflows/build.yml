@@ -1141,7 +1141,11 @@ jobs:
 
           Copy-Item $bat -Destination $stage -Force
 
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "安装说明.txt") -Destination $stage -Force
+          $doc = Join-Path $env:GITHUB_WORKSPACE "安装说明.txt"
+
+          if (-not (Test-Path $doc)) { Write-Error "缺少 安装说明.txt（应已提交到仓库根；它是随包说明，不参与安装）"; exit 1 }
+
+          Copy-Item $doc -Destination $stage -Force
 
           $files = @(Get-ChildItem $stage -File)
 
@@ -1155,7 +1159,8 @@ jobs:
 
 
 
-      # 阻断式：staging 步已保证 artifact/ 内三件产物齐备（缺任一即已 exit 1），
+      # 阻断式：staging 步已保证 artifact/ 内产物齐备（3 件必需 + 1 份随包说明，
+      # 缺任一即已 exit 1），
       # 此时上传失败只剩网络/配额等瞬时因素。若继续 continue-on-error，
       # 会出现「CI 全绿但用户拿不到安装包」的静默失败——产物即交付物，宁可红灯。
 
@@ -1298,14 +1303,26 @@ jobs:
 
           git push --force origin ci-diag-tmp:refs/heads/ci-diag-report
 
+          Write-Host "pushed diagnostics to ci-diag branch"
+
           # 切回触发分支再收尾：否则 job 尾声的 Post Checkout（clean: true）会在
-          # orphan 分支上做清理，语义变脏甚至留下噪声。切不回去就退回当次 sha。
+          # orphan 分支上做清理，语义变脏甚至留下噪声。
+          # 注意（pwsh 7.4 起）：$PSNativeCommandUseErrorActionPreference 默认为 $true，
+          # 在 $ErrorActionPreference='Stop' 下原生命令非 0 退出会抛终止错误 ——
+          # 若直接写 git switch -f，一旦切不回去（push 事件下 checkout 是 detached
+          # HEAD，本地根本没有 $back 这个分支），既走不到下面那行兜底，也会让
+          # 「已推送」这句标记不执行：最终表现是黄感叹号 + 看不出诊断到底留没留档。
+          # 切不回去的代价远小于信号被污染，故此处显式降级并清掉退出码。
 
           $back = $env:GITHUB_REF_NAME
+
+          $ErrorActionPreference = 'Continue'
 
           if ($back) { git switch -f $back }
 
           if ($LASTEXITCODE -ne 0) { git checkout -f $env:GITHUB_SHA }
 
-          Write-Host "pushed diagnostics to ci-diag branch"
+          $ErrorActionPreference = 'Stop'
+
+          $LASTEXITCODE = 0
 
