@@ -293,6 +293,27 @@ public sealed class OrganizeService : IOrganizeService
 
                 Categorize(report, entry);
             }
+            catch (PermanentOperationException ex) when (ex.IsEnvironmentError)
+            {
+                // 与 RunAsync 对齐：环境级错误（如归档目标盘写满）对整批文件都成立，继续处理
+                // 只会刷出 N 行同一真因的错误并让用户白等全批跑完。归档模式本身不调用 AI、
+                // 也无重排队，熔断纯粹是为了「早停 + 不刷屏」。
+                // 过滤器保留：非环境的永久错误仍走下方通用 catch 记单文件错误，行为不变。
+                var envEntry = new RenameLogEntry
+                {
+                    OriginalName = f.Name,
+                    Status = "错误",
+                    Message = ex.Message,
+                };
+                report.Failed++;
+                report.Results.Add(envEntry);
+                progress.Report(new OrganizeProgress
+                {
+                    Result = envEntry,
+                    LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
+                });
+                throw;
+            }
             catch (Exception ex)
             {
                 report.Failed++;
