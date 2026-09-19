@@ -293,10 +293,22 @@ public static class RetryAfterParser
 
         // 5) 绝对时刻（Anthropic 的 reset 头用 RFC3339）：换算为相对现在的时长。
         //    顺带覆盖 HTTP-date（RFC1123，如 "Wed, 21 Oct 2015 07:28:00 GMT"）——
-        //    DateTimeOffset.TryParse 能识别 GMT 后缀，不是「解析失败」：
-        //    过去时刻 → at - now 为负 → Positive 拒收；未来时刻 → 正确换算成剩余时长。
+        //    DateTimeOffset.TryParse 能识别 GMT 后缀，不是「解析失败」。
         if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at))
-            return Positive(at - now, out delay);
+        {
+            var until = at - now;
+            // 时钟偏移加固（P1-G）：Anthropic 的 reset 头是绝对时刻，若本机时钟快于服务端
+            // 超过重置窗口（常见 60s，未做 NTP 同步即可能），until 会为负。此时若判「解析失败」，
+            // 会被 Anthropic 档的规则 3（429 且无任何重试提示 = 额度封顶）误判成永久错误
+            // → 连续 3 次熔断中止整批（P26）。中间网关剥离该头同理。
+            // 故「已过期」一律钳到 1 秒（语义：立刻可以重试），让调用方拿到非空 hint。
+            if (until <= TimeSpan.Zero)
+            {
+                delay = TimeSpan.FromSeconds(1);
+                return true;
+            }
+            return Positive(until, out delay);
+        }
 
         // 6) 其余病态值（无法归入以上任何一种格式）：解析失败
         return false;

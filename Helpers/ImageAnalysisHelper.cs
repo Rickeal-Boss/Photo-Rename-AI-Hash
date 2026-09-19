@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Models;
@@ -200,7 +201,11 @@ public static class ImageAnalysisHelper
                     // 文件级重排队，同时不误伤「瞬时限流重试耗尽」（那也是 HttpRequestException(429)，
                     // 属用户已裁定的有意重试设计）。
                     throw new AiPermanentException(
-                        $"视觉识别接口返回 429（{permWhy}，重试无意义）：{Snippet(respText)}");
+                        $"视觉识别接口返回 429（{permWhy}，重试无意义）：{Snippet(respText)}",
+                        // P1-G：显式写出而非依赖默认值 true。权衡：命中永久业务码（欠费/额度/套餐）
+                        // 与启发式规则 3（429 且无重试提示）都对整批成立，故确实应为 true；
+                        // 但默认值有「被将来新增的逐文件规则静默纳入」的风险（P26），必须显式声明。
+                        isBatchLevel: true);
                 }
 
                 // 429 限流 / 5xx 服务端错误：按策略档退避后重试，期间不做任何重命名
@@ -360,6 +365,10 @@ public static class ImageAnalysisHelper
     /// <summary>从响应体解析 <c>error.code</c>（字符串或数字皆可）；解析不出返回空串。</summary>
     private static string ReadErrorCode(string respText)
     {
+        // 与 RetryAfterParser.FromJson 同口径：每次 429/4xx 都会走到这里，
+        // 不为找业务码去全量解析一个大响应体（代理错误页、几 MB 的报错 JSON）
+        if (string.IsNullOrEmpty(respText) || respText.Length > MaxCodeScanLength) return "";
+
         try
         {
             using var doc = JsonDocument.Parse(respText);
@@ -376,8 +385,25 @@ public static class ImageAnalysisHelper
         return "";
     }
 
-    /// <summary>截断响应体用于异常文案（避免把整段 HTML/JSON 塞进 UI 日志）。</summary>
-    private static string Snippet(string t) => t.Length > 500 ? t.Substring(0, 500) : t;
+    /// <summary>响应体扫描上限（与 <c>RetryAfterParser.MaxJsonScanLength</c> 同口径）。</summary>
+    private const int MaxCodeScanLength = 65536;
+
+    /// <summary>
+    /// 截断响应体用于异常文案：<b>先截断再脱敏</b>（顺序不可反，否则正则要扫全量响应体）。
+    /// 脱敏是必须的（D-5）：企业代理的错误页模板（如 Squid）会回显完整请求 URL（含 ?key=），
+    /// 主流网关也可能在错误文案里回显 Key 片段。异常文案虽不落盘，但用户截图外发即泄露。
+    /// </summary>
+    private static string Snippet(string t)
+    {
+        if (string.IsNullOrEmpty(t)) return "";
+        var s = t.Length > 500 ? t.Substring(0, 500) : t;
+
+        // 顺序不可反：先截断（见上），再对这 500 字符脱敏
+        s = Regex.Replace(s, @"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", "$1***");
+        s = Regex.Replace(s, @"(?i)((?:api[_-]?key|apikey|access[_-]?token|secret)\s*[:=]\s*""?)[A-Za-z0-9._\-]{8,}", "$1***");
+        s = Regex.Replace(s, @"(?i)([?&](?:key|api[_-]?key|access_token|token)=)[^&\s""]+", "$1***");
+        return s;
+    }
 
     /// <summary>
     /// 从 OpenAI 兼容响应体中抽取 message content，并兼容「思考型模型」的多种返回形态：
@@ -400,7 +426,8 @@ public static class ImageAnalysisHelper
                 var msg = err.ValueKind == JsonValueKind.String
                     ? err.GetString()
                     : (err.TryGetProperty("message", out var m) ? m.GetString() : null);
-                throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? err.GetRawText()));
+                // GetRawText() 可能是整段错误对象（含回显的 Key），必须走 Snippet 截断 + 脱敏
+                throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? Snippet(err.GetRawText())));
             }
 
             var choice = root.GetProperty("choices")[0];
