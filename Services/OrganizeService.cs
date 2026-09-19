@@ -530,6 +530,12 @@ public sealed class OrganizeService : IOrganizeService
             if (ex.HasValue) when = ex.Value;
         }
 
+        // 暂停检查点（AI 之前）：单文件里最耗时的就是 AI 调用（退避最长 180s + 若干次 60s HTTP），
+        // 只在主循环顶部检查一次的话，用户在这个文件的退避/HTTP 期间点「暂停」，
+        // 要等整段跑完回到循环顶部才挂起 —— 期间 UI 已显示「已暂停」、请求却还在发（P33 谎报 + 持续计费）。
+        // _pts 可能为 null（归档循环等未创建令牌的路径），故判空。
+        if (_pts != null) await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
+
         // AI 识别（结果缓存：重试复用，避免重复计费）
         if (ai != null)
         {
@@ -549,6 +555,11 @@ public sealed class OrganizeService : IOrganizeService
                 f.SourceTag = res.Source;
             }
         }
+
+        // 暂停检查点（AI 之后、写文件之前）：接住「AI 调用进行中」点下的暂停。
+        // 注意：AI 内部（退避等待 / HTTP 往返）无法被中断，暂停只能在它返回后生效——
+        // 这是有意的取舍：把暂停改成取消会丢弃已扫描的工作队列，违背暂停语义。
+        if (_pts != null) await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
 
         // 生成新名：未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
         // 模板为空（用户清空「命名规则」输入框，或 settings.json 中该字段为 null）时回退到默认模板：

@@ -342,8 +342,11 @@ public partial class OrganizeViewModel : ObservableObject
             {
                 IsPaused = true;
                 PauseButtonText = "继续";
-                StatusText = "已暂停，点击「继续」恢复处理。";
-                AppendLog("已暂停。");
+                // 文案必须说清生效时机：AI 调用内部（退避等待 / HTTP 往返）不可中断，
+                // 暂停在「当前步骤完成后」才挂起（ProcessOneAsync 的 AI 前后各有检查点）。
+                // 说「已暂停」会让人以为立刻停了 —— 那就是 P33 谎报。
+                StatusText = "已暂停，点击「继续」恢复处理（当前步骤完成后生效）。";
+                AppendLog("已暂停（当前步骤完成后生效）。");
             }
             else
             {
