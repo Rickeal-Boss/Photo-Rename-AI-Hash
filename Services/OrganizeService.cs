@@ -232,7 +232,8 @@ public sealed class OrganizeService : IOrganizeService
                         consecutivePermanent++;
                         if (consecutivePermanent >= 3)
                         {
-                            // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
+                            // 不改变单次调用内的退避重试（供应商策略档：默认最多 8 次 / 总预算 180s）
+                            // 与单文件重排队（10 次）的既定口径，
                             // 只把「整批继续」的终止时机提前。
                             progress.Report(new OrganizeProgress
                             {

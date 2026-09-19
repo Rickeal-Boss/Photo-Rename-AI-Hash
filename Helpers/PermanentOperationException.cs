@@ -5,8 +5,9 @@ namespace PhotoRenameAIHash.Helpers;
 /// <summary>
 /// 永久性失败：重试无法恢复的错误。调用方（<c>OrganizeService.RunAsync</c>）见此类型即标记失败，
 /// 不再把文件重排队重试——避免对同一文件刷 10 行「重试」并放大无效请求。
-/// 与「瞬时故障」严格区分：网络抖动、429 限流（1302/1305）等仍走用户已裁定的
-/// 15×15s + 单文件 10 次重排队设计。
+/// 与「瞬时故障」严格区分：网络抖动、429 限流（1302/1305）等仍走用户已裁定的重试设计
+/// ——按供应商策略档退避（见 <see cref="AiRetryPolicy"/>，默认最多 8 次 / 总预算 180s）
+/// + 单文件 10 次重排队。
 /// </summary>
 public class PermanentOperationException : Exception
 {
