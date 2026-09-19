@@ -86,7 +86,14 @@ public sealed class OrganizeService : IOrganizeService
                     Status = "跳过(日志已完成)",
                 };
                 report.Results.Add(skipEntry);
-                progress.Report(new OrganizeProgress { Result = skipEntry, LogLine = $"{curName} 跳过(日志已完成)" });
+                // 续传跳过也要带 Percent：OrganizeProgress.Percent 默认 0，VM 无条件赋值，
+                // 不带就会把进度条打回 0%。此处 done 尚未声明，用同源的 skippedAtStart 计数。
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                    Result = skipEntry,
+                    LogLine = $"{curName} 跳过(日志已完成)",
+                });
                 continue;
             }
             queue.Enqueue((f, order));
@@ -106,7 +113,6 @@ public sealed class OrganizeService : IOrganizeService
         var md5Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int done = skippedAtStart; // 已跳过的也算进度推进
 
-        _pts = new PauseTokenSource();
         while (queue.Count > 0)
         {
             ct.ThrowIfCancellationRequested();
@@ -152,6 +158,7 @@ public sealed class OrganizeService : IOrganizeService
                     // 中止前先报告进度：否则 throw 会跳过末尾的完成汇总，用户不知已处理了多少。
                     progress.Report(new OrganizeProgress
                     {
+                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                         LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
                     });
                     throw;
@@ -170,6 +177,7 @@ public sealed class OrganizeService : IOrganizeService
                         // 只把「整批继续」的终止时机提前。
                         progress.Report(new OrganizeProgress
                         {
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                             LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
                                       $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
                         });
@@ -193,6 +201,8 @@ public sealed class OrganizeService : IOrganizeService
                     queue.Enqueue((f, index));
                     progress.Report(new OrganizeProgress
                     {
+                        // 重试不算完成（done 未递增），沿用当前百分比即可：不给值会被 VM 打回 0%
+                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                         LogLine = $"{f.Name} [重试 {n}/{maxPerFileAttempts}] 上次失败：{ex.Message}",
                     });
                 }
@@ -219,8 +229,20 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         _pts = null;
+
+        // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
+        if (_log.FailedWrites > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                LogLine = $"警告：有 {_log.FailedWrites} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
+                          "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
+            });
+        }
+
         progress.Report(new OrganizeProgress
         {
+            Percent = 100,
             Message = $"完成：处理 {report.Processed}，跳过 {report.Skipped}（含续传跳过 {skippedAtStart}），失败 {report.Failed}。",
         });
         return report;
@@ -247,8 +269,6 @@ public sealed class OrganizeService : IOrganizeService
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         var completed = await _log.LoadRenameLogAsync(req.OutputFolder).ConfigureAwait(false);
-        _pts = new PauseTokenSource();
-
         int done = 0;
         foreach (var f in files)
         {
@@ -338,6 +358,7 @@ public sealed class OrganizeService : IOrganizeService
                 report.Results.Add(envEntry);
                 progress.Report(new OrganizeProgress
                 {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                     Result = envEntry,
                     LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
                 });
@@ -365,8 +386,10 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         _pts = null;
+
         progress.Report(new OrganizeProgress
         {
+            Percent = 100,
             Message = $"归档完成：处理 {report.Processed}，跳过 {report.Skipped}，失败 {report.Failed}。",
         });
         return report;

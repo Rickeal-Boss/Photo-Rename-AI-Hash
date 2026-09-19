@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;          // Volatile / Interlocked：跨线程累加并读取写盘失败计数
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Models;
 
@@ -13,6 +14,14 @@ namespace PhotoRenameAIHash.Services;
 /// </summary>
 public sealed class RenameLogService
 {
+    /// <summary>
+    /// 日志写入失败次数（原子累加）。写盘失败按设计不阻断主流程，但必须可感知——
+    /// 磁盘写满时若静默吞掉，用户会误以为「已全部记录」，实际审计与续传索引已中断。
+    /// </summary>
+    private int _failedWrites;
+
+    public int FailedWrites => Volatile.Read(ref _failedWrites);
+
     /// <summary>向输出文件夹的 rename_log.csv 追加一行记录（首次自动写表头）。</summary>
     public Task AppendRenameLogAsync(string outputFolder, RenameLogEntry entry)
     {
@@ -48,7 +57,8 @@ public sealed class RenameLogService
         }
         catch
         {
-            // 日志写入失败不影响主流程
+            // 日志写入失败不阻断主流程（既定取舍），但必须留下痕迹供批次结束时统一告警
+            Interlocked.Increment(ref _failedWrites);
         }
 
         return Task.CompletedTask;
