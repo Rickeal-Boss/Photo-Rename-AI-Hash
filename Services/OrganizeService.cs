@@ -113,122 +113,128 @@ public sealed class OrganizeService : IOrganizeService
         var md5Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int done = skippedAtStart; // 已跳过的也算进度推进
 
-        while (queue.Count > 0)
+        _pts = new PauseTokenSource();
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停：挂起直到继续或取消
-            var (f, index) = queue.Dequeue();
-            try
+            while (queue.Count > 0)
             {
-                var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache).ConfigureAwait(false);
-                Categorize(report, entry);
-                consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
-                done++;
-                progress.Report(new OrganizeProgress
+                ct.ThrowIfCancellationRequested();
+                await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停：挂起直到继续或取消
+                var (f, index) = queue.Dequeue();
+                try
                 {
-                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                    Result = entry,
-                    LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
-                });
-            }
-            catch (PermanentOperationException ex)
-            {
-                // 永久性错误（AI 欠费 / 额度耗尽 / 无权限 / 模型不存在，或备份盘满 / 备份权限未授予）：
-                // 重试无法恢复，直接标记失败且不再入队，避免对同一文件刷 10 行「重试」并白白占用 UI 进度。
-                report.Failed++;
-                done++;
-                var permEntry = new RenameLogEntry
-                {
-                    OriginalName = f.Name,
-                    Status = "错误",
-                    Message = ex.Message,
-                };
-                report.Results.Add(permEntry);
-                progress.Report(new OrganizeProgress
-                {
-                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                    Result = permEntry,
-                    LogLine = $"{f.Name} [错误] {ex.Message}",
-                });
-
-                if (ex.IsEnvironmentError)
-                {
-                    // 环境级错误对整批文件都成立（如备份盘已满、权限未授予）：继续处理后续文件无意义，
-                    // 直接中止整批并向上报告，由 VM 显示明确提示。已成功处理的文件保持已处理状态，不回滚。
-                    // 中止前先报告进度：否则 throw 会跳过末尾的完成汇总，用户不知已处理了多少。
+                    var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache).ConfigureAwait(false);
+                    Categorize(report, entry);
+                    consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
+                    done++;
                     progress.Report(new OrganizeProgress
                     {
                         Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                        LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
-                    });
-                    throw;
-                }
-
-                // 仅「对整批成立」的永久错误才累计熔断：
-                // 逐文件永久错误（如单个文件无法解码）按既定口径只记该文件的错误、继续处理其它文件。
-                if (ex.IsBatchLevel)
-                {
-                    // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
-                    // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
-                    consecutivePermanent++;
-                    if (consecutivePermanent >= 3)
-                    {
-                        // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
-                        // 只把「整批继续」的终止时机提前。
-                        progress.Report(new OrganizeProgress
-                        {
-                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                            LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
-                                      $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
-                        });
-                        throw;
-                    }
-                }
-                // 逐文件级（IsBatchLevel == false）有意「既不累加也不归零」：
-                // 不累加 → 单个坏文件（如无法解码）不会触发熔断；
-                // 不归零 → 也不掩盖此前已累积的整批级证据（4xx → 4xx → 解码失败 → 4xx 仍会中止）。
-                // 归零只发生在上面 try 分支里「文件被成功处理」时。
-            }
-            catch (Exception ex)
-            {
-                if (ex is OperationCanceledException) throw; // 取消立即向上传播，不进入重试逻辑
-                attempts.TryGetValue(f.Path, out int n);
-                n++;
-                if (n < maxPerFileAttempts)
-                {
-                    // 重新排队到队尾，稍后再次尝试（保留原序号，避免重命名序号错乱）
-                    attempts[f.Path] = n;
-                    queue.Enqueue((f, index));
-                    progress.Report(new OrganizeProgress
-                    {
-                        // 重试不算完成（done 未递增），沿用当前百分比即可：不给值会被 VM 打回 0%
-                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                        LogLine = $"{f.Name} [重试 {n}/{maxPerFileAttempts}] 上次失败：{ex.Message}",
+                        Result = entry,
+                        LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
                     });
                 }
-                else
+                catch (PermanentOperationException ex)
                 {
-                    // 已达单文件最大尝试次数：放弃该文件，标记为「错误」且不重命名，避免无限循环
+                    // 永久性错误（AI 欠费 / 额度耗尽 / 无权限 / 模型不存在，或备份盘满 / 备份权限未授予）：
+                    // 重试无法恢复，直接标记失败且不再入队，避免对同一文件刷 10 行「重试」并白白占用 UI 进度。
                     report.Failed++;
                     done++;
-                    var err = new RenameLogEntry
+                    var permEntry = new RenameLogEntry
                     {
                         OriginalName = f.Name,
                         Status = "错误",
                         Message = ex.Message,
                     };
-                    report.Results.Add(err);
+                    report.Results.Add(permEntry);
                     progress.Report(new OrganizeProgress
                     {
                         Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                        Result = err,
+                        Result = permEntry,
                         LogLine = $"{f.Name} [错误] {ex.Message}",
                     });
+
+                    if (ex.IsEnvironmentError)
+                    {
+                        // 环境级错误对整批文件都成立（如备份盘已满、权限未授予）：继续处理后续文件无意义，
+                        // 直接中止整批并向上报告，由 VM 显示明确提示。已成功处理的文件保持已处理状态，不回滚。
+                        // 中止前先报告进度：否则 throw 会跳过末尾的完成汇总，用户不知已处理了多少。
+                        progress.Report(new OrganizeProgress
+                        {
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
+                        });
+                        throw;
+                    }
+
+                    // 仅「对整批成立」的永久错误才累计熔断：
+                    // 逐文件永久错误（如单个文件无法解码）按既定口径只记该文件的错误、继续处理其它文件。
+                    if (ex.IsBatchLevel)
+                    {
+                        // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
+                        // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
+                        consecutivePermanent++;
+                        if (consecutivePermanent >= 3)
+                        {
+                            // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
+                            // 只把「整批继续」的终止时机提前。
+                            progress.Report(new OrganizeProgress
+                            {
+                                Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                                LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
+                                          $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
+                            });
+                            throw;
+                        }
+                    }
+                    // 逐文件级（IsBatchLevel == false）有意「既不累加也不归零」：
+                    // 不累加 → 单个坏文件（如无法解码）不会触发熔断；
+                    // 不归零 → 也不掩盖此前已累积的整批级证据（4xx → 4xx → 解码失败 → 4xx 仍会中止）。
+                    // 归零只发生在上面 try 分支里「文件被成功处理」时。
+                }
+                catch (Exception ex)
+                {
+                    if (ex is OperationCanceledException) throw; // 取消立即向上传播，不进入重试逻辑
+                    attempts.TryGetValue(f.Path, out int n);
+                    n++;
+                    if (n < maxPerFileAttempts)
+                    {
+                        // 重新排队到队尾，稍后再次尝试（保留原序号，避免重命名序号错乱）
+                        attempts[f.Path] = n;
+                        queue.Enqueue((f, index));
+                        progress.Report(new OrganizeProgress
+                        {
+                            // 重试不算完成（done 未递增），沿用当前百分比即可：不给值会被 VM 打回 0%
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            LogLine = $"{f.Name} [重试 {n}/{maxPerFileAttempts}] 上次失败：{ex.Message}",
+                        });
+                    }
+                    else
+                    {
+                        // 已达单文件最大尝试次数：放弃该文件，标记为「错误」且不重命名，避免无限循环
+                        report.Failed++;
+                        done++;
+                        var err = new RenameLogEntry
+                        {
+                            OriginalName = f.Name,
+                            Status = "错误",
+                            Message = ex.Message,
+                        };
+                        report.Results.Add(err);
+                        progress.Report(new OrganizeProgress
+                        {
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            Result = err,
+                            LogLine = $"{f.Name} [错误] {ex.Message}",
+                        });
+                    }
                 }
             }
         }
-
-        _pts = null;
+        finally
+        {
+            _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
+        }
 
         // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
         if (_log.FailedWrites > 0)
@@ -269,123 +275,129 @@ public sealed class OrganizeService : IOrganizeService
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         var completed = await _log.LoadRenameLogAsync(req.OutputFolder).ConfigureAwait(false);
-        int done = 0;
-        foreach (var f in files)
+        _pts = new PauseTokenSource();
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
-            // 续传跳过：源路径精确匹配优先；目标文件名匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
-            bool doneBySource = completed.DoneBySource.Contains(f.Path);
-            bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(f.Name);
-            if (doneBySource || doneByName)
+            int done = 0;
+            foreach (var f in files)
             {
-                report.Skipped++;
+                ct.ThrowIfCancellationRequested();
+                await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
+                // 续传跳过：源路径精确匹配优先；目标文件名匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
+                bool doneBySource = completed.DoneBySource.Contains(f.Path);
+                bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(f.Name);
+                if (doneBySource || doneByName)
+                {
+                    report.Skipped++;
+                    done++;
+                    // A-05：归档模式的续传跳过也产出结果行，与整理模式口径一致（否则结果列表行数与汇总不符）
+                    var skipEntry = new RenameLogEntry
+                    {
+                        OriginalPath = f.Path,
+                        OriginalName = f.Name,
+                        Operation = "归档",
+                        Status = "跳过(日志已完成)",
+                    };
+                    report.Results.Add(skipEntry);
+                    progress.Report(new OrganizeProgress
+                    {
+                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                        Result = skipEntry,
+                        LogLine = $"{f.Name} 跳过(日志已完成)",
+                    });
+                    continue;
+                }
+                RenameLogEntry? entry = null;
+                try
+                {
+                    string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
+                    DateTime when = f.LastModified;
+                    if (req.UseExifDate)
+                    {
+                        var ex = _photo.GetDateTaken(f.Path);
+                        if (ex.HasValue) when = ex.Value;
+                    }
+
+                    string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
+                    if (!req.DryRun) Directory.CreateDirectory(destDir);
+
+                    var (resolved, targetMd5) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
+                    if (resolved == null)
+                    {
+                        entry = new RenameLogEntry
+                        {
+                            OriginalPath = f.Path,
+                            OriginalName = f.Name,
+                            Md5 = md5,
+                            Operation = "归档",
+                            Status = "跳过(已存在)",
+                        };
+                    }
+                    else
+                    {
+                        string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
+                        entry = new RenameLogEntry
+                        {
+                            OriginalPath = f.Path,
+                            OriginalName = f.Name,
+                            NewPath = resolved,
+                            NewName = Path.GetFileName(resolved),
+                            Md5 = md5,
+                            Operation = "归档",
+                            Status = status,
+                        };
+                        if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
+                    }
+
+                    Categorize(report, entry);
+                }
+                catch (PermanentOperationException ex) when (ex.IsEnvironmentError)
+                {
+                    // 与 RunAsync 对齐：环境级错误（如归档目标盘写满）对整批文件都成立，继续处理
+                    // 只会刷出 N 行同一真因的错误并让用户白等全批跑完。归档模式本身不调用 AI、
+                    // 也无重排队，熔断纯粹是为了「早停 + 不刷屏」。
+                    // 过滤器保留：非环境的永久错误仍走下方通用 catch 记单文件错误，行为不变。
+                    var envEntry = new RenameLogEntry
+                    {
+                        OriginalName = f.Name,
+                        Status = "错误",
+                        Message = ex.Message,
+                    };
+                    report.Failed++;
+                    report.Results.Add(envEntry);
+                    progress.Report(new OrganizeProgress
+                    {
+                        Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                        Result = envEntry,
+                        LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
+                    });
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    report.Failed++;
+                    entry = new RenameLogEntry
+                    {
+                        OriginalName = f.Name,
+                        Status = "错误",
+                        Message = ex.Message,
+                    };
+                    report.Results.Add(entry);
+                }
+
                 done++;
-                // A-05：归档模式的续传跳过也产出结果行，与整理模式口径一致（否则结果列表行数与汇总不符）
-                var skipEntry = new RenameLogEntry
-                {
-                    OriginalPath = f.Path,
-                    OriginalName = f.Name,
-                    Operation = "归档",
-                    Status = "跳过(日志已完成)",
-                };
-                report.Results.Add(skipEntry);
                 progress.Report(new OrganizeProgress
                 {
                     Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                    Result = skipEntry,
-                    LogLine = $"{f.Name} 跳过(日志已完成)",
+                    Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
+                    LogLine = $"{f.Name} 已归档进度 {done}/{files.Count}",
                 });
-                continue;
             }
-            RenameLogEntry? entry = null;
-            try
-            {
-                string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
-                DateTime when = f.LastModified;
-                if (req.UseExifDate)
-                {
-                    var ex = _photo.GetDateTaken(f.Path);
-                    if (ex.HasValue) when = ex.Value;
-                }
-
-                string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
-                if (!req.DryRun) Directory.CreateDirectory(destDir);
-
-                var (resolved, targetMd5) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
-                if (resolved == null)
-                {
-                    entry = new RenameLogEntry
-                    {
-                        OriginalPath = f.Path,
-                        OriginalName = f.Name,
-                        Md5 = md5,
-                        Operation = "归档",
-                        Status = "跳过(已存在)",
-                    };
-                }
-                else
-                {
-                    string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
-                    entry = new RenameLogEntry
-                    {
-                        OriginalPath = f.Path,
-                        OriginalName = f.Name,
-                        NewPath = resolved,
-                        NewName = Path.GetFileName(resolved),
-                        Md5 = md5,
-                        Operation = "归档",
-                        Status = status,
-                    };
-                    if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
-                }
-
-                Categorize(report, entry);
-            }
-            catch (PermanentOperationException ex) when (ex.IsEnvironmentError)
-            {
-                // 与 RunAsync 对齐：环境级错误（如归档目标盘写满）对整批文件都成立，继续处理
-                // 只会刷出 N 行同一真因的错误并让用户白等全批跑完。归档模式本身不调用 AI、
-                // 也无重排队，熔断纯粹是为了「早停 + 不刷屏」。
-                // 过滤器保留：非环境的永久错误仍走下方通用 catch 记单文件错误，行为不变。
-                var envEntry = new RenameLogEntry
-                {
-                    OriginalName = f.Name,
-                    Status = "错误",
-                    Message = ex.Message,
-                };
-                report.Failed++;
-                report.Results.Add(envEntry);
-                progress.Report(new OrganizeProgress
-                {
-                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                    Result = envEntry,
-                    LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
-                });
-                throw;
-            }
-            catch (Exception ex)
-            {
-                report.Failed++;
-                entry = new RenameLogEntry
-                {
-                    OriginalName = f.Name,
-                    Status = "错误",
-                    Message = ex.Message,
-                };
-                report.Results.Add(entry);
-            }
-
-            done++;
-            progress.Report(new OrganizeProgress
-            {
-                Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
-                LogLine = $"{f.Name} 已归档进度 {done}/{files.Count}",
-            });
         }
-
-        _pts = null;
+        finally
+        {
+            _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
+        }
 
         progress.Report(new OrganizeProgress
         {
