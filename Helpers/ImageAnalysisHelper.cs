@@ -55,10 +55,11 @@ public static class ImageAnalysisHelper
     /// 遇 HTTP 429（限流）或 5xx（服务端错误）时按固定 15 秒间隔自动重试，最多 15 次尝试
     /// （首试 + 至多 14 次重试），忽略 429 的 Retry-After 头；重试期间不返回任何结果，
     /// 因此调用方不会据此产出 <c>unknown_</c> 重命名；限流解除后继续。
-    /// 4xx（非 429）为客户端永久错误，不重试、直接抛异常。
+    /// 4xx（非 429）为客户端永久错误，不重试、直接抛 <see cref="AiPermanentException"/>。
     /// </summary>
     /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试耗尽）。</exception>
-    /// <exception cref="HttpRequestException">接口返回非成功状态码（携带状态码与响应体片段，重试耗尽）。</exception>
+    /// <exception cref="HttpRequestException">429 限流 / 5xx 服务端错误重试耗尽（携带状态码与响应体片段）。</exception>
+    /// <exception cref="AiPermanentException">4xx 客户端永久错误（模型不存在 / 参数非法 / 401 / 403 / 404 等），重试无意义。</exception>
     public static Task<string> CallVisionApiAsync(
         string endpoint, string model, string apiKey, string prompt, string dataUrl, CancellationToken ct)
         => CallVisionApiAsync(endpoint, model, apiKey, prompt, dataUrl, gate: null, ct);
@@ -188,9 +189,15 @@ public static class ImageAnalysisHelper
                 if (!resp.IsSuccessStatusCode)
                 {
                     var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
-                    // P2-9：携带状态码，调用方按状态码判定而非解析文案
-                    throw new HttpRequestException(
-                        $"视觉识别接口返回 {code} {resp.StatusCode}：{snippet}", null, resp.StatusCode);
+                    // 4xx（非 429）是客户端永久错误：模型不存在(1211)、参数非法(1214)、401/403/404 等，
+                    // 重试永远不可能成功。此前抛 HttpRequestException，会被编排层重排队最多 10 次。
+                    // 注意：本方法 XML 注释里早就写明「4xx 不重试」，但当时只体现在本方法的 15 次循环里，
+                    // 没有通过异常类型传达给编排层——这里补上。
+                    var hint = code == 403
+                        ? "（403：若使用 NVIDIA NIM，该模型族可能尚未在你的账号下注册，请到 build.nvidia.com 对应模型页点击一次「Try API」）"
+                        : "";
+                    throw new AiPermanentException(
+                        $"视觉识别接口返回 {code} {resp.StatusCode}（客户端永久错误，重试无意义）：{snippet}{hint}");
                 }
 
                 return respText;
@@ -290,7 +297,9 @@ public static class ImageAnalysisHelper
 
         var text = StripThink(content).Trim();
         if (text.Length == 0 && string.Equals(finishReason, "length", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException(
+            // 该条件对同一模型配置是确定性的：调大 max_tokens 前重试多少次都一样，
+            // 且失败结果不进 aiCache，每次重试都要重新付费。
+            throw new AiPermanentException(
                 "视觉识别输出被 max_tokens 截断（finish_reason=length）且正文为空：模型可能开启了思考模式，" +
                 "已耗尽输出预算。请关闭思考模式或提高最大输出 tokens 后重试。");
 

@@ -30,7 +30,9 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
     {
         var dataUrl = await ImageAnalysisHelper.EncodeAsJpegDataUrlAsync(imagePath, 1024, ct).ConfigureAwait(false);
         if (dataUrl == null)
-            throw new InvalidOperationException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
+            // 损坏文件或缺少编解码器（如 HEIC）是逐文件的确定性失败：
+            // 既定口径要求「逐文件报错、不影响其它文件」，但不需要对同一坏文件重试 10 次。
+            throw new AiPermanentException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
 
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,

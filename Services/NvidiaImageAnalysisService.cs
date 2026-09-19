@@ -1,5 +1,4 @@
 using System;
-using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,7 +39,9 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
     {
         var dataUrl = await ImageAnalysisHelper.EncodeAsJpegDataUrlAsync(imagePath, 1024, ct).ConfigureAwait(false);
         if (dataUrl == null)
-            throw new InvalidOperationException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
+            // 损坏文件或缺少编解码器（如 HEIC）是逐文件的确定性失败：
+            // 既定口径要求「逐文件报错、不影响其它文件」，但不需要对同一坏文件重试 10 次。
+            throw new AiPermanentException($"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}");
 
         // 自定义请求体：reasoning 模型官方约束——显式关闭 thinking；max_tokens 给足余量防 JSON 截断。
         // image_url 用 base64 data URL（官方文档明确支持），与其它引擎共用同一图片压缩管线。
@@ -66,21 +67,10 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
 
         // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null；
         // RateLimit 闸门在每次真实 HTTP 尝试（含重试）前生效。
-        string raw;
-        try
-        {
-            raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
-                Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
-        {
-            // NIM 已知机制：部分模型族需先在 build.nvidia.com 该模型页面点击一次「Try API」注册，
-            // Key 才获得调用权限，否则一律 403。裸状态码对用户不可理解，此处给定向修复指引。
-            throw new InvalidOperationException(
-                "NVIDIA 接口返回 403：该模型族可能尚未在你的账号下注册（或 Key 无该模型权限）。" +
-                "请先打开 build.nvidia.com 的 nemotron-3-nano-omni-30b-a3b-reasoning 模型页面点击一次「Try API」再重试。" +
-                $"原始错误：{ex.Message}", ex);
-        }
+        // 4xx（含 403）现已由 CallVisionApiRawAsync 直接抛 AiPermanentException（并附 403 定向引导），
+        // 此处不再按状态码二次包装——HttpRequestException 过滤器已永不命中（死代码）。
+        var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
+            Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractNemotronContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
