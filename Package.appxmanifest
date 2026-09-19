@@ -7,7 +7,7 @@
        发版需递增第四段或前段，否则 MSIX 覆盖升级语义失效。 -->
   <Identity Name="PhotoRenameAIHash"
             Publisher="CN=PhotoRenameAIHash"
-            Version="3.1.0.0" />
+            Version="3.1.1.0" />
   <Properties>
     <DisplayName>PhotoRenameAIHash</DisplayName>
     <PublisherDisplayName>PhotoRenameAIHash</PublisherDisplayName>
