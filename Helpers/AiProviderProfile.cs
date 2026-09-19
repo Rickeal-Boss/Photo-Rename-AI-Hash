@@ -223,9 +223,27 @@ public static class RetryAfterParser
 
     /// <summary>
     /// 解析单个「多久后可重试」文本。解析次序不可调整（见实现内注释）。
+    /// <b>契约：解析不出或值病态一律返回 false，绝不抛异常。</b>
+    /// 调用方 <c>ImageAnalysisHelper.ComputeDelay</c> 外围没有 try，异常一旦逃逸会直接落到
+    /// OrganizeService 的通用 catch —— 一次重试都没做就失败、再重排队 10 次（P18 静默失败 + P23 归因错误）。
     /// </summary>
     /// <param name="isMilliseconds">true 表示 <paramref name="raw"/> 是毫秒数（头名 retry-after-ms）。</param>
     public static bool TryParse(string? raw, DateTimeOffset now, out TimeSpan delay, bool isMilliseconds = false)
+    {
+        delay = TimeSpan.Zero;
+        // 整体兜底：与 FromJson 的静默失败口径一致（P40）
+        try
+        {
+            return TryParseCore(raw, now, out delay, isMilliseconds);
+        }
+        catch
+        {
+            delay = TimeSpan.Zero;
+            return false;
+        }
+    }
+
+    private static bool TryParseCore(string? raw, DateTimeOffset now, out TimeSpan delay, bool isMilliseconds = false)
     {
         delay = TimeSpan.Zero;
         if (string.IsNullOrWhiteSpace(raw)) return false;
@@ -235,12 +253,16 @@ public static class RetryAfterParser
         if (isMilliseconds)
         {
             if (!double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms)) return false;
+            if (!IsPlausible(ms, MaxPlausibleHint.TotalMilliseconds)) return false; // 必须先挡，见 IsPlausible 注释
             return Positive(TimeSpan.FromMilliseconds(ms), out delay);
         }
 
         // 2) 纯数字 → 秒。用 double 而非 int：服务端可能给 "29.5" 这类小数
         if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+        {
+            if (!IsPlausible(seconds, MaxPlausibleHint.TotalSeconds)) return false;
             return Positive(TimeSpan.FromSeconds(seconds), out delay);
+        }
 
         // 3) "30ms" 后缀：必须排在正则之前——否则 "30ms" 会被正则的 m 组吃成 30 分钟、
         //    剩下的 "s" 前面没有数字 → 整串不匹配，提示被白白丢掉
@@ -248,6 +270,7 @@ public static class RetryAfterParser
         {
             if (!double.TryParse(s.Substring(0, s.Length - 2), NumberStyles.Float, CultureInfo.InvariantCulture, out var ms2))
                 return false;
+            if (!IsPlausible(ms2, MaxPlausibleHint.TotalMilliseconds)) return false;
             return Positive(TimeSpan.FromMilliseconds(ms2), out delay);
         }
 
@@ -260,7 +283,12 @@ public static class RetryAfterParser
             if (TryReadGroup(match, "h", out var h)) { total += h * 3600; any = true; }
             if (TryReadGroup(match, "m", out var m)) { total += m * 60; any = true; }
             if (TryReadGroup(match, "s", out var sec)) { total += sec; any = true; }
-            if (any) return Positive(TimeSpan.FromSeconds(total), out delay);
+            if (any)
+            {
+                // 分组值本身可以大到离谱（如 "999999999999s"），同样要先挡
+                if (!IsPlausible(total, MaxPlausibleHint.TotalSeconds)) return false;
+                return Positive(TimeSpan.FromSeconds(total), out delay);
+            }
         }
 
         // 5) 绝对时刻（Anthropic 的 reset 头用 RFC3339）：换算为相对现在的时长。
@@ -273,6 +301,20 @@ public static class RetryAfterParser
         // 6) 其余病态值（无法归入以上任何一种格式）：解析失败
         return false;
     }
+
+    /// <summary>
+    /// 数值可用性守卫：<b>必须在构造 TimeSpan 之前</b>调用。
+    /// <c>TimeSpan.FromSeconds</c> / <c>FromMilliseconds</c> 对 NaN 抛 ArgumentException、
+    /// 对 ±∞ 与超范围值抛 OverflowException —— 而 <see cref="Positive"/> 守卫在它们之后才执行，
+    /// 防线装在异常之后等于没有防线（P40）。
+    /// 真实触发场景：① <c>x-ratelimit-reset</c> 头返回 Unix epoch 秒（如 1699999999，
+    /// GitHub Models / Azure 风格端点常见，而该头就在 <see cref="StandardHeaders"/> 里）；
+    /// ② <c>1e999</c> —— .NET Core 3.0+ 的 double.TryParse 溢出返回 ±∞ 而非 false；
+    /// ③ <c>NaN</c>。
+    /// 上界取 <paramref name="plausibleMax"/>×2：给 Positive 留出「超过 1 小时即不可信」的判定空间。
+    /// </summary>
+    private static bool IsPlausible(double value, double plausibleMax)
+        => double.IsFinite(value) && Math.Abs(value) <= plausibleMax * 2;
 
     /// <summary>读取正则命名分组的数值；分组未参与匹配时返回 false。</summary>
     private static bool TryReadGroup(Match match, string name, out double value)
