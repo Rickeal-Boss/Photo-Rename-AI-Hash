@@ -134,6 +134,8 @@ public static class ImageDecoder
 
         // 自检：缩放与旋转都不改变像素总数，尺寸不符说明坐标系判断有误。
         // 此时宁可抛错（上层按「超限 / 解码失败」跳过该文件）也不要产出损坏图像。
+        // 若此自检在真实样本上被触发，说明 EXIF 方向判断有误，应切换到 OrientedPixelWidth/OrientedPixelHeight
+        // 方案（见 IsExifOrientationSwapsAxes 的注释）。
         if (pixels.Length != (long)outW * outH * 4)
             throw new InvalidOperationException($"解码后的像素缓冲尺寸与预期不符（期望 {outW}x{outH}，实际 {pixels.Length / 4} 像素），已跳过该文件以避免产出花屏图。");
 
@@ -160,8 +162,12 @@ public static class ImageDecoder
     /// 用项目已有依赖 MetadataExtractor 读 EXIF：不引入新的 WinRT API（本机无 SDK，编译风险优先），
     /// 也不需要文件路径——直接复用 <c>EncodeResizedJpegAsync</c> 已读入内存的字节，
     /// 因此调用方（ImageAnalysisHelper）无需任何改动。
-    /// 官方文档推荐的等价做法是读 <c>BitmapDecoder.OrientedPixelWidth/OrientedPixelHeight</c>
-    /// （与 WinRT 内部使用的方向源完全一致），此处为规避新 API 面暂未采用。
+    /// <b>未来可切换的等价方案：</b>微软官方推荐读 <c>BitmapDecoder.OrientedPixelWidth</c> /
+    /// <c>OrientedPixelHeight</c>——它用的是 WinRT 自己解析的方向源，与 RespectExifOrientation 的输出
+    /// 100% 一致，且不依赖外部库解析成功。本轮未采用的原因是「不引入新 WinRT API」（本机无 SDK，无法编译验证）。
+    /// 若后续升级 Windows App SDK，或遇到 MetadataExtractor 解析不出 Orientation 的样本，优先切到该方案。
+    /// 注意：本方案的失败模式是「读不到 EXIF → 回退旧行为」，而旧行为现在有下面的像素总数自检兜底，
+    /// 最坏结果是该文件被跳过，不会再静默产出花屏图。
     /// </remarks>
     private static bool IsExifOrientationSwapsAxes(byte[] imageBytes)
     {

@@ -20,6 +20,18 @@ public sealed class PhotoService : IPhotoService
     /// 否则会漏掉用户放在隐藏目录里的照片（属产品口径，未拍板前不变更）。
     /// <c>IgnoreInaccessible = true</c> 让无权限文件在枚举期被跳过而不是抛异常。
     /// </summary>
+    /// <remarks>
+    /// <b>为什么目录侧跳过重解析点、文件侧不跳（别把两者「统一化」）：</b>
+    /// <list type="bullet">
+    /// <item>目录侧必须跳：junction / 符号链接目录是<b>递归路径</b>，指向祖先时会无限递归直至 OOM 挂死。</item>
+    /// <item>文件侧必须不跳：符号链接的<b>照片文件</b>只是「指向别处的文件」，被跳过就是<b>静默漏扫</b>——丢数据，且无任何补救。</item>
+    /// <item>代价对比：不跳的代价是用户自建 junction 被展开、同一批照片可能重复（<b>重复，不丢</b>，
+    /// 且 <c>ResolveTargetAsync</c> 的 <c>targetMd5 == md5</c> 内容比对还能兜底）；跳过则是漏扫，无补救。
+    /// 丢数据严重于重复，故选 0。</item>
+    /// <item>不要再加自环 / 循环检测（如 <c>ResolveLinkTarget</c>）：目录侧已阻断递归入口，文件侧链接不构成递归路径，
+    /// 加了只是大目录上的纯开销。</item>
+    /// </list>
+    /// </remarks>
     private static readonly EnumerationOptions FileOptions = new()
     {
         RecurseSubdirectories = false,
