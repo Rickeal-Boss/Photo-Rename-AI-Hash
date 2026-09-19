@@ -113,6 +113,10 @@ public sealed class OrganizeService : IOrganizeService
         var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
 
+        // 本批次已实际落地的目标路径：ResolveTargetAsync 据此拒绝 Overwrite 覆盖本批次自己产出的文件。
+        // 只按批次存活、不做实例字段：本类是单例，实例字段会在并发批次之间互相污染。
+        var claimedThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // 连续命中「不可恢复的识别错误」的文件数。达到阈值说明该问题（账户欠费 / 额度耗尽 /
         // 模型不存在 / 参数非法）对整批都成立，继续只会产生 N 次必然失败的请求与 N 行同因错误。
         int consecutivePermanent = 0;
@@ -133,7 +137,7 @@ public sealed class OrganizeService : IOrganizeService
                 var (f, index) = queue.Dequeue();
                 try
                 {
-                    var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache).ConfigureAwait(false);
+                    var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache, claimedThisRun).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                     done++;
@@ -343,7 +347,7 @@ public sealed class OrganizeService : IOrganizeService
                     string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
                     if (!req.DryRun) Directory.CreateDirectory(destDir);
 
-                    var (resolved, targetMd5) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, ct).ConfigureAwait(false);
+                    var (resolved, targetMd5, degraded) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, claimedThisRun, ct).ConfigureAwait(false);
                     if (resolved == null)
                     {
                         entry = new RenameLogEntry
@@ -358,6 +362,10 @@ public sealed class OrganizeService : IOrganizeService
                     else
                     {
                         string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
+
+                        // 与 RunAsync 同口径：登记本批次已落地的目标；模拟运行不登记。
+                        if (!req.DryRun) claimedThisRun.Add(resolved);
+
                         entry = new RenameLogEntry
                         {
                             OriginalPath = f.Path,
@@ -368,6 +376,11 @@ public sealed class OrganizeService : IOrganizeService
                             Operation = "归档",
                             Status = status,
                         };
+                        if (degraded)
+                        {
+                            entry.Message = $"目标已被本批次其他文件占用，已自动重命名为 {Path.GetFileName(resolved)}" +
+                                            "（Overwrite 不会覆盖本批次已产出的文件，避免静默丢数据）";
+                        }
                         if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
                     }
 
@@ -444,7 +457,8 @@ public sealed class OrganizeService : IOrganizeService
 
     private async Task<RenameLogEntry> ProcessOneAsync(
         PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, int index, CancellationToken ct,
-        Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache)
+        Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache,
+        HashSet<string> claimedThisRun)
     {
         // A-01：MD5 结果缓存——重试时复用，避免对同一文件重复计算（大图 MD5 为全文件读取）。
         if (!md5Cache.TryGetValue(f.Path, out var md5))
@@ -493,7 +507,7 @@ public sealed class OrganizeService : IOrganizeService
         string candidate = baseName + Path.GetExtension(f.Name);
 
         // 目标冲突检测（P2-7：一并取回目标 MD5，ExecuteAsync 直接复用，避免重复计算）
-        var (resolved, targetMd5) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, ct).ConfigureAwait(false);
+        var (resolved, targetMd5, degraded) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, claimedThisRun, ct).ConfigureAwait(false);
         if (resolved == null)
         {
             var skip = new RenameLogEntry
@@ -517,6 +531,11 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, OpName(req.Mode), ct).ConfigureAwait(false);
+
+        // 登记本批次已落地的目标：Overwrite 不得再覆盖它（判定见 ResolveTargetAsync）。
+        // 模拟运行不登记：没有真实落地，登记会让模拟结果互相「占位」，与实跑不一致。
+        if (!req.DryRun) claimedThisRun.Add(resolved);
+
         var entry = new RenameLogEntry
         {
             OriginalPath = f.Path,
@@ -527,6 +546,13 @@ public sealed class OrganizeService : IOrganizeService
             Operation = OpName(req.Mode),
             Status = status,
         };
+        // 退化提示：Overwrite 撞上本批次自己刚写的文件时会退化为自动重命名，写明原因，
+        // 避免用户疑惑「为什么多了一个 _1 后缀」，也表明这不是失败。
+        if (degraded)
+        {
+            entry.Message = $"目标已被本批次其他文件占用，已自动重命名为 {Path.GetFileName(resolved)}" +
+                            "（Overwrite 不会覆盖本批次已产出的文件，避免静默丢数据）";
+        }
         if (!req.DryRun) await _log.AppendRenameLogAsync(output, entry).ConfigureAwait(false);
         return entry;
     }
@@ -684,22 +710,33 @@ public sealed class OrganizeService : IOrganizeService
     /// - 存在且内容相同(MD5) → 返回该路径（调用方按「未改动」处理）；
     /// - 存在且内容不同 → 按策略：Skip 返回 null（跳过），Overwrite 返回该路径，AutoRename 追加 _1/_2 直到唯一（同样以 MD5 判定是否重复内容）。
     /// P2-7：目标已存在时一并返回其 MD5，供 ExecuteAsync 复用，避免每文件重复计算 MD5。
+    /// <paramref name="claimedThisRun"/>：本批次已实际落地的目标路径。Overwrite 撞上其中的路径时
+    /// 退化为自动重命名（Degraded=true）——覆盖它会静默销毁本批次已产出的成果，Move 模式等于丢数据。
+    /// <returns>Degraded：仅当「本应选 Overwrite 但因撞上本批次产出而改为加序号」时为 true。</returns>
     /// </summary>
-    private async Task<(string? Target, string? TargetMd5)> ResolveTargetAsync(string output, string candidate, string md5, ConflictStrategy conflict, CancellationToken ct)
+    private async Task<(string? Target, string? TargetMd5, bool Degraded)> ResolveTargetAsync(
+        string output, string candidate, string md5, ConflictStrategy conflict,
+        HashSet<string> claimedThisRun, CancellationToken ct)
     {
         string target = Path.Combine(output, candidate);
-        if (!File.Exists(target)) return (target, null);
+        if (!File.Exists(target)) return (target, null, false);
 
         string existing = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
         if (!string.IsNullOrEmpty(md5) && md5 == existing)
-            return (target, existing); // 内容相同，无需动作
+            return (target, existing, false); // 内容相同，无需动作
 
-        return conflict switch
-        {
-            ConflictStrategy.Skip => (null, null),
-            ConflictStrategy.Overwrite => (target, existing),
-            _ => await SuffixUntilFreeAsync(output, candidate, md5, ct).ConfigureAwait(false),
-        };
+        // 原写法是 switch 表达式，加入「Overwrite 撞本批次产出」的条件分支后需带 when 子句，
+        // 故改为 if/else 语句形式，语义等价且分支更直观（Skip / Overwrite / 其余=AutoRename 全覆盖）。
+        if (conflict == ConflictStrategy.Skip) return (null, null, false);
+
+        if (conflict == ConflictStrategy.Overwrite && !claimedThisRun.Contains(target))
+            return (target, existing, false);
+
+        // 走到这里有两种情况：AutoRename，或 Overwrite 但 target 是本批次自己刚写进去的文件。
+        // 后者必须退化为自动重命名：覆盖它会静默销毁本批次已产出的成果，Move 模式尤其致命——
+        // 源文件已移出源目录且不做备份，被覆盖的内容没有任何副本，等于直接丢数据。
+        var (suffixed, suffixMd5) = await SuffixUntilFreeAsync(output, candidate, md5, ct).ConfigureAwait(false);
+        return (suffixed, suffixMd5, conflict == ConflictStrategy.Overwrite);
     }
 
     /// <summary>P2-7：返回最终空位目标路径；窗口内 MD5 命中相同内容时一并传出该目标 MD5。</summary>
