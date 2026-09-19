@@ -691,9 +691,9 @@ public sealed class OrganizeService : IOrganizeService
 
         try
         {
-            // File.Copy 是同步 API：放进 Task.Run 避免大文件拷贝卡住 UI 线程（原 CopyAsync 是异步的）。
-            // 取消语义：入口已检查一次、Task.Run(ct) 在排队阶段可取消，但拷贝一旦开始便无法中断
-            // ——同步 File.Copy 没有取消通道，这是相对原 WinRT 版本的能力退化，在此注明。
+            // File.Copy 是同步 API，会阻塞当前线程。调用链已全程 ConfigureAwait(false)，此处不在 UI 线程，
+            // 包 Task.Run 只为不在编排循环所在线程上做阻塞 I/O（并保持本方法 async 签名，避免改动调用点）；
+            // 代价：拷贝一旦开始便无法中断——同步 File.Copy 没有取消通道，这是相对原 WinRT 版本的能力退化。
             await Task.Run(() => CopyWithUniqueName(backupDir, source, ct), ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
