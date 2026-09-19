@@ -336,10 +336,23 @@ public partial class OrganizeViewModel : ObservableObject
         else
         {
             AppServices.OrganizeService.Pause();
-            IsPaused = true;
-            PauseButtonText = "继续";
-            StatusText = "已暂停，点击「继续」恢复处理。";
-            AppendLog("已暂停。");
+            // 服务在「扫描文件 / 加载索引」阶段可能尚未创建暂停令牌，此时 Pause() 是 no-op。
+            // 必须以服务的真实状态为准来翻转 UI，否则会出现「UI 显示已暂停、整批却继续跑完」的谎报。
+            if (AppServices.OrganizeService.IsPaused)
+            {
+                IsPaused = true;
+                PauseButtonText = "继续";
+                StatusText = "已暂停，点击「继续」恢复处理。";
+                AppendLog("已暂停。");
+            }
+            else
+            {
+                // 兜底：暂停确实没生效。明确告知并引导改用「取消」，避免用户以为已暂停而离开。
+                // （设置 StatusText 后再打开 StatusBarOpen：OnStatusBarOpenChanged 会快照文案到横幅）
+                StatusText = "当前阶段（扫描文件 / 加载索引）暂不支持暂停，请稍候或点击「取消」。";
+                StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
+                StatusBarOpen = true;
+            }
         }
     }
 

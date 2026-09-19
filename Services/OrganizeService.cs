@@ -36,6 +36,9 @@ public sealed class OrganizeService : IOrganizeService
     public async Task<OrganizeReport> RunAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
+        // 兜底清理：若上一批在「令牌已创建、try 尚未进入」的阶段异常退出（如扫描期间取消），
+        // finally 来不及把 _pts 置空。此处清掉陈旧令牌，避免它让 IsPaused 在新批次开始前误报 true。
+        _pts = null;
         // 日志服务是进程级单例、失败计数跨批次累加，故记录批次开始时的基线，
         // 只统计本批次新产生的写入失败，避免把历史累计值报给用户。
         int logFailBefore = _log.FailedWrites;
@@ -55,6 +58,11 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         IImageAnalysisService? ai = CreateAi(req);
+
+        // 暂停令牌必须在扫描之前创建：此前它在处理循环前才 new，而 Pause() 在 _pts == null 时是
+        // 静默 no-op，导致「开始后的扫描 / 加载索引窗口内点暂停」完全失效、UI 却谎报已暂停。
+        // 上移后这两个窗口内点暂停即可生效：扫描本身不检查暂停，扫描一结束、处理任何文件之前就挂起。
+        _pts = new PauseTokenSource();
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
@@ -116,7 +124,6 @@ public sealed class OrganizeService : IOrganizeService
         var md5Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int done = skippedAtStart; // 已跳过的也算进度推进
 
-        _pts = new PauseTokenSource();
         try
         {
             while (queue.Count > 0)
@@ -264,6 +271,8 @@ public sealed class OrganizeService : IOrganizeService
     public async Task<OrganizeReport> ArchiveByDateAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
+        // 同 RunAsync：清掉上一批可能残留的暂停令牌，避免 IsPaused 在新批次开始前误报 true。
+        _pts = null;
         // 与 RunAsync 同口径：失败计数是进程级单例的累计值，取基线后只统计本批次新增。
         int logFailBefore = _log.FailedWrites;
 
@@ -279,12 +288,16 @@ public sealed class OrganizeService : IOrganizeService
             return report;
         }
 
+        // 本批次已实际落地的目标路径（语义同 RunAsync）
+        var claimedThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 同 RunAsync：暂停令牌必须在扫描之前创建，否则扫描 / 加载索引窗口内点暂停是静默 no-op。
+        _pts = new PauseTokenSource();
         var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
         report.Total = files.Count;
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         var completed = await _log.LoadRenameLogAsync(req.OutputFolder).ConfigureAwait(false);
-        _pts = new PauseTokenSource();
         try
         {
             int done = 0;
