@@ -31,6 +31,7 @@ public partial class SettingsViewModel : ObservableObject
         CustomApiUrl = _model.CustomApiUrl;
         CustomApiModel = _model.CustomApiModel;
         CustomApiKey = _model.CustomApiKey;
+        CustomApiRpmLimit = _model.CustomApiRpmLimit;
         OnPropertyChanged(nameof(ThemeIndex)); // 与 Theme 赋值保持一致，确保索引计算属性就绪
         _initializing = false;
 
@@ -129,6 +130,12 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _customApiKey = "";
 
+    /// <summary>自定义引擎的每分钟请求上限（0 = 不限）。
+    /// 类型取 <see cref="double"/>：NumberBox.Value 是 double，x:Bind 不做数值隐式转换，
+    /// 绑 int 属性会在 TwoWay 回写时编译失败（double → int 无隐式转换）；落盘时再取整。</summary>
+    [ObservableProperty]
+    private double _customApiRpmLimit;
+
     [ObservableProperty]
     private string _statusText = "";
 
@@ -176,6 +183,10 @@ public partial class SettingsViewModel : ObservableObject
         _model.CustomApiUrl = CustomApiUrl;
         _model.CustomApiModel = CustomApiModel;
         _model.CustomApiKey = CustomApiKey;
+        // NumberBox 清空文本时 Value 为 NaN：按「不限」落盘，避免写入未定义的整数
+        _model.CustomApiRpmLimit = double.IsNaN(CustomApiRpmLimit) || CustomApiRpmLimit < 0
+            ? 0
+            : (int)Math.Round(CustomApiRpmLimit);
 
         await _settings.SaveAsync(_model);
         // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新

@@ -32,6 +32,9 @@ public class OrganizeRequest
     /// <summary>自定义模型名（AiProvider.Custom 时使用）。</summary>
     public string CustomApiModel { get; set; } = "";
 
+    /// <summary>自定义引擎的每分钟请求上限（AiProvider.Custom 时使用）：0 = 不限。</summary>
+    public int CustomApiRpmLimit { get; set; } = 0;
+
     public string Language { get; set; } = "zh-CN";
 
     public bool UseExifDate { get; set; } = true;

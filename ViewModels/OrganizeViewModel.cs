@@ -381,6 +381,7 @@ public partial class OrganizeViewModel : ObservableObject
             AiApiKey = key,
             CustomApiUrl = _model.CustomApiUrl,
             CustomApiModel = _model.CustomApiModel,
+            CustomApiRpmLimit = _model.CustomApiRpmLimit,
             Language = _model.Language,
             UseExifDate = UseExifDate,
             BackupFolder = BackupFolder,

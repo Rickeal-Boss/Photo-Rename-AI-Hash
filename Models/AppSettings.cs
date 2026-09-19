@@ -54,4 +54,9 @@ public class AppSettings
 
     /// <summary>自定义 API Key。</summary>
     public string CustomApiKey { get; set; } = "";
+
+    /// <summary>自定义引擎的「每分钟请求上限」（RPM 闸门）。0 = 不限（默认，行为与改动前一致）。
+    /// 仅在端点有明确 RPM 限制时填写：到达上限会自动排队等待，不会报错也不会跳过文件。
+    /// 非密钥的普通整数，<b>不进 DPAPI 加解密清单</b>。</summary>
+    public int CustomApiRpmLimit { get; set; } = 0;
 }

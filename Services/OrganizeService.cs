@@ -968,7 +968,8 @@ public sealed class OrganizeService : IOrganizeService
                 throw new InvalidOperationException("自定义引擎未配置端点 URL：请打开「设置」填写自定义 API 端点。");
             if (string.IsNullOrWhiteSpace(req.CustomApiModel))
                 throw new InvalidOperationException("自定义引擎未配置模型名：请打开「设置」填写自定义模型名。");
-            return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey);
+            // rpmLimit 为 0 时保持端点嗅探得出的闸门（不替用户猜 RPM）
+            return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey, req.CustomApiRpmLimit);
         }
 
         return req.AiProvider switch

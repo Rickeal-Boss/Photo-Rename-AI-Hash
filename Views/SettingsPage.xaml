@@ -108,6 +108,15 @@
                         <PasswordBox Password="{x:Bind ViewModel.CustomApiKey, Mode=TwoWay}" Width="240"
                                      ToolTipService.ToolTip="自定义端点密钥，经 Windows DPAPI 加密保存于本机" />
                     </sc:SettingsCard>
+                    <sc:SettingsCard Header="每分钟请求上限">
+                        <sc:SettingsCard.Description>
+                            0 = 不限（默认）。仅当端点有明确 RPM 限制时填写：到达上限会自动排队等待，不会报错也不会跳过文件。
+                        </sc:SettingsCard.Description>
+                        <NumberBox Value="{x:Bind ViewModel.CustomApiRpmLimit, Mode=TwoWay}"
+                                   Minimum="0" Maximum="600" SmallChange="1" LargeChange="10"
+                                   SpinButtonPlacementMode="Inline" Width="160"
+                                   ToolTipService.ToolTip="每分钟最多发出的视觉识别请求数；0 表示不主动限速" />
+                    </sc:SettingsCard>
                 </sc:SettingsExpander.Items>
             </sc:SettingsExpander>
 
