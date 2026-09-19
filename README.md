@@ -19,7 +19,7 @@ It is the WinUI 3 rewrite of the original Go-based `Photo-rename-AI` tool, follo
 ```
 PhotoRenameAIHash/
 ├─ PhotoRenameAIHash.csproj   # .NET 8 + WinUI 3 (packaged MSIX, self-contained)
-├─ app.manifest              # DPI-aware / long-path declaration + WinAppSDK dependency
+├─ app.manifest              # DPI-aware declaration (PerMonitorV2)；MSIX 打包下刻意不放 longPathAware
 ├─ App.xaml / .cs            # Entry point, global resource dictionaries
 ├─ MainWindow.xaml / .cs     # NavigationView + Frame host
 ├─ Models/                   # AiProvider, AppSettings, ConflictStrategy, ImageAnalysisResult, OperationMode, OrganizeTypes, PhotoFile, RenameLogEntry
@@ -27,9 +27,16 @@ PhotoRenameAIHash/
 │  ├─ Interfaces/            # IHashService, IPhotoService, ISettingsService
 │  ├─ HashService.cs         # MD5 content hashing (conflict detection / rename log)
 │  ├─ PhotoService.cs        # Folder scan, EXIF date-taken, rename
-│  ├─ SettingsService.cs     # Local JSON persistence
+│  ├─ SettingsService.cs     # Local JSON persistence (API keys DPAPI-encrypted)
+│  ├─ OrganizeService.cs     # Organize task orchestration (scan / rename / copy / move / archive)
+│  ├─ RenameLogService.cs    # Rename log persistence
+│  ├─ IImageAnalysisService.cs / IOrganizeService.cs  # Service contracts
+│  ├─ ZhipuImageAnalysisService.cs   # AI vision engine: 智谱 GLM-4V
+│  ├─ QwenImageAnalysisService.cs    # AI vision engine: 通义千问 VL
+│  ├─ NvidiaImageAnalysisService.cs  # AI vision engine: NVIDIA
+│  ├─ CustomImageAnalysisService.cs  # AI vision engine: 自定义 OpenAI 兼容端点
 │  └─ AppServices.cs         # Singleton service locator
-├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, RateGate, ThemeHelper, DpiHelper
+├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, RateGate, ThemeHelper, DpiHelper, AiPermanentException, PermanentOperationException
 ├─ ViewModels/               # Main / Organize / Settings / About (CommunityToolkit.Mvvm)
 ├─ Views/                    # Organize / Settings / About pages (XAML + code-behind)
 └─ Styles/Styles.xaml        # Shared styles & resources
@@ -55,7 +62,7 @@ dotnet build  PhotoRenameAIHash.csproj -c Release -p:Platform=x64
 ```
 
 ### CI
-Pushing to `main` / `pfx` / `fix` triggers GitHub Actions (`windows-latest`, .NET 8) which
+Pushing to `main` / `Hy` / `pfx` / `fix` triggers GitHub Actions (`windows-latest`, .NET 8) which
 publishes a **self-contained, signed MSIX** (both the Windows App SDK and the .NET 8 runtime
 are bundled inside the package — no runtime prerequisites on the target machine) and uploads
 it as the `PhotoRenameAIHash-msix` artifact together with the signing certificate (`PhotoRenameAIHash.cer`).
