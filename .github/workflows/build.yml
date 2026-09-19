@@ -142,6 +142,124 @@ jobs:
             Write-Host "no SIGNING_PFX_B64 secret; build will be unsigned"
           }
 
+      # =====================================================================
+
+      # 签名证书到期预警（非阻断）：CI 从 secret 恢复 pfx，证书到期会让构建在
+
+      # 到期日突然全红且毫无提前信号。本步把「还剩多少天」变成每次构建都可见的
+
+      # 事实，不足 30 天用 ::warning:: 打到 GitHub 界面（注释级，不阻断构建）。
+
+      # 签名是否真的可用，仍由 Publish / Verify 两个阻断式步骤把关。
+
+      # =====================================================================
+
+      - name: Warn on signing certificate expiry (non-blocking)
+
+        shell: pwsh
+
+        run: |
+
+
+
+          "CHECKPOINT:cert-expiry-start" >> ci-diagnostics.log
+
+
+
+          $pfx = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
+
+
+
+          if (-not (Test-Path $pfx)) {
+
+
+
+            "CERTEXP=NO_PFX" >> ci-diagnostics.log
+
+
+
+            Write-Host "CERTEXP=NO_PFX：未恢复 pfx，跳过到期检查（签名结论由 Publish 步给出）"
+
+
+
+            "CHECKPOINT:cert-expiry-done" >> ci-diagnostics.log
+
+
+
+            exit 0
+
+
+
+          }
+
+
+
+          # 读取可能失败（例如 pfx 带密码而此处未传），同样只告警：本步不阻断构建。
+
+          try {
+
+
+
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfx
+
+
+
+            $days = [math]::Floor(($cert.NotAfter - (Get-Date)).TotalDays)
+
+
+
+            $na = $cert.NotAfter.ToString("yyyy-MM-dd")
+
+
+
+            $line = "CERTEXP notafter=" + $na + " days_left=" + $days + " thumb=" + $cert.Thumbprint
+
+
+
+            $line >> ci-diagnostics.log
+
+
+
+            Write-Host $line
+
+
+
+            if ($days -lt 0) {
+
+
+
+              Write-Host "::warning::签名证书已于 $na 过期（days_left=$days）：请立即轮换 SIGNING_PFX_B64 / PFX_PASSWORD 并同步仓库 PhotoRenameAIHash.cer"
+
+
+
+            } elseif ($days -lt 30) {
+
+
+
+              Write-Host "::warning::签名证书仅剩 $days 天到期（$na）：请尽快轮换 SIGNING_PFX_B64 / PFX_PASSWORD 并同步仓库 PhotoRenameAIHash.cer"
+
+
+
+            }
+
+
+
+          } catch {
+
+
+
+            Write-Warning ("无法读取签名证书到期时间: " + $_.Exception.Message)
+
+
+
+          }
+
+
+
+          "CHECKPOINT:cert-expiry-done" >> ci-diagnostics.log
+
+
+
       - name: Publish (MSIX, x64)
 
         # WinUI 3 必须用 Visual Studio 的 msbuild 发布（PRI 资源编译依赖 VS 的
@@ -647,7 +765,8 @@ jobs:
 
       # 签名校验（阻断式）：MSIX 只有签名成功才会写入 AppxSignature.p7x 条目，
       # 以此为结构性判据；signtool verify /pa 复核前，先把签名 pfx 导出的证书
-      # 导入本机 Root/TrustedPeople（等价于用户侧 Install.bat 的信任动作）——
+      # 导入本机 TrustedPeople（等价于用户侧 Install.bat 的信任动作；仅当它不足以通过
+      # signtool 校验时才退到 Root，见步内注释与 VERIFY truststore 诊断）——
       # 自签名证书在 runner 上默认不受信任，不先信任必然误报 0x800B0109。
       # =====================================================================
       # P1-9 兜底：WASDK 1.5 的 SignAppxPackage 构建目标即使传入正确的
@@ -710,26 +829,50 @@ jobs:
           $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
           ("VERIFY signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
-          foreach ($storeName in @("TrustedPeople", "Root")) {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, "LocalMachine")
-            $store.Open("ReadWrite")
-            $store.Add($cert)
-            $store.Close()
-          }
-          Write-Host ("cert trusted on runner: " + $cert.Thumbprint)
+          # ②（P1）最小信任原则：先只导入 TrustedPeople —— MSIX 旁加载的信任链只需要它。
+          # 自签名证书本身无 CA 基本约束，放进 Root 等价于宣布「该私钥签的任何东西都被本机
+          # 信任」，是机器级的安全放大；能不导入就不导入。（用户侧 Install.bat 同样只导入
+          # TrustedPeople，本步与它保持一致。）
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
+          $store.Open("ReadWrite")
+          $store.Add($cert)
+          $store.Close()
+          Write-Host ("cert trusted on runner (TrustedPeople): " + $cert.Thumbprint)
 
           $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
                 Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $verified = $false
+          $trustStore = "none"
           if ($st) {
             $ErrorActionPreference = 'Continue'
             & $st.FullName verify /pa $msix.FullName | Tee-Object -Variable vt | Out-Host
             ("VERIFY signtool_output: " + ($vt -join ' | ')) >> ci-diagnostics.log
             $ErrorActionPreference = 'Stop'
-            if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify 失败 (exit $LASTEXITCODE)：包签名无效或与受信任证书不匹配"; exit 1 }
-            "VERIFY signtool=PASS" >> ci-diagnostics.log
+            if ($LASTEXITCODE -eq 0) { $verified = $true; $trustStore = "TrustedPeople" }
           } else {
             Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
           }
+
+          # 兜底：若 signtool 的默认校验策略确实要求根信任锚（TrustedPeople 单独不够），
+          # 再导入 Root 重试一次，并把实际用到的存储记入诊断（VERIFY truststore=...），
+          # 用一次真实运行回答「TrustedPeople 是否足够」，而不是凭印象改阻断式校验。
+          # 注意：这只是「退一步」，绝不放宽结论 —— 两种存储都验证不过仍然 exit 1。
+          if ($st -and -not $verified) {
+            Write-Warning "仅 TrustedPeople 未通过 signtool verify /pa，退到 Root 重试（结果记入 VERIFY truststore）"
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+            $store.Open("ReadWrite")
+            $store.Add($cert)
+            $store.Close()
+            $ErrorActionPreference = 'Continue'
+            & $st.FullName verify /pa $msix.FullName | Tee-Object -Variable vt2 | Out-Host
+            ("VERIFY signtool_output_root: " + ($vt2 -join ' | ')) >> ci-diagnostics.log
+            $ErrorActionPreference = 'Stop'
+            if ($LASTEXITCODE -eq 0) { $verified = $true; $trustStore = "Root_fallback" }
+          }
+          ("VERIFY truststore=" + $trustStore) >> ci-diagnostics.log
+
+          if ($st -and -not $verified) { Write-Error "signtool verify 失败：包签名无效，或 TrustedPeople / Root 均不足以建立信任链"; exit 1 }
+          if ($st) { "VERIFY signtool=PASS" >> ci-diagnostics.log }
           "CHECKPOINT:verify-done" >> ci-diagnostics.log
 
       # =====================================================================
@@ -763,6 +906,120 @@ jobs:
           }
           Write-Host "OK: .NET 运行时已随包自包含 (coreclr/hostfxr/hostpolicy/CoreLib 就位)"
           "CHECKPOINT:selfcontained-verify-done" >> ci-diagnostics.log
+
+      # =====================================================================
+
+      # 仓库内 PhotoRenameAIHash.cer 与实际签名证书的漂移检测（非阻断）。
+
+      # ⚠️ 本步必须排在 "Export signing certificate for artifact" 之前：那一步会用 pfx
+
+      #    现场重导并【覆盖】PhotoRenameAIHash.cer，覆盖后就无从比对"仓库版"了。
+
+      # 只告警不阻断：用户实际拿到的是 artifact 内的 cer（由下一步重写，永远与 pfx 一致），
+
+      # 仓库版漂移影响的是"从仓库 clone 后直接跑 Install.bat"的那批人（0x800B0109）。
+
+      # =====================================================================
+
+      - name: Compare repo cer with signing cert (non-blocking)
+
+        shell: pwsh
+
+        run: |
+
+
+
+          "CHECKPOINT:certpin-start" >> ci-diagnostics.log
+
+
+
+          $cerPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.cer"
+
+
+
+          $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
+
+
+
+          if (-not (Test-Path $cerPath)) {
+
+
+
+            "CERTPIN=NO_REPO_CER" >> ci-diagnostics.log
+
+
+
+            Write-Host "CERTPIN=NO_REPO_CER：仓库内没有 PhotoRenameAIHash.cer，跳过比对"
+
+
+
+            "CHECKPOINT:certpin-done" >> ci-diagnostics.log
+
+
+
+            exit 0
+
+
+
+          }
+
+
+
+          try {
+
+
+
+            $repoCer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $cerPath
+
+
+
+            $signCer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+
+
+
+            $match = ($repoCer.Thumbprint -eq $signCer.Thumbprint)
+
+
+
+            $line = "CERTPIN match=" + $match + " repo=" + $repoCer.Thumbprint + " signer=" + $signCer.Thumbprint
+
+
+
+            $line >> ci-diagnostics.log
+
+
+
+            Write-Host $line
+
+
+
+            if (-not $match) {
+
+
+
+              Write-Host "::warning::仓库内的 PhotoRenameAIHash.cer（$($repoCer.Thumbprint)）与实际签名证书（$($signCer.Thumbprint)）不一致：以 artifact 中的 .cer 为准；从仓库 clone 后直接跑 Install.bat 会因证书不匹配报 0x800B0109。"
+
+
+
+            }
+
+
+
+          } catch {
+
+
+
+            Write-Warning ("证书指纹比对失败: " + $_.Exception.Message)
+
+
+
+          }
+
+
+
+          "CHECKPOINT:certpin-done" >> ci-diagnostics.log
+
+
 
       # 产物级保险：用签名 pfx 重新导出 .cer 覆盖仓库版，保证 artifact 内的证书
       # 与实际签名证书永远一致（杜绝"仓库 cer 未同步 → 0x800B0109 不受信任"复发）。
@@ -866,6 +1123,18 @@ jobs:
           path: artifact/*
 
           if-no-files-found: error
+
+          # 上一轮刚把本步改为阻断式（杜绝「CI 全绿但用户拿不到安装包」）。
+
+          # 阻断式的必要配套就是限保留期：不限的话旧产物会吃满免费额度
+
+          # （500MB / 2000 分钟；实测已累积 61 个产物约 3.55GB，单包 63MB），
+
+          # 届时「配额不足」会让阻断式上传把 CI 变红，而根因根本不在代码里。
+
+          # 限保留期是这个取舍的另一半；长期分发应走 GitHub Release（TODO）。
+
+          retention-days: 30
 
 
 
