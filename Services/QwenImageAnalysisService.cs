@@ -30,9 +30,12 @@ public sealed class QwenImageAnalysisService : IImageAnalysisService
                 $"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}",
                 isBatchLevel: false);
 
+        // 走 Qwen 策略档：官方 1200 RPM/1M TPM 是 qwen-vl-max 的额度，而本应用串行调用实际只有
+        // 3~20 RPM（差两个数量级）→ 该档不带闸门（闸门永不触发，加了只会人为降速）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(Endpoint, Model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language), dataUrl, ct).ConfigureAwait(false);
+            ImageAnalysisHelper.BuildPrompt(language), dataUrl,
+            AiProviderProfiles.For(AiProvider.Qwen), ct).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);

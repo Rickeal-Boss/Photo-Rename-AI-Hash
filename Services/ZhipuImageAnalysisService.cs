@@ -61,11 +61,12 @@ public sealed class ZhipuImageAnalysisService : IImageAnalysisService
             thinking = new { type = "disabled" },
         };
 
-        // gate 传 null：智谱限流以「并发数」为维度，本应用的 AI 调用严格串行（同一时刻在途请求恒为 1），
-        // 已天然规避 1302 并发超限；额外加闸门只会人为降速，无收益。
+        // 走 Zhipu 策略档：智谱限流维度是「并发数」而非 RPM，本应用的 AI 调用严格串行
+        //（同一时刻在途请求恒为 1），已天然规避 1302 并发超限，故该档不带 RPM 闸门（加了只会人为降速）。
+        // 档位同时承载智谱的永久错误业务码表（欠费/额度/套餐类 429 立即失败，1302/1305 仍重试）。
         // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null。
         var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
-            Endpoint, _apiKey, JsonSerializer.Serialize(body), gate: null, ct).ConfigureAwait(false);
+            Endpoint, _apiKey, JsonSerializer.Serialize(body), AiProviderProfiles.For(AiProvider.Zhipu), ct).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);

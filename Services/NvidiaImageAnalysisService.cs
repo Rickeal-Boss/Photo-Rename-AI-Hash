@@ -11,9 +11,11 @@ namespace PhotoRenameAIHash.Services;
 /// NVIDIA build.nvidia.com（NIM 托管 API）视觉识别：
 /// <c>nvidia/nemotron-3-nano-omni-30b-a3b-reasoning</c>，端点
 /// <c>https://integrate.api.nvidia.com/v1/chat/completions</c>（OpenAI 兼容）。
-/// 官方免费档限流 ~40 RPM（按 nvapi key 账户级共享、跨模型共用同一额度）：
-/// 本引擎独享一枚进程级滑动窗口闸门（60 秒最多 40 次），在每次真实 HTTP 尝试（含重试）
-/// 前先取名额，主动把请求速率压在限流之下，而非被动吃 429 等重试；
+/// 官方免费档限流按 nvapi key 账户级共享（跨模型共用同一额度）：
+/// 本引擎使用进程级滑动窗口闸门（60 秒最多 30 次，见 <see cref="AiProviderProfiles.Nvidia"/>），
+/// 在每次真实 HTTP 尝试（含重试）前先取名额，主动把请求速率压在限流之下，而非被动吃 429 等重试；
+/// 40 RPM 仅有论坛佐证、官方文档无速率限制章节，而串行调用实际只有 6~10 RPM，
+/// 故取 30（降速成本≈0，白拿 25% 余量保险）。
 /// 闸门只作用于本引擎，智谱/通义/自定义引擎的调用策略完全不受影响。
 /// reasoning 模型按官方文档默认开启 thinking：本引擎显式关闭（照片命名无需思维链，
 /// 且官方警告 max_tokens 偏低时推理阶段会耗尽预算导致 content 为空）；
@@ -27,10 +29,8 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
     private const string Endpoint = "https://integrate.api.nvidia.com/v1/chat/completions";
     private const string Model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
 
-    /// <summary>官方免费档 ~40 RPM（按 key 账户级共享）：滑动窗口 60 秒最多 40 次；
+    /// <summary>闸门已迁入 <see cref="AiProviderProfiles.Nvidia"/>：滑动窗口 60 秒最多 30 次，
     /// 进程级共享，跨整理批次仍然生效（同一 key 的额度本就是连续计费的）。</summary>
-    private static readonly RateGate RateLimit = new(40, TimeSpan.FromMinutes(1));
-
     private readonly string _apiKey;
 
     public NvidiaImageAnalysisService(string apiKey) => _apiKey = apiKey;
@@ -68,12 +68,14 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
             chat_template_kwargs = new { enable_thinking = false },
         };
 
-        // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null；
-        // RateLimit 闸门在每次真实 HTTP 尝试（含重试）前生效。
+        // 走 Nvidia 策略档（本仓唯一默认带 RPM 闸门的档位：60 秒 30 次），
+        // 闸门在每次真实 HTTP 尝试（含重试）前生效。
+        // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null。
         // 4xx（含 403）现已由 CallVisionApiRawAsync 直接抛 AiPermanentException（并附 403 定向引导），
         // 此处不再按状态码二次包装——HttpRequestException 过滤器已永不命中（死代码）。
         var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
-            Endpoint, _apiKey, JsonSerializer.Serialize(body), RateLimit, ct).ConfigureAwait(false);
+            Endpoint, _apiKey, JsonSerializer.Serialize(body),
+            AiProviderProfiles.For(AiProvider.Nvidia), ct).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractNemotronContent(raw);
         var result = ImageAnalysisHelper.Parse(content);

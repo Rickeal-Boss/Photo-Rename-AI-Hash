@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -17,8 +17,9 @@ namespace PhotoRenameAIHash.Helpers;
 /// </summary>
 public static class ImageAnalysisHelper
 {
-    // A-09：默认 HttpClient.Timeout 为 100s，叠加 15 次重试后单文件最坏等待 ≈28 分钟（服务端挂起时）。
-    // 视觉接口正常响应 <20s，收紧到 60s 让挂起快速失败，重试语义与总时长可控。
+    // A-09：默认 HttpClient.Timeout 为 100s，叠加退避重试后单文件最坏等待会失控（服务端挂起时）。
+    // 视觉接口正常响应 <20s，收紧到 60s 让挂起快速失败；再加上策略档的「最大 8 次 / 总预算 180s」
+    // 双闸（见 AiProviderProfile.AiRetryPolicy），单文件最坏等待收敛到分钟级。
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
     public static async Task<string?> EncodeAsJpegDataUrlAsync(string path, int maxDim, CancellationToken ct)
@@ -51,27 +52,23 @@ public static class ImageAnalysisHelper
     }
 
     /// <summary>
-    /// 调用视觉识别接口（默认请求体：文本 + 图片双段、temperature 0.3、max_tokens 400）。
+    /// 调用视觉识别接口（默认请求体：文本 + 图片双段、temperature 0.3、max_tokens 1024）。
     /// 失败时抛异常（而非静默返回 null），调用方据此提示具体原因。
-    /// <paramref name="gate"/> 为可选限流闸门（如 NVIDIA 引擎的 40 RPM 闸门）：每次真实 HTTP
-    /// 尝试（含重试）前先取名额；传入 null 即无限流（智谱/通义/自定义引擎行为不变）。
-    /// 遇 HTTP 429（限流）或 5xx（服务端错误）时按固定 15 秒间隔自动重试，最多 15 次尝试
-    /// （首试 + 至多 14 次重试），忽略 429 的 Retry-After 头；重试期间不返回任何结果，
+    /// 限流与退避语义全部由 <paramref name="profile"/> 决定（见 <see cref="AiProviderProfiles"/>）：
+    /// 闸门按供应商（如 NVIDIA 30 RPM；智谱/通义/自定义默认无闸门），退避为指数退避
+    /// （1s 起、×2、单次封顶按档位、带 0~1s jitter），并<b>遵从服务端 Retry-After / ratelimit-reset /
+    /// JSON retryDelay 作为等待下限</b>（单次封顶 120s），整轮总耗时预算 180s。
+    /// 遇 HTTP 429（限流）或 5xx（服务端错误）按上述策略重试；重试期间不返回任何结果，
     /// 因此调用方不会据此产出 <c>unknown_</c> 重命名；限流解除后继续。
-    /// 4xx（非 429）为客户端永久错误，不重试、直接抛 <see cref="AiPermanentException"/>。
+    /// 4xx（非 429）为客户端永久错误，不重试、直接抛 <see cref="AiPermanentException"/>；
+    /// 429 命中档位的永久错误规则（如智谱欠费/额度类业务码）同样判永久。
     /// </summary>
-    /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试耗尽）。</exception>
-    /// <exception cref="HttpRequestException">429 限流 / 5xx 服务端错误重试耗尽（携带状态码与响应体片段）。</exception>
-    /// <exception cref="AiPermanentException">4xx 客户端永久错误（模型不存在 / 参数非法 / 401 / 403 / 404 等），重试无意义。</exception>
-    public static Task<string> CallVisionApiAsync(
-        string endpoint, string model, string apiKey, string prompt, string dataUrl, CancellationToken ct)
-        => CallVisionApiAsync(endpoint, model, apiKey, prompt, dataUrl, gate: null, ct);
-
-    /// <summary><see cref="CallVisionApiAsync(string,string,string,string,string,System.Threading.CancellationToken)"/>
-    /// 的带限流闸门版本，其余行为完全一致（仅 NVIDIA 引擎传入闸门）。</summary>
+    /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试次数或退避预算耗尽）。</exception>
+    /// <exception cref="HttpRequestException">429 限流 / 5xx 服务端错误重试次数或退避预算耗尽（携带状态码与响应体片段）。</exception>
+    /// <exception cref="AiPermanentException">4xx 客户端永久错误（模型不存在 / 参数非法 / 401 / 403 / 404 等），或 429 命中永久业务规则，重试无意义。</exception>
     public static Task<string> CallVisionApiAsync(
         string endpoint, string model, string apiKey, string prompt, string dataUrl,
-        RateGate? gate, CancellationToken ct)
+        AiProviderProfile profile, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(model))
             throw new InvalidOperationException("视觉识别模型名未配置（自定义引擎请在「设置」中填写模型名）。");
@@ -97,17 +94,17 @@ public static class ImageAnalysisHelper
             max_tokens = 1024,
         };
 
-        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), gate, ct);
+        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), profile, ct);
     }
 
     /// <summary>
     /// 以调用方构造的 JSON 请求体直发 chat/completions（NVIDIA Nemotron 等需要自定义
     /// 请求体的引擎使用：如 reasoning 模型的 chat_template_kwargs 与更大 max_tokens）。
-    /// 校验、重试、限流语义与 <see cref="CallVisionApiAsync(string,string,string,string,string,System.Threading.CancellationToken)"/>
-    /// 完全一致；<paramref name="gate"/> 为每次真实 HTTP 尝试（含重试）前的可选限流闸门。
+    /// 校验、重试、限流语义与 <see cref="CallVisionApiAsync"/> 完全一致，
+    /// 均由 <paramref name="profile"/>（见 <see cref="AiProviderProfiles"/>）决定。
     /// </summary>
     public static async Task<string> CallVisionApiRawAsync(
-        string endpoint, string apiKey, string jsonBody, RateGate? gate, CancellationToken ct)
+        string endpoint, string apiKey, string jsonBody, AiProviderProfile profile, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new InvalidOperationException("视觉识别端点 URL 未配置（自定义引擎请在「设置」中填写端点）。");
@@ -120,18 +117,19 @@ public static class ImageAnalysisHelper
             throw new InvalidOperationException(
                 "视觉识别端点必须使用 https（自定义引擎请在「设置」中填写以 https:// 开头的端点，避免 API Key 与照片以明文出站）。");
 
-        // 429 限流 / 5xx 服务端错误：最多 15 次尝试（首试 + 至多 14 次重试），
-        // 每次重试前固定等待 15 秒（忽略 429 的 Retry-After 头）；重试期间不返回任何结果，
+        // 429 限流 / 5xx 服务端错误：按供应商策略档退避重试（次数上限 + 总耗时预算双闸），
+        // 并遵从服务端给出的重试时间提示；重试期间不返回任何结果，
         // 因此调用方不会据此产出 unknown_ 重命名；限流解除后继续。
-        const int maxAttempts = 15;
+        var pol = profile.Retry;
+        var sw = Stopwatch.StartNew(); // 总耗时预算的计时基准（含 HTTP 往返与退避等待）
         int attempt = 1;
-        while (attempt <= maxAttempts)
+        while (attempt <= pol.MaxAttempts)
         {
             ct.ThrowIfCancellationRequested();
 
             // 每次真实 HTTP 尝试都占用一个限流名额（重试也不例外），把速率压在窗口上限之下
-            if (gate != null)
-                await gate.WaitAsync(ct).ConfigureAwait(false);
+            if (profile.Gate != null)
+                await profile.Gate.WaitAsync(ct).ConfigureAwait(false);
 
             // HttpRequestMessage 单次使用，每次尝试都必须重新构造
             using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
@@ -145,15 +143,18 @@ public static class ImageAnalysisHelper
             }
             catch (Exception ex)
             {
-                // 网络/连通性异常：视为瞬时抖动可重试，耗尽后抛明确异常
-                if (attempt < maxAttempts)
-                {
-                    await BackoffAsync(ct).ConfigureAwait(false);
-                    attempt++;
-                    continue;
-                }
-                throw new InvalidOperationException(
-                    $"调用视觉识别接口失败（网络/连通性，已尝试 {maxAttempts} 次仍失败）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
+                // 网络/连通性异常：视为瞬时抖动可重试，次数或退避预算耗尽后抛明确异常。
+                // 不抛 AiPermanentException：保留外层「单文件重排队」兜底（P17）。
+                var netDelay = ComputeDelay(profile, attempt, null, null);
+                if (attempt >= pol.MaxAttempts || sw.Elapsed + netDelay > pol.TotalBudget)
+                    throw new InvalidOperationException(
+                        $"调用视觉识别接口失败（网络/连通性，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s" +
+                        $"（已达最大次数 {pol.MaxAttempts} 或退避预算 {pol.TotalBudget.TotalSeconds:F0}s））：{ex.Message}。" +
+                        "请检查网络与端点 URL 是否正确。", ex);
+
+                await Task.Delay(netDelay, ct).ConfigureAwait(false);
+                attempt++;
+                continue;
             }
 
             using (resp)
@@ -162,39 +163,44 @@ public static class ImageAnalysisHelper
                 int code = (int)resp.StatusCode;
 
                 // 429 里可能承载平台业务错误码：账户欠费/额度耗尽/套餐到期/无权限属永久错误，
-                // 重试无意义（否则单文件会空转 15 次 ×15s 再被上层重排 10 次）。此处按业务码短路。
-                // 仅对 429 生效，5xx 保持原有重试语义。
-                if (code == 429 && IsPermanentBusinessCode(respText, out var bizCode))
+                // 重试无意义（否则单文件会空转到退避预算耗尽再被上层重排 10 次）。此处按档位规则短路。
+                // 仅对 429 生效，5xx 永不判永久（保持既有语义）。
+                if (code == 429 && TryMatchPermanent(profile, respText, resp, out var why))
                 {
-                    var permSnippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
                     // 抛专用类型而非 HttpRequestException：让 OrganizeService 能按「类型」判定永久错误并跳过
                     // 文件级重排队，同时不误伤「瞬时限流重试耗尽」（那也是 HttpRequestException(429)，
                     // 属用户已裁定的有意重试设计）。
                     throw new AiPermanentException(
-                        $"视觉识别接口返回 429（业务错误码 {bizCode}：账户欠费 / 额度耗尽 / 套餐到期或无权限，重试无意义）：{permSnippet}");
+                        $"视觉识别接口返回 429（{why}，重试无意义）：{Snippet(respText)}");
                 }
 
-                // 429 限流 / 5xx 服务端错误：固定等待 15 秒后重试，期间不做任何重命名
+                // 429 限流 / 5xx 服务端错误：按策略档退避后重试，期间不做任何重命名
                 if (code == 429 || code >= 500)
                 {
-                    if (attempt < maxAttempts)
+                    var delay = ComputeDelay(profile, attempt, resp, respText);
+                    if (attempt >= pol.MaxAttempts || sw.Elapsed + delay > pol.TotalBudget)
                     {
-                        await BackoffAsync(ct).ConfigureAwait(false);
-                        attempt++;
-                        continue;
+                        // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），
+                        // 调用方按状态码判定而非解析文案。异常文案必须区分「次数耗尽」与「退避预算耗尽」
+                        // 并给出累计秒数——只说「限流」会误导用户以为再等等就好（P23）。
+                        throw new HttpRequestException(
+                            $"视觉识别接口限流/错误（{code} {resp.StatusCode}），" +
+                            $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s" +
+                            $"（已达最大次数 {pol.MaxAttempts} 或退避预算 {pol.TotalBudget.TotalSeconds:F0}s）：{Snippet(respText)}",
+                            null, resp.StatusCode);
                     }
-                    var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
-                    // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），调用方按状态码判定而非解析文案
-                    throw new HttpRequestException(
-                        $"视觉识别接口限流/错误（{code} {resp.StatusCode}），已尝试 {maxAttempts} 次仍失败：{snippet}", null, resp.StatusCode);
+
+                    await Task.Delay(delay, ct).ConfigureAwait(false);
+                    attempt++;
+                    continue;
                 }
 
                 if (!resp.IsSuccessStatusCode)
                 {
-                    var snippet = respText.Length > 500 ? respText.Substring(0, 500) : respText;
+                    var snippet = Snippet(respText);
                     // 4xx（非 429）是客户端永久错误：模型不存在(1211)、参数非法(1214)、401/403/404 等，
                     // 重试永远不可能成功。此前抛 HttpRequestException，会被编排层重排队最多 10 次。
-                    // 注意：本方法 XML 注释里早就写明「4xx 不重试」，但当时只体现在本方法的 15 次循环里，
+                    // 注意：本方法 XML 注释里早就写明「4xx 不重试」，但当时只体现在本方法的重试循环里，
                     // 没有通过异常类型传达给编排层——这里补上。
                     var hint = code == 403
                         ? "（403：若使用 NVIDIA NIM，该模型族可能尚未在你的账号下注册，请到 build.nvidia.com 对应模型页点击一次「Try API」）"
@@ -207,53 +213,103 @@ public static class ImageAnalysisHelper
             }
         }
 
-        // 兜底：循环内已保证在第 maxAttempts 次失败后抛出，此处仅满足编译器「所有路径均有返回值」要求
-        throw new InvalidOperationException($"视觉识别接口调用超出最大尝试次数（{maxAttempts}）。");
+        // 兜底：循环内已保证在最后一次失败后抛出，此处仅满足编译器「所有路径均有返回值」要求
+        throw new InvalidOperationException($"视觉识别接口调用超出最大尝试次数（{pol.MaxAttempts}）。");
     }
 
     /// <summary>
-    /// 重试前的固定等待：15 秒（按需求固定间隔，忽略 429 的 Retry-After 头），并尊重 <paramref name="ct"/> 以便用户取消。
+    /// 计算本次失败后的等待时长：指数退避为基线，服务端提示（头 / JSON）只作<b>下限</b>——
+    /// 服务端明确说「30s 后再来」时我们不会 1s 就重试，但它说「1s」时我们也不会放弃已积累的退避。
+    /// 随后按 <see cref="AiRetryPolicy.RetryAfterCap"/> 封顶（防病态值冻死 UI），
+    /// 最后加 0~1s 抖动（加法，不突破下限语义）。
     /// </summary>
-    private static async Task BackoffAsync(CancellationToken ct)
+    private static TimeSpan ComputeDelay(AiProviderProfile profile, int attempt, HttpResponseMessage? resp, string? respText)
     {
-        await Task.Delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+        var pol = profile.Retry;
+        var delay = pol.DelayFor(attempt);
+
+        if (pol.HonorRetryAfter && resp != null)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var hint = RetryAfterParser.FromHeaders(resp.Headers, profile.RetryAfterHeaders, now);
+            if (hint == null && profile.RetryAfterFromJson) hint = RetryAfterParser.FromJson(respText, now);
+            // Retry-After 是【下限】不是替代值：只在比当前退避更长时采用
+            if (hint.HasValue && hint.Value > delay) delay = hint.Value;
+        }
+
+        if (delay > pol.RetryAfterCap) delay = pol.RetryAfterCap;
+        if (pol.Jitter) delay += TimeSpan.FromMilliseconds(Random.Shared.Next(0, 1000));
+        return delay;
     }
 
     /// <summary>
-    /// 平台（如智谱）在 HTTP 429 中返回的「账户级永久错误」业务码：重试无法恢复，应立即失败。
-    /// 参考智谱错误码表：1113 欠费、1308 已达使用上限、1309 套餐到期、1311 无该模型权限、
-    /// 1315 Key 类型不匹配、1316~1321 各类周期/套餐上限。1302（并发超限）与 1305（平台过载）
-    /// 属瞬时可恢复，<b>不在此集合内</b>，保持原有 15×15s 重试。
+    /// 判定 429 是否其实是不可恢复的永久错误。求值顺序保守优先：<b>宁漏判（多退避几次）勿误判</b>——
+    /// 误判会触发 OrganizeService 连续 3 次熔断中止整批（P17/P26）。
     /// </summary>
-    private static readonly HashSet<string> PermanentBusinessCodes = new(StringComparer.Ordinal)
+    private static bool TryMatchPermanent(AiProviderProfile profile, string respText, HttpResponseMessage resp, out string reason)
     {
-        "1113", "1308", "1309", "1311", "1315", "1316", "1317", "1318", "1319", "1320", "1321",
-    };
+        reason = "";
+        var rules = profile.Permanent;
 
-    /// <summary>尝试从响应体解析 error.code（字符串或数字皆可）；命中永久错误码时返回 true 并回传业务码。</summary>
-    private static bool IsPermanentBusinessCode(string respText, out string bizCode)
+        // 1) error.code 精确匹配（字符串或数字皆可）：最强证据
+        var bizCode = ReadErrorCode(respText);
+        if (bizCode.Length > 0 && rules.BusinessCodes.TryGetValue(bizCode, out var desc))
+        {
+            reason = $"业务错误码 {bizCode}：{desc}";
+            return true;
+        }
+
+        // 2) 响应体子串匹配：弱证据，默认空表（供应商不发结构化错误码时才启用）
+        if (!string.IsNullOrEmpty(respText))
+        {
+            foreach (var kv in rules.BodySnippets)
+            {
+                if (respText.IndexOf(kv.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    reason = kv.Value;
+                    return true;
+                }
+            }
+        }
+
+        // 3) 该供应商以「429 且不带任何重试提示」表达额度封顶（仅 Anthropic 档开启，默认关）
+        if (rules.RetryAfterAbsentOn429IsPermanent)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var hint = RetryAfterParser.FromHeaders(resp.Headers, profile.RetryAfterHeaders, now);
+            if (hint == null && profile.RetryAfterFromJson) hint = RetryAfterParser.FromJson(respText, now);
+            if (hint == null)
+            {
+                reason = "响应未携带任何「多久后可重试」的提示（该供应商以此表达额度/预算封顶，重试不会恢复）";
+                return true;
+            }
+        }
+
+        // 4) 其余一律按可重试处理 → 走退避重试（P17 红线）
+        return false;
+    }
+
+    /// <summary>从响应体解析 <c>error.code</c>（字符串或数字皆可）；解析不出返回空串。</summary>
+    private static string ReadErrorCode(string respText)
     {
-        bizCode = "";
         try
         {
             using var doc = JsonDocument.Parse(respText);
             if (doc.RootElement.TryGetProperty("error", out var err) &&
                 err.TryGetProperty("code", out var c))
             {
-                string v = c.ValueKind == JsonValueKind.String ? (c.GetString() ?? "") : c.ToString();
-                if (v.Length > 0 && PermanentBusinessCodes.Contains(v))
-                {
-                    bizCode = v;
-                    return true;
-                }
+                return c.ValueKind == JsonValueKind.String ? (c.GetString() ?? "") : c.ToString();
             }
         }
         catch
         {
-            // 响应体非 JSON 或结构不符：按「非永久错误」处理，保持原有重试语义
+            // 响应体非 JSON 或结构不符：按「无业务码」处理，不影响主流程
         }
-        return false;
+        return "";
     }
+
+    /// <summary>截断响应体用于异常文案（避免把整段 HTML/JSON 塞进 UI 日志）。</summary>
+    private static string Snippet(string t) => t.Length > 500 ? t.Substring(0, 500) : t;
 
     /// <summary>
     /// 从 OpenAI 兼容响应体中抽取 message content，并兼容「思考型模型」的多种返回形态：
