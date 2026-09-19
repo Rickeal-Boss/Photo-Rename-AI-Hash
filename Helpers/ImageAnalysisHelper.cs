@@ -305,7 +305,17 @@ public static class ImageAnalysisHelper
             return true;
         }
 
-        // 2) 响应体子串匹配：弱证据，默认空表（供应商不发结构化错误码时才启用）
+        // 2) error.details.error_code 精确匹配（Anthropic 风格的结构化字段）：同样是强证据。
+        //    必须排在下面的「429 且无 retry-after」启发式规则之前：结构化字段是官方明文的判据，
+        //    启发式只是「官方保证普通限流一定带 retry-after」前提下的兜底，可靠性低一档。
+        var detailCode = ReadDetailErrorCode(respText);
+        if (detailCode.Length > 0 && rules.DetailErrorCodes.TryGetValue(detailCode, out var detailDesc))
+        {
+            reason = $"错误码 {detailCode}：{detailDesc}";
+            return true;
+        }
+
+        // 3) 响应体子串匹配：弱证据，默认空表（供应商不发结构化错误码时才启用）
         if (!string.IsNullOrEmpty(respText))
         {
             foreach (var kv in rules.BodySnippets)
@@ -318,7 +328,9 @@ public static class ImageAnalysisHelper
             }
         }
 
-        // 3) 该供应商以「429 且不带任何重试提示」表达额度封顶（仅 Anthropic 档开启，默认关）
+        // 4) 兜底启发式：该供应商以「429 且不带任何重试提示」表达额度封顶（仅 Anthropic 档开启，默认关）。
+        //    Anthropic 官方明确普通速率限流一定带 retry-after，故本规则对其安全；
+        //    但它是推断而非证据，仅在上述结构化判据都没命中时才走到这里。
         if (rules.RetryAfterAbsentOn429IsPermanent)
         {
             var now = DateTimeOffset.UtcNow;
@@ -331,9 +343,52 @@ public static class ImageAnalysisHelper
             }
         }
 
-        // 4) 其余一律按可重试处理 → 走退避重试（P17 红线）
+        // 5) 其余一律按可重试处理 → 走退避重试（P17 红线）
         return false;
     }
+
+    /// <summary>
+    /// 从响应体解析 <c>error.details.error_code</c>；解析不出返回空串。
+    /// <c>error.details</c> 可能是<b>对象</b>也可能是<b>数组</b>（各供应商写法不一），两种形态都要容错；
+    /// 解析失败一律返回空串，不影响主流程（与 <see cref="ReadErrorCode"/> 同口径）。
+    /// </summary>
+    private static string ReadDetailErrorCode(string respText)
+    {
+        // 与 ReadErrorCode 同口径：不为找结构化字段去全量解析一个大响应体
+        if (string.IsNullOrEmpty(respText) || respText.Length > MaxCodeScanLength) return "";
+
+        try
+        {
+            using var doc = JsonDocument.Parse(respText);
+            if (!doc.RootElement.TryGetProperty("error", out var err)) return "";
+            if (!err.TryGetProperty("details", out var details)) return "";
+
+            if (details.ValueKind == JsonValueKind.Object)
+                return ReadStringProperty(details, "error_code");
+
+            if (details.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in details.EnumerateArray())
+                {
+                    var v = ReadStringProperty(item, "error_code");
+                    if (v.Length > 0) return v;
+                }
+            }
+        }
+        catch
+        {
+            // 响应体非 JSON 或结构不符：按「无此字段」处理，不影响主流程
+        }
+        return "";
+    }
+
+    /// <summary>安全读取 JSON 对象上的字符串字段；元素不是对象、字段缺失或非字符串时返回空串。</summary>
+    private static string ReadStringProperty(JsonElement obj, string key)
+        => obj.ValueKind == JsonValueKind.Object &&
+           obj.TryGetProperty(key, out var v) &&
+           v.ValueKind == JsonValueKind.String
+            ? (v.GetString() ?? "")
+            : "";
 
     /// <summary>
     /// 4xx 永久错误是否「对整批成立」（决定是否参与 OrganizeService 的连续 3 次熔断）。

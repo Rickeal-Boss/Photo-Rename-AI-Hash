@@ -69,6 +69,15 @@ public sealed class AiPermanentRuleSet
     /// <summary>响应体 <c>error.code</c>（字符串或数字皆可）→ 中文说明。命中即判永久（强证据）。</summary>
     public Dictionary<string, string> BusinessCodes { get; init; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 响应体 <c>error.details.error_code</c> → 中文说明。命中即判永久（强证据）。
+    /// 与 <see cref="BusinessCodes"/> 区分：后者读顶层 <c>error.code</c>（智谱 / 阿里风格），
+    /// 本表读嵌套的 <c>error.details.error_code</c>（Anthropic 风格）。
+    /// 判定优先级：<see cref="BusinessCodes"/> ≈ 本表 ＞ <see cref="BodySnippets"/> ＞
+    /// <see cref="RetryAfterAbsentOn429IsPermanent"/>（启发式兜底）。
+    /// </summary>
+    public Dictionary<string, string> DetailErrorCodes { get; init; } = new(StringComparer.Ordinal);
+
     /// <summary>响应体子串 → 中文说明。命中即判永久（弱证据，默认空表：纯文本匹配容易误伤）。</summary>
     public Dictionary<string, string> BodySnippets { get; init; } = new(StringComparer.Ordinal);
 
@@ -78,6 +87,9 @@ public sealed class AiPermanentRuleSet
     /// <b>默认关闭且只在 host 命中 api.anthropic.com 时开启</b>：智谱 / 阿里 / NVIDIA / SiliconFlow
     /// 同样不发 429 提示头，若全局开启会把它们的瞬时限流全部误判成永久，
     /// 进而触发 OrganizeService 连续 3 次熔断中止整批（P17/P26 红线）。
+    /// Anthropic 官方明确「普通速率限流一定带 retry-after」，故此规则对 Anthropic 是安全的；
+    /// 但 <see cref="DetailErrorCodes"/>（enforced_spend_limit_reached）是官方明文的结构化判据，
+    /// 更可靠 —— <b>本规则已降级为兜底</b>，结构化字段优先（见 ImageAnalysisHelper.TryMatchPermanent）。
     /// </summary>
     public bool RetryAfterAbsentOn429IsPermanent { get; init; }
 }
@@ -449,8 +461,9 @@ public static class AiProviderProfiles
     };
 
     /// <summary>
-    /// Anthropic（api.anthropic.com）策略档：通用档基础上开启
-    /// <see cref="AiPermanentRuleSet.RetryAfterAbsentOn429IsPermanent"/>——
+    /// Anthropic（api.anthropic.com）策略档：通用档基础上
+    /// ① 开启 <see cref="AiPermanentRuleSet.RetryAfterAbsentOn429IsPermanent"/>（兜底规则），
+    /// ② 填 <see cref="AiPermanentRuleSet.DetailErrorCodes"/>（优先的结构化判据）。
     /// 该规则<b>只在 host 命中 api.anthropic.com 时开启</b>，全局开启会把智谱/阿里/NVIDIA/SiliconFlow
     /// 的瞬时限流全部误判成永久（它们同样不发 429 提示头），触发整批熔断（P17/P26 红线）。
     /// </summary>
@@ -461,7 +474,11 @@ public static class AiProviderProfiles
         Retry = new AiRetryPolicy(),
         RetryAfterHeaders = Union(RetryAfterParser.StandardHeaders, RetryAfterParser.AnthropicHeaders),
         RetryAfterFromJson = true,
-        Permanent = new AiPermanentRuleSet { RetryAfterAbsentOn429IsPermanent = true },
+        Permanent = new AiPermanentRuleSet
+        {
+            RetryAfterAbsentOn429IsPermanent = true, // 兜底：见 BuildAnthropicPermanentDetailCodes 注释
+            DetailErrorCodes = BuildAnthropicPermanentDetailCodes(),
+        },
     };
 
     /// <summary>
@@ -560,23 +577,35 @@ public static class AiProviderProfiles
     /// <summary>
     /// 智谱 HTTP 429 中的「账户级永久错误」业务码：命中即判永久，重试无意义
     /// （否则单文件会空转到退避预算耗尽，再被上层重排队 10 次）。
+    /// 依据：https://docs.bigmodel.cn/cn/api/api-code（官方错误码表，2026-09 取证）。
+    ///
+    /// <b>入表判据：该码对应的限制「不会在合理等待内自行恢复」</b>——判永久的代价是放弃整批
+    ///（连续 3 个文件命中即中止，P26），所以只有充值 / 续费 / 配置级 / 周+ 级周期才可入表。
+    ///
     /// <b>显式排除 1302（并发超限）与 1305（平台过载）：这两个是可重试的瞬时错误，绝不可入表。</b>
+    ///
+    /// <b>显式排除 1308 / 1316 / 1318 / 1320（逐码理由见下）：</b>
+    /// - 1316 = 5 小时使用上限（主账号余额不足）；1318 = 5 小时 + 子账号月上限；
+    ///   1320 = 5 小时 + 企业级月上限 —— 官方按「5 小时窗口」归类，窗口过后自动恢复。
+    ///   判永久会把「等一会儿 / 重试几次就好」的场景直接放弃整批（误杀）。
+    /// - 1308 = 已达到 ${number} ${unit} 使用上限，限额将在 ${next_flush_time} 重置 ——
+    ///   <b>周期未写明、unit 是变量</b>，不能假定是长周期，一律按可重试处理。
+    ///
+    /// 注：官方的 <c>next_flush_time</c> 只出现在 <c>error.message</c> 文案里（占位符），
+    /// 不是响应体的独立 JSON 字段（响应体只有 error.code + error.message）——
+    /// <b>不要尝试解析它</b>，重试提示一律交给 Retry-After / 退避。
     /// </summary>
     private static Dictionary<string, string> BuildZhipuPermanentCodes() => new(StringComparer.Ordinal)
     {
-        ["1113"] = "账户欠费",
-        ["1308"] = "已达使用上限",
-        ["1309"] = "套餐到期",
-        ["1310"] = "额度/套餐已达上限",
-        ["1311"] = "无该模型权限",
-        ["1314"] = "企业套餐失效",
-        ["1315"] = "API Key 类型不匹配",
-        ["1316"] = "已达周期上限",
-        ["1317"] = "已达周期上限",
-        ["1318"] = "已达周期上限",
-        ["1319"] = "已达周期上限",
-        ["1320"] = "已达周期上限",
-        ["1321"] = "已达周期上限",
+        ["1113"] = "账户欠费",                                   // 需充值，不会自行恢复
+        ["1309"] = "套餐到期",                                    // 需续费，不会自行恢复
+        ["1310"] = "已达每周/每月使用上限",                        // 官方明确 周 / 月 级周期
+        ["1311"] = "无该模型权限",                                 // 配置级，不会自行恢复
+        ["1314"] = "企业套餐失效",                                 // 配置级，不会自行恢复
+        ["1315"] = "API Key 类型不匹配",                           // 配置级，不会自行恢复
+        ["1317"] = "已达 7 天使用上限",                            // 官方明确 7 天周期
+        ["1319"] = "已达 7 天使用上限，且已达子账号月消费上限",      // 7 天 + 月，官方口径为 7 天
+        ["1321"] = "已达 7 天使用上限，且已达企业级月消费上限",      // 7 天 + 月，官方口径为 7 天
         ["1000"] = "鉴权失败",
         ["1001"] = "鉴权失败",
         ["1002"] = "鉴权失败",
@@ -585,5 +614,21 @@ public static class AiProviderProfiles
         ["1005"] = "鉴权失败",
         ["1220"] = "无权限",
         ["1222"] = "API 不存在",
+    };
+
+    /// <summary>
+    /// Anthropic 的结构化永久错误码（读 <c>error.details.error_code</c>）。
+    /// 依据 https://platform.claude.com/docs/en/api/rate-limits （2026-09 取证）：
+    /// 官方明确用 <c>enforced_spend_limit_reached</c> "to tell this response apart from a rate limit"，
+    /// 这是比「429 且无 retry-after」启发式可靠得多的判据，故<b>优先使用本表</b>，
+    /// <see cref="AiPermanentRuleSet.RetryAfterAbsentOn429IsPermanent"/> 只作兜底。
+    /// 两个已知陷阱：
+    /// - <c>error.type</c> 是 <c>rate_limit_error</c>，与普通限流<b>同类型，不可用作判据</b>；
+    /// - 用户自设 spend limit 走的是 HTTP 400 + <c>invalid_request_error</c>（不是 429），
+    ///   已由 4xx 分支覆盖，不在本表内。
+    /// </summary>
+    private static Dictionary<string, string> BuildAnthropicPermanentDetailCodes() => new(StringComparer.Ordinal)
+    {
+        ["enforced_spend_limit_reached"] = "账户支出上限已耗尽（enforced spend limit），重试无意义",
     };
 }
