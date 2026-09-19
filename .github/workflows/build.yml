@@ -765,9 +765,12 @@ jobs:
 
       # 签名校验（阻断式）：MSIX 只有签名成功才会写入 AppxSignature.p7x 条目，
       # 以此为结构性判据；signtool verify /pa 复核前，先把签名 pfx 导出的证书
-      # 导入本机 TrustedPeople（等价于用户侧 Install.bat 的信任动作；仅当它不足以通过
-      # signtool 校验时才退到 Root，见步内注释与 VERIFY truststore 诊断）——
+      # 导入本机 TrustedPeople —— 与用户侧 Install.bat 的信任动作完全一致，不导入 Root。
       # 自签名证书在 runner 上默认不受信任，不先信任必然误报 0x800B0109。
+      # 已由真实 CI 运行证实 TrustedPeople 单独即可通过 signtool verify /pa：
+      #   run 35432681789（72377da）-> VERIFY truststore=TrustedPeople / VERIFY signtool=PASS
+      # 因此不再保留 Root 回落分支：回落会让 CI 走一条用户机器上不存在的信任链，
+      # 出现「Root 能过、用户 TrustedPeople-only 装不上」的假绿灯。
       # =====================================================================
       # P1-9 兜底：WASDK 1.5 的 SignAppxPackage 构建目标即使传入正确的
       # AppxPackageSigningTimestampServerUrl 也可能忽略时间戳（上游已知问题，
@@ -829,10 +832,10 @@ jobs:
           $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
           ("VERIFY signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
-          # ②（P1）最小信任原则：先只导入 TrustedPeople —— MSIX 旁加载的信任链只需要它。
+          # ②（P1）最小信任原则：只导入 TrustedPeople —— MSIX 旁加载的信任链只需要它。
           # 自签名证书本身无 CA 基本约束，放进 Root 等价于宣布「该私钥签的任何东西都被本机
           # 信任」，是机器级的安全放大；能不导入就不导入。（用户侧 Install.bat 同样只导入
-          # TrustedPeople，本步与它保持一致。）
+          # TrustedPeople；CI 一旦改走别的信任链，绿灯就不能代表用户能装上。）
           $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
           $store.Open("ReadWrite")
           $store.Add($cert)
@@ -853,25 +856,12 @@ jobs:
             Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
           }
 
-          # 兜底：若 signtool 的默认校验策略确实要求根信任锚（TrustedPeople 单独不够），
-          # 再导入 Root 重试一次，并把实际用到的存储记入诊断（VERIFY truststore=...），
-          # 用一次真实运行回答「TrustedPeople 是否足够」，而不是凭印象改阻断式校验。
-          # 注意：这只是「退一步」，绝不放宽结论 —— 两种存储都验证不过仍然 exit 1。
-          if ($st -and -not $verified) {
-            Write-Warning "仅 TrustedPeople 未通过 signtool verify /pa，退到 Root 重试（结果记入 VERIFY truststore）"
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
-            $store.Open("ReadWrite")
-            $store.Add($cert)
-            $store.Close()
-            $ErrorActionPreference = 'Continue'
-            & $st.FullName verify /pa $msix.FullName | Tee-Object -Variable vt2 | Out-Host
-            ("VERIFY signtool_output_root: " + ($vt2 -join ' | ')) >> ci-diagnostics.log
-            $ErrorActionPreference = 'Stop'
-            if ($LASTEXITCODE -eq 0) { $verified = $true; $trustStore = "Root_fallback" }
-          }
+          # 不再有 Root 回落（证据见步首注释：真实运行 VERIFY truststore=TrustedPeople）。
+          # 若将来 runner 变化导致 TrustedPeople 不足以通过，本步直接 exit 1 报红，
+          # 而不是换一条用户机器上不存在的信任链把自己救绿 —— 假绿灯比红灯更贵。
           ("VERIFY truststore=" + $trustStore) >> ci-diagnostics.log
 
-          if ($st -and -not $verified) { Write-Error "signtool verify 失败：包签名无效，或 TrustedPeople / Root 均不足以建立信任链"; exit 1 }
+          if ($st -and -not $verified) { Write-Error "signtool verify 失败：包签名无效，或 TrustedPeople 不足以建立信任链（无 Root 回落）"; exit 1 }
           if ($st) { "VERIFY signtool=PASS" >> ci-diagnostics.log }
           "CHECKPOINT:verify-done" >> ci-diagnostics.log
 
