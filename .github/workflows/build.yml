@@ -1184,6 +1184,12 @@ jobs:
 
         if: always()
 
+        # P1-5：本步末尾会 git push --force 到 ci-diag-report 分支，且带 if: always()
+        # —— 无论构建成败都会执行。一旦 push 失败（并发运行互相覆盖 / 分支保护 / 网络抖动），
+        # 会把一个本来全绿的构建刷成红灯。诊断留档不是交付物，它的失败只能警告，
+        # 绝不能让「留档失败」掩盖掉真实的构建结论。
+        continue-on-error: true
+
         shell: pwsh
 
         env:
