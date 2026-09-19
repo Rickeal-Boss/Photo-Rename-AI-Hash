@@ -36,6 +36,9 @@ public sealed class OrganizeService : IOrganizeService
     public async Task<OrganizeReport> RunAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
+        // 日志服务是进程级单例、失败计数跨批次累加，故记录批次开始时的基线，
+        // 只统计本批次新产生的写入失败，避免把历史累计值报给用户。
+        int logFailBefore = _log.FailedWrites;
         string output = req.Mode == OperationMode.Rename ? req.SourceFolder : req.OutputFolder;
 
         if (string.IsNullOrWhiteSpace(req.SourceFolder) || !Directory.Exists(req.SourceFolder))
@@ -237,11 +240,12 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
-        if (_log.FailedWrites > 0)
+        int logFailed = _log.FailedWrites - logFailBefore;
+        if (logFailed > 0)
         {
             progress.Report(new OrganizeProgress
             {
-                LogLine = $"警告：有 {_log.FailedWrites} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
+                LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
                           "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
             });
         }
@@ -257,6 +261,8 @@ public sealed class OrganizeService : IOrganizeService
     public async Task<OrganizeReport> ArchiveByDateAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
+        // 与 RunAsync 同口径：失败计数是进程级单例的累计值，取基线后只统计本批次新增。
+        int logFailBefore = _log.FailedWrites;
 
         if (string.IsNullOrWhiteSpace(req.SourceFolder) || !Directory.Exists(req.SourceFolder))
         {
@@ -397,6 +403,17 @@ public sealed class OrganizeService : IOrganizeService
         finally
         {
             _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
+        }
+
+        // 归档模式同样写 rename_log.csv（分散在各日期子目录），写盘失败的静默风险与 RunAsync 相同。
+        int logFailed = _log.FailedWrites - logFailBefore;
+        if (logFailed > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
+                          "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
+            });
         }
 
         progress.Report(new OrganizeProgress
