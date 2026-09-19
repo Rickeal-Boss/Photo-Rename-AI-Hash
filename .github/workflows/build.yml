@@ -112,6 +112,53 @@ jobs:
 
 
 
+      # =====================================================================
+      # 能力护栏（阻断式，只读）：manifest 的能力声明漂移，后果不是报错而是静默失败
+      # （broadFileSystemAccess 默认 Off —— 路径式 WinRT 访问在用户机器上静默失败；
+      #  internetClient 对 full-trust 桌面应用本来就无意义，它只约束 AppContainer）。
+      # 删除动作与本护栏同批落地：只删不开护栏 = 给将来埋静默失败；
+      # 只开护栏不删 = 护栏立刻误伤自己解释「为什么不用」的文档注释。
+      # =====================================================================
+      - name: Assert manifest capabilities (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:capability-assert-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $m = Get-Content (Join-Path $env:GITHUB_WORKSPACE "Package.appxmanifest") -Raw
+
+          # 1) 已裁定删除的能力不得再出现（0 = 无命中）
+          $forbidden = @('broadFileSystemAccess', 'internetClient', 'picturesLibrary')
+          $fhits = @()
+          foreach ($c in $forbidden) { if ($m -match ('Name="' + $c + '"')) { $fhits += $c } }
+
+          # 2) runFullTrust 必须在；用了 rescap:Capability 就必须在 IgnorableNamespaces 里声明 rescap
+          $hasRunFullTrust = ($m -match 'Name="runFullTrust"')
+          $hasRescapNs     = ($m -match 'IgnorableNamespaces="[^"]*rescap')
+
+          # 3) 摘掉 broadFileSystemAccess 后，禁止再把「路径式 WinRT 文件访问」加回来。
+          #    这类 API 受该能力门控，而它默认 Off —— 用户机器上会静默失败。
+          #    必须排除注释行：OrganizeService.cs 里解释「为什么不用它」的文档注释
+          #    不含真实调用；不排除会让 CI 红在一段注释上，护栏从此没人信。
+          $pathHits = @(Get-ChildItem -Path . -Recurse -Filter *.cs |
+                        Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
+                        Select-String -Pattern 'GetFolderFromPathAsync|GetFileFromPathAsync|Windows\.Storage\.Storage(Folder|File)|KnownFolders\.' |
+                        Where-Object { $_.Line -notmatch '^\s*(//|///|\*)' })
+          $hasPath = ($pathHits.Count -gt 0)
+
+          $line = "CAPGUARD forbidden=" + $fhits.Count + " runFullTrust=" + $hasRunFullTrust + " rescap=" + $hasRescapNs + " pathWinRT=" + $hasPath + " pathHits=" + $pathHits.Count
+          $line >> ci-diagnostics.log
+          Write-Host $line
+
+          if ($fhits.Count -gt 0) { Write-Error ("manifest 出现已裁定删除的能力声明：" + ($fhits -join ', ') + "（full-trust 桌面应用不需要它们，且 bFSA 默认 Off 只会带来静默失败）"); exit 1 }
+          if (-not $hasRunFullTrust) { Write-Error "manifest 缺失 runFullTrust：WinUI 3 桌面应用是 Win32 全信任模型，没有它无法达到 mediumIL"; exit 1 }
+          if (($m -match 'rescap:Capability') -and (-not $hasRescapNs)) { Write-Error "使用了 rescap:Capability，但 IgnorableNamespaces 未包含 rescap，部署时会被平台拒绝"; exit 1 }
+          if ($hasPath) { Write-Error ("未声明 broadFileSystemAccess，但源码非注释行存在路径式 WinRT 文件访问：" + (($pathHits | ForEach-Object { $_.Filename + ':' + $_.LineNumber }) -join ', ') + "。该能力默认 Off，用户机器上会静默失败"); exit 1 }
+
+          Write-Host ("CAPGUARD result: " + $fhits.Count + " / " + $hasRunFullTrust + "·" + $hasRescapNs + " / " + $hasPath + " / " + $pathHits.Count)
+          "CHECKPOINT:capability-assert-done" >> ci-diagnostics.log
+
+
+
       - name: Restore
 
         shell: pwsh
