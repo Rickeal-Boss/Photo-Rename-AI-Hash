@@ -53,7 +53,18 @@
     <rescap:Capability Name="runFullTrust" />
     <!-- AI 视觉识别需要访问智谱 / 通义等 HTTPS 接口 -->
     <rescap:Capability Name="internetClient" />
-    <!-- 文件整理/备份需要读写用户通过 FolderPicker 选择的任意文件夹（System.IO 在 MSIX 容器内依赖此能力） -->
+    <!--
+      broadFileSystemAccess 服务的是「通过 Windows.Storage 的路径式 API
+      （StorageFolder.GetFolderFromPathAsync 等）访问 FolderPicker 之外的文件」。
+      两点必须说清，旧注释（"System.IO 在 MSIX 容器内依赖此能力"）是错的：
+      1) full-trust / mediumIL 下 System.IO 根本不受此能力门控，它只作用于 Windows.Storage；
+         FolderPicker 选出来的文件夹自带 Broker 令牌，也不需要这个能力。
+      2) 本轮备份改走 System.IO.File.Copy 绕开门控，原因不是"缺这个能力"，而是该能力
+         默认 Off，且授权后必须重启应用才生效（broker 在进程创建时快照能力授予）——
+         就算做授权引导，用户操作完也还是失败。
+      声明本身必须保留：它是「设置 → 隐私和安全性 → 文件系统」里本应用条目的存在前提。
+      删掉会让已授予授权的用户失去开关，也会让备份失败提示指向一个不存在的开关。
+    -->
     <rescap:Capability Name="broadFileSystemAccess" />
   </Capabilities>
 </Package>
