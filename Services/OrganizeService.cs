@@ -176,6 +176,10 @@ public sealed class OrganizeService : IOrganizeService
                         throw;
                     }
                 }
+                // 逐文件级（IsBatchLevel == false）有意「既不累加也不归零」：
+                // 不累加 → 单个坏文件（如无法解码）不会触发熔断；
+                // 不归零 → 也不掩盖此前已累积的整批级证据（4xx → 4xx → 解码失败 → 4xx 仍会中止）。
+                // 归零只发生在上面 try 分支里「文件被成功处理」时。
             }
             catch (Exception ex)
             {

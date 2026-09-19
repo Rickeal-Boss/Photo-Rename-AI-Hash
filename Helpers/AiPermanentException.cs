@@ -9,8 +9,9 @@ namespace PhotoRenameAIHash.Helpers;
 /// 与「瞬时限流」严格区分：HTTP 429 + 业务码 1302（并发超限）/ 1305（平台过载）仍走
 /// 15×15s 重试 + 单文件 10 次重排队，属用户已裁定的有意设计，不得改变。
 /// 继承 <see cref="PermanentOperationException"/> 以复用「不重试」语义；
-/// <c>IsEnvironmentError</c> 取 false——AI 账户问题虽对同批其它文件也成立，但按既定口径
-/// 仍按单文件失败处理（不改变现行为）。
+/// <c>IsEnvironmentError</c> 取 false——AI 账户问题虽对同批其它文件也成立，但仍先按单文件
+/// 失败处理：不重排队重试该文件；连续 3 个文件命中且 <c>IsBatchLevel</c> 为 true 时才中止整批
+/// （单次 15×15s 重试与单文件 10 次重排队的次数与间隔均未改变）。
 /// </summary>
 public sealed class AiPermanentException : PermanentOperationException
 {
