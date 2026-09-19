@@ -36,7 +36,7 @@ PhotoRenameAIHash/
 │  ├─ NvidiaImageAnalysisService.cs  # AI vision engine: NVIDIA
 │  ├─ CustomImageAnalysisService.cs  # AI vision engine: 自定义 OpenAI 兼容端点
 │  └─ AppServices.cs         # Singleton service locator
-├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, RateGate, ThemeHelper, DpiHelper, AiPermanentException, PermanentOperationException
+├─ Helpers/                  # ImageDecoder (resize/JPEG re-encode), ImageAnalysisHelper, AiProviderProfile (per-vendor rate-limit/retry policy), RateGate, ThemeHelper, DpiHelper, AiPermanentException, PermanentOperationException
 ├─ ViewModels/               # Main / Organize / Settings / About (CommunityToolkit.Mvvm)
 ├─ Views/                    # Organize / Settings / About pages (XAML + code-behind)
 └─ Styles/Styles.xaml        # Shared styles & resources
