@@ -33,6 +33,25 @@ public partial class SettingsViewModel : ObservableObject
         CustomApiKey = _model.CustomApiKey;
         OnPropertyChanged(nameof(ThemeIndex)); // 与 Theme 赋值保持一致，确保索引计算属性就绪
         _initializing = false;
+
+        ShowUndecryptableKeysWarningIfNeeded();
+    }
+
+    /// <summary>
+    /// 本机 Windows 凭据解不开已保存的 API Key（settings.json 从其它账户 / 其它机器拷来、或密钥已不可恢复）时提示用户。
+    /// 此时 <see cref="ISettingsService.Load"/> 已把这些字段置空——不提示的话用户看到空 Key 会以为「从没填过」，
+    /// 而直接开始整理会拿到 401。
+    /// </summary>
+    /// <remarks>标志只挂在 <see cref="SettingsService"/> 实现上：不进 <see cref="ISettingsService"/> 契约、
+    /// 也不进 <see cref="AppSettings"/>（设置字段有兼容红线），故此处按具体类型读取。</remarks>
+    private void ShowUndecryptableKeysWarningIfNeeded()
+    {
+        if (_settings is not SettingsService settings) return;
+        if (!settings.LastLoadHadUndecryptableKeys) return;
+
+        StatusText = "本机 Windows 凭据无法解密已保存的 API Key（设置文件可能来自其它账户或机器），已置空，请重新填写后保存。";
+        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
+        StatusBarOpen = true;
     }
 
     /// <summary>Maps AppTheme -> RadioButtons index (0=Light, 1=Dark, 2=System).</summary>
@@ -175,5 +194,7 @@ public partial class SettingsViewModel : ObservableObject
     public void SyncOwnedFieldsFromDisk()
     {
         DefaultFolder = _settings.Load().DefaultFolder;
+        // 设置页整会话只构造一次，解密失败提示要跟着最新的磁盘状态刷新（用户重填保存后不再提示）
+        ShowUndecryptableKeysWarningIfNeeded();
     }
 }
