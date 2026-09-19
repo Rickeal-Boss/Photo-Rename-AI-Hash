@@ -120,10 +120,10 @@ public sealed class OrganizeService : IOrganizeService
                     LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
                 });
             }
-            catch (AiPermanentException ex)
+            catch (PermanentOperationException ex)
             {
-                // 永久性 AI 错误（欠费 / 额度耗尽 / 无权限 / 模型不存在）：重试无法恢复，
-                // 直接标记失败且不再入队，避免对同一文件刷 10 行「重试」并白白占用 UI 进度。
+                // 永久性错误（AI 欠费 / 额度耗尽 / 无权限 / 模型不存在，或备份盘满 / 备份权限未授予）：
+                // 重试无法恢复，直接标记失败且不再入队，避免对同一文件刷 10 行「重试」并白白占用 UI 进度。
                 report.Failed++;
                 done++;
                 var permEntry = new RenameLogEntry
@@ -139,6 +139,13 @@ public sealed class OrganizeService : IOrganizeService
                     Result = permEntry,
                     LogLine = $"{f.Name} [错误] {ex.Message}",
                 });
+
+                if (ex.IsEnvironmentError)
+                {
+                    // 环境级错误对整批文件都成立（如备份盘已满、权限未授予）：继续处理后续文件无意义，
+                    // 直接中止整批并向上报告，由 VM 显示明确提示。已成功处理的文件保持已处理状态，不回滚。
+                    throw;
+                }
             }
             catch (Exception ex)
             {
@@ -433,16 +440,29 @@ public sealed class OrganizeService : IOrganizeService
         return "已移动";
     }
 
+    // HRESULT_FROM_WIN32：ERROR_DISK_FULL(112) / ERROR_OUTOFMEMORY(14) / ERROR_NOT_ENOUGH_MEMORY(8)。
+    // 以负 int 常量比较，避免 0x8xxxxxxx 字面量溢出 int。
+    private const int ErrorDiskFull = unchecked((int)0x80070070);
+    private const int ErrorOutOfMemory = unchecked((int)0x8007000E);
+    private const int ErrorNotEnoughMemory = unchecked((int)0x80070008);
+
     /// <summary>
     /// 重命名模式实际执行前的保险：把原文件复制一份到备份文件夹。
     /// 采用 MSIX 容器下唯一可靠的写法——通过 FolderPicker 选择路径取得的 StorageFolder/StorageFile
     /// （携带 Broker 令牌）做 CopyAsync，忽略同名冲突（自动加序号），保证无论是否声明
-    /// broadFileSystemAccess 都能真正落盘到用户选择的备份文件夹；备份失败直接抛异常，
-    /// 由 <see cref="RunAsync"/> 的逐文件 try/catch 标记为「错误」且不执行 rename，避免丢失原文件。
+    /// broadFileSystemAccess 都能真正落盘到用户选择的备份文件夹。
+    /// 失败一律抛 <see cref="PermanentOperationException"/>（IsEnvironmentError=true）：备份失败是
+    /// 阻断性的、重试无意义，由 <see cref="RunAsync"/> 标记「错误」且不执行 rename，避免丢失原文件；
+    /// 磁盘空间不足单独识别并给出与「权限未授予」不同的提示，避免误导用户排障。
     /// </summary>
     private static async Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        // 事前空间检查：等 CopyAsync 写到一半才失败既浪费一次尝试，又可能在备份目录留下不完整文件。
+        // 检查本身任何异常都降级为「跳过检查」（见 EnsureEnoughFreeSpace），绝不能阻断备份。
+        EnsureEnoughFreeSpace(backupDir, source);
+
         try
         {
             var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir);
@@ -452,14 +472,70 @@ public sealed class OrganizeService : IOrganizeService
                 Path.GetFileName(source),
                 Windows.Storage.NameCollisionOption.GenerateUniqueName);
         }
+        catch (OperationCanceledException)
+        {
+            throw; // 取消语义不得被包装，否则 TaskCanceledException 会被当成失败吞掉
+        }
         catch (Exception ex)
         {
-            // 备份失败（常见于未授予本应用「文件系统」访问权限 / 路径不可访问）：包装为明确提示，
-            // 由 RunAsync 的逐文件 try/catch 标记「错误」且不执行重命名，避免原文件丢失。
-            throw new InvalidOperationException(
-                $"备份原始文件失败（请确认已在系统设置中授予本应用「文件系统」访问权限，且备份路径可访问）：{ex.Message}", ex);
+            // 磁盘空间不足：与「权限未授予 / 路径不可访问」区分开，给出可定位的真因
+            if (IsDiskFull(ex))
+            {
+                uint hr = unchecked((uint)ex.HResult);
+                throw new PermanentOperationException(
+                    $"备份失败：写入时磁盘空间不足（0x{hr:X8}）。请清理磁盘或更换备份文件夹后再试。" +
+                    "（备份目录可能残留不完整文件，请检查。）",
+                    isEnvironmentError: true, ex);
+            }
+
+            // 其余失败（未授予文件系统访问权限 / 路径不可访问 / 文件被占用等）：保留原引导语义，
+            // 但改抛永久错误——备份失败是阻断性的，重排队重试无意义。
+            throw new PermanentOperationException(
+                "备份原始文件失败（请确认已在系统设置中授予本应用「文件系统」访问权限，且备份路径可访问）：" + ex.Message,
+                isEnvironmentError: true, ex);
         }
     }
+
+    /// <summary>
+    /// 备份前的事前空间检查：比较目标驱动器可用空间与源文件大小，留安全余量（1 MB 或源文件大小的 1%，
+    /// 取较大者）。空间不足直接抛环境级永久错误，避免 CopyAsync 写到一半才失败。
+    /// 检查本身任何异常都降级为「跳过检查」——UNC 路径、无盘符、驱动器未就绪、DriveInfo 在 MSIX
+    /// 容器下不可用等情况一律放行，让 CopyAsync 自己报错；检查绝不能阻断正常的备份流程。
+    /// </summary>
+    private static void EnsureEnoughFreeSpace(string backupDir, string source)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(backupDir);
+            if (string.IsNullOrEmpty(root)) return; // 无盘符（相对路径 / UNC）：无法判定，跳过
+
+            long size = new FileInfo(source).Length;
+            long free = new DriveInfo(root).AvailableFreeSpace;
+
+            // 安全余量：1 MB 或源文件大小的 1%，取较大者（小文件也至少留 1 MB，避免恰好写满）
+            long margin = Math.Max(1024L * 1024L, size / 100);
+            long need = size + margin;
+            if (free >= need) return;
+
+            throw new PermanentOperationException(
+                $"备份失败：目标驱动器 {root} 可用空间不足（需要 {need:N0} 字节，可用 {free:N0} 字节）。" +
+                "请清理磁盘或更换备份文件夹后重试。",
+                isEnvironmentError: true);
+        }
+        catch (PermanentOperationException)
+        {
+            throw; // 确实空间不足：这是最终结论，必须向上抛出
+        }
+        catch
+        {
+            // 其余情况（UNC / 无盘符 / 驱动器未就绪 / DriveInfo 不可用）：跳过检查
+        }
+    }
+
+    /// <summary>是否为「磁盘或内存不足以完成写入」的 HRESULT。备份写入中途失败的典型真因，
+    /// 必须与「权限未授予 / 路径不可访问」区分，否则提示会误导用户排障。</summary>
+    private static bool IsDiskFull(Exception ex)
+        => ex.HResult == ErrorDiskFull || ex.HResult == ErrorOutOfMemory || ex.HResult == ErrorNotEnoughMemory;
 
     /// <summary>
     /// 计算最终写入目标路径：
