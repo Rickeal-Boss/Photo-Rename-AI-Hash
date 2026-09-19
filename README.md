@@ -51,9 +51,9 @@ PhotoRenameAIHash/
 
 ## Installing
 
-The release artifact contains **four files, all of which must be kept in the same folder**.
-Only the first three take part in the installation — `安装说明.txt` is documentation
-(`Install.bat` locates the package by `dir /b PhotoRenameAIHash*_x64.msix` and never reads it):
+The release artifact contains **four files — keep them together**. Only the first three are
+needed to install — `安装说明.txt` is documentation (`Install.bat` locates the package by
+`dir /b PhotoRenameAIHash*_x64.msix` and never reads it, so it is not required):
 
 | File | Purpose |
 |------|---------|
