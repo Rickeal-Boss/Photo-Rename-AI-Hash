@@ -49,6 +49,33 @@ PhotoRenameAIHash/
 - **MD5 hashing**: `HashService` computes content MD5 (via `System.Security.Cryptography`)
   for conflict detection and the rename log; no native dependencies.
 
+## Installing
+
+Download all three files — they **must be kept in the same folder**:
+
+| File | Purpose |
+|------|---------|
+| `PhotoRenameAIHash_<version>_x64.msix` | the app package (self-contained, no runtime prerequisites) |
+| `PhotoRenameAIHash.cer` | the publisher certificate (public key only) |
+| `Install.bat` | trusts the certificate, then installs the package |
+
+Then **right-click `Install.bat` and choose "Run as administrator"**. Elevation is required
+because the certificate is imported into the machine-level `TrustedPeople` store.
+
+> Double-clicking the `.msix` alone will fail with *publisher not trusted*: the certificate has
+> to be trusted first, which is exactly what `Install.bat` does.
+
+To uninstall: **Settings → Installed apps → PhotoRenameAIHash**, or in PowerShell:
+
+```powershell
+Get-AppxPackage *PhotoRenameAIHash* | Remove-AppxPackage
+```
+
+Settings and saved API keys are stored in `%USERPROFILE%\.PhotoRenameAIHash\settings.json`.
+This location is **not** subject to MSIX write virtualization, so it survives uninstalling or
+resetting the app. A `settings.json` left behind by an older version in
+`%LOCALAPPDATA%\PhotoRenameAIHash\` is migrated automatically on first launch.
+
 ## Build & Run
 
 ### Prerequisites
