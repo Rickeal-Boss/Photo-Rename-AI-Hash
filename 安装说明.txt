@@ -1,0 +1,49 @@
+PhotoRenameAIHash 安装说明
+================================================
+
+【一、安装前】
+请确保下面三个文件在「同一个文件夹」内，缺一不可：
+
+  1. PhotoRenameAIHash_<版本>_x64.msix   —— 应用安装包（自包含，无需预装运行时）
+  2. PhotoRenameAIHash.cer               —— 发布者证书（仅公钥）
+  3. Install.bat                         —— 安装脚本（信任证书 + 安装包）
+
+只下载 .msix 直接双击会失败，原因见下方「常见问题」。
+
+
+【二、安装步骤】
+  1. 在 Install.bat 上点击鼠标「右键」
+  2. 选择「以管理员身份运行」
+     —— 证书需要写入系统级存储，必须管理员权限
+  3. 看到 "Done!" 即安装完成
+     之后可在开始菜单找到 PhotoRenameAIHash
+
+
+【三、常见问题】
+  · 只下载了 .msix 直接双击
+      会提示「发布者不受信任」而安装失败。
+      必须先信任证书 —— 这正是 Install.bat 做的事。
+
+  · 提示权限不足 / 证书导入失败
+      请确认是右键选择「以管理员身份运行」，而不是直接双击。
+
+  · 提示应用正在运行（错误码 0x80073D02）
+      请完全退出 PhotoRenameAIHash 后重试。
+
+  · 提示已安装相同版本（错误码 0x80073CFB）
+      请先卸载旧版本，或下载更高版本的安装包。
+
+
+【四、卸载方法】
+  方法一：设置 → 已安装的应用 → 搜索 PhotoRenameAIHash → 卸载
+  方法二：在 PowerShell 中执行
+              Get-AppxPackage *PhotoRenameAIHash* | Remove-AppxPackage
+
+
+【五、配置与 API Key 保存位置】
+  %USERPROFILE%\.PhotoRenameAIHash\settings.json
+
+  该位置不受 MSIX 写虚拟化影响，因此「卸载应用不会删除」你的命名模板、
+  默认目录与已保存的 API Key。
+  如果旧版本曾在 %LOCALAPPDATA%\PhotoRenameAIHash\ 留下 settings.json，
+  新版本首次启动时会自动迁移过来，无需手动复制。

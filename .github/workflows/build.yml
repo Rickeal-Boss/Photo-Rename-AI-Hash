@@ -1141,6 +1141,8 @@ jobs:
 
           Copy-Item $bat -Destination $stage -Force
 
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "安装说明.txt") -Destination $stage -Force
+
           $files = @(Get-ChildItem $stage -File)
 
           foreach ($f in $files) { Write-Host ("  staged: " + $f.Name + " (" + $f.Length + " bytes)") }
