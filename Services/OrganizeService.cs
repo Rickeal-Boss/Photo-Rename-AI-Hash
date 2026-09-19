@@ -144,6 +144,11 @@ public sealed class OrganizeService : IOrganizeService
                 {
                     // 环境级错误对整批文件都成立（如备份盘已满、权限未授予）：继续处理后续文件无意义，
                     // 直接中止整批并向上报告，由 VM 显示明确提示。已成功处理的文件保持已处理状态，不回滚。
+                    // 中止前先报告进度：否则 throw 会跳过末尾的完成汇总，用户不知已处理了多少。
+                    progress.Report(new OrganizeProgress
+                    {
+                        LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
+                    });
                     throw;
                 }
             }
@@ -422,22 +427,36 @@ public sealed class OrganizeService : IOrganizeService
             return "模拟(" + opName + ")";
 
         bool overwrite = req.Conflict == ConflictStrategy.Overwrite;
-        if (req.Mode == OperationMode.Rename)
+        try
         {
-            if (string.Equals(target, source, StringComparison.OrdinalIgnoreCase))
-                return "未改动(内容相同)";
+            if (req.Mode == OperationMode.Rename)
+            {
+                if (string.Equals(target, source, StringComparison.OrdinalIgnoreCase))
+                    return "未改动(内容相同)";
+                File.Move(source, target, overwrite);
+                return "已重命名";
+            }
+
+            if (req.Mode == OperationMode.Copy)
+            {
+                File.Copy(source, target, overwrite);
+                return "已复制";
+            }
+
             File.Move(source, target, overwrite);
-            return "已重命名";
+            return "已移动";
         }
-
-        if (req.Mode == OperationMode.Copy)
+        catch (IOException ex) when (IsDiskFull(ex))
         {
-            File.Copy(source, target, overwrite);
-            return "已复制";
+            // 写入目标盘空间不足：与备份同源的永久错误。重排队 10 次无意义（每次还可能重复调用 AI），
+            // 且必须给出可定位的真因，而不是让 IOException 的原始信息裸奔。
+            // 过滤器只接磁盘/内存不足，其余 IOException（如文件被占用）继续向上走重试逻辑，行为不变。
+            uint hr = unchecked((uint)ex.HResult);
+            throw new PermanentOperationException(
+                $"写入失败：目标驱动器磁盘空间不足（0x{hr:X8}）。请清理磁盘或更换输出文件夹后再试。" +
+                "（输出目录可能残留不完整文件，请检查。）",
+                isEnvironmentError: true, ex);
         }
-
-        File.Move(source, target, overwrite);
-        return "已移动";
     }
 
     // HRESULT_FROM_WIN32：ERROR_DISK_FULL(112) / ERROR_OUTOFMEMORY(14) / ERROR_NOT_ENOUGH_MEMORY(8)。
