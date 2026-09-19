@@ -174,13 +174,15 @@ public static class ImageAnalysisHelper
                 // 429 里可能承载平台业务错误码：账户欠费/额度耗尽/套餐到期/无权限属永久错误，
                 // 重试无意义（否则单文件会空转到退避预算耗尽再被上层重排 10 次）。此处按档位规则短路。
                 // 仅对 429 生效，5xx 永不判永久（保持既有语义）。
-                if (code == 429 && TryMatchPermanent(profile, respText, resp, out var why))
+                // 注意：此处 out var 写在 if 条件里，变量作用域会泄漏到外层 using 块（C# 7 语义），
+                // 故取专用名 permWhy —— 与下面限流分支的 rateWhy 区分，避免 CS0136 撞名。
+                if (code == 429 && TryMatchPermanent(profile, respText, resp, out var permWhy))
                 {
                     // 抛专用类型而非 HttpRequestException：让 OrganizeService 能按「类型」判定永久错误并跳过
                     // 文件级重排队，同时不误伤「瞬时限流重试耗尽」（那也是 HttpRequestException(429)，
                     // 属用户已裁定的有意重试设计）。
                     throw new AiPermanentException(
-                        $"视觉识别接口返回 429（{why}，重试无意义）：{Snippet(respText)}");
+                        $"视觉识别接口返回 429（{permWhy}，重试无意义）：{Snippet(respText)}");
                 }
 
                 // 429 限流 / 5xx 服务端错误：按策略档退避后重试，期间不做任何重命名
@@ -192,12 +194,12 @@ public static class ImageAnalysisHelper
                         // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），
                         // 调用方按状态码判定而非解析文案。异常文案必须区分「次数耗尽」与「退避预算耗尽」
                         // 并给出累计秒数——只说「限流」会误导用户以为再等等就好（P23）。
-                        var why = attempt >= pol.MaxAttempts
+                        var rateWhy = attempt >= pol.MaxAttempts
                             ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
                             : $"累计 {sw.Elapsed.TotalSeconds:F0}s 已耗尽退避预算 {pol.TotalBudget.TotalSeconds:F0}s";
                         throw new HttpRequestException(
                             $"视觉识别接口限流/错误（{code} {resp.StatusCode}），" +
-                            $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，{why}：{Snippet(respText)}",
+                            $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，{rateWhy}：{Snippet(respText)}",
                             null, resp.StatusCode);
                     }
 
