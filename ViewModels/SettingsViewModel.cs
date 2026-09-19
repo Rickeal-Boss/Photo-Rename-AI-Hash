@@ -180,7 +180,27 @@ public partial class SettingsViewModel : ObservableObject
         _model.ZhipuApiKey = ZhipuApiKey;
         _model.QwenApiKey = QwenApiKey;
         _model.NvidiaApiKey = NvidiaApiKey;
-        _model.CustomApiUrl = CustomApiUrl;
+        // D-5：CustomApiUrl 不在 DPAPI 加密清单内，是明文落盘的；而 Google 的 OpenAI 兼容端点等
+        // 把密钥写在 ?key= 里（Gemini host 嗅探会招徕这种粘贴）。保存前把这类查询参数摘出来：
+        // 回填到密钥框（走 DPAPI 加密），并从 URL 移除。解析失败 / 无内嵌密钥 → 原样保存，
+        // 绝不因 URL 格式问题阻止用户保存（P24 精神：持久化问题不能让保存按钮静默失效）。
+        var urlNote = "";
+        var customUrl = StripSecretFromUrl(CustomApiUrl, out var embeddedKey);
+        _model.CustomApiUrl = customUrl;
+        if (embeddedKey.Length > 0)
+        {
+            CustomApiUrl = customUrl; // 回写 VM：否则输入框仍显示带密钥的 URL（P33 谎报）
+            if (string.IsNullOrWhiteSpace(CustomApiKey))
+            {
+                CustomApiKey = embeddedKey; // 下方会写入 _model.CustomApiKey → 走 DPAPI
+                urlNote = "已从端点 URL 中移出密钥，改存到加密的 API Key 框。";
+            }
+            else
+            {
+                urlNote = "已从端点 URL 中移除内嵌密钥（API Key 框已有值，未覆盖）。";
+            }
+        }
+
         _model.CustomApiModel = CustomApiModel;
         _model.CustomApiKey = CustomApiKey;
         // P1-D：一次性吃掉全部脏输入 —— NaN（NumberBox 清空文本时 Value 就是 NaN）、±∞、
@@ -199,9 +219,69 @@ public partial class SettingsViewModel : ObservableObject
         // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新
         OnPropertyChanged(nameof(AiProviderIndex));
         OnPropertyChanged(nameof(CustomProviderVisibility));
-        StatusText = "设置已保存。";
+        StatusText = "设置已保存。" + urlNote;
         StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：保存成功
         StatusBarOpen = true;
+    }
+
+    /// <summary>端点 URL 里承载密钥的查询参数名（大小写不敏感）。</summary>
+    private static readonly string[] SecretQueryKeys =
+    {
+        "key", "api-key", "api_key", "apikey", "access_token", "token",
+    };
+
+    /// <summary>
+    /// 把端点 URL 查询串里的密钥参数摘出来并从 URL 中移除（保留其它查询参数与锚点）。
+    /// 找不到 / 解析失败 → 原样返回输入，<paramref name="secret"/> 为空串。
+    /// <b>整段包 try/catch</b>：这是保存路径，绝不能让 URL 解析异常把整个保存搞挂（P24）。
+    /// </summary>
+    private static string StripSecretFromUrl(string? url, out string secret)
+    {
+        secret = "";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(url)) return url ?? "";
+            if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)) return url;
+
+            var query = uri.Query; // 含前导 '?'；无查询串时为 ""
+            if (query.Length <= 1) return url;
+
+            var kept = new List<string>();
+            foreach (var pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                int eq = pair.IndexOf('=');
+                var name = eq >= 0 ? pair.Substring(0, eq) : pair;
+                var value = eq >= 0 ? pair.Substring(eq + 1) : "";
+                // 只摘第一个命中的非空值，其余同名参数按普通参数保留（不猜用户意图）
+                if (secret.Length == 0 && value.Length > 0 && IsSecretKeyName(name))
+                {
+                    secret = Uri.UnescapeDataString(value);
+                    continue;
+                }
+                kept.Add(pair);
+            }
+
+            if (secret.Length == 0) return url; // 无内嵌密钥：原样
+
+            var newQuery = kept.Count > 0 ? "?" + string.Join("&", kept) : "";
+            // GetLeftPart(Path) 只到路径为止（不含查询与锚点），Fragment 自带 '#'
+            return uri.GetLeftPart(UriPartial.Path) + newQuery + uri.Fragment;
+        }
+        catch
+        {
+            secret = "";
+            return url ?? "";
+        }
+    }
+
+    private static bool IsSecretKeyName(string name)
+    {
+        var n = name.Trim();
+        foreach (var k in SecretQueryKeys)
+        {
+            if (n.Equals(k, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     /// <summary>
