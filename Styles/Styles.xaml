@@ -3,13 +3,6 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ═══════════════════════════════════════════
-         主题感知背景刷子
-         ═══════════════════════════════════════════ -->
-    <!-- 当前未被引用，保留待用 -->
-    <SolidColorBrush x:Key="NavPaneBackgroundBrush"
-                     Color="{ThemeResource SolidBackgroundFillColorSecondary}" />
-
-    <!-- ═══════════════════════════════════════════
          统一栅格与间距规范（全页面共用，避免三页各一套标准）
          ═══════════════════════════════════════════ -->
     <x:Double x:Key="PageContentMaxWidth">880</x:Double>
