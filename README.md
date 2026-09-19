@@ -73,3 +73,10 @@ it as the `PhotoRenameAIHash-msix` artifact together with the signing certificat
   no separate .NET / Windows App SDK runtime install is needed.
 - EXIF-based date parsing uses the photo's original capture time (`DateTimeOriginal`) and falls
   back to file last-write time when metadata is unavailable (toggleable on the Organize page).
+- **Uninstall & settings**: MSIX apps live under `C:\Program Files\WindowsApps` and are invisible
+  in Explorer — uninstall from **Settings → Installed apps → PhotoRenameAIHash**, or run
+  `Get-AppxPackage *PhotoRenameAIHash* | Remove-AppxPackage` in PowerShell.
+  Settings and API keys live in `%USERPROFILE%\.PhotoRenameAIHash\settings.json`; the profile
+  root is **not** subject to MSIX write-virtualization, so uninstalling does **not** delete them.
+  A `settings.json` left in `%LOCALAPPDATA%\PhotoRenameAIHash\` by an older version is migrated
+  automatically on the first launch of the new version.
