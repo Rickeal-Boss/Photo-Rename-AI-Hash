@@ -148,7 +148,15 @@ public sealed class RenameLogService
         return result.ToArray();
     }
 
-    private static string Csv(string s) => "\"" + (s ?? "").Replace("\"", "\"\"") + "\"";
+    /// <summary>
+    /// CSV 字段转义：引号翻倍，并把 CR / LF 折成空格。
+    /// 后者不是形式主义——Windows 文件名不可能含换行，但 <c>ex.Message</c> 可以；
+    /// 一个含换行的 Message 会把一行记录劈成两行：第一段 Status 仍在列 3、主索引不受影响，
+    /// 但若续行恰好凑够 ≥7 列且列 3 不含「错误」，会被解析成一条假的「已完成」记录，
+    /// 导致该文件被永久跳过。概率极低但非零，且与「跳过(已存在)污染续传索引」同源，1 行堵掉。
+    /// </summary>
+    private static string Csv(string s)
+        => "\"" + (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
 }
 
 /// <summary>已完成文件索引：用于启动时断点续传跳过。键忽略大小写。</summary>
