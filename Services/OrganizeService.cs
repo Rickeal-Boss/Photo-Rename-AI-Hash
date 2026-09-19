@@ -95,6 +95,10 @@ public sealed class OrganizeService : IOrganizeService
         var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
 
+        // 连续命中「不可恢复的识别错误」的文件数。达到阈值说明该问题（账户欠费 / 额度耗尽 /
+        // 模型不存在 / 参数非法）对整批都成立，继续只会产生 N 次必然失败的请求与 N 行同因错误。
+        int consecutivePermanent = 0;
+
         // A-01：重试会把同一文件重新入队，但重试只应针对「AI 之后」的失败（目标被占用、
         // 备份失败、路径异常等）。缓存成功结果，避免单文件最坏 10 次重复计费与请求放大；
         // AI 自身失败（异常）不入缓存，重试仍会重新请求（瞬时故障需要重试）。
@@ -112,6 +116,7 @@ public sealed class OrganizeService : IOrganizeService
             {
                 var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache).ConfigureAwait(false);
                 Categorize(report, entry);
+                consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                 done++;
                 progress.Report(new OrganizeProgress
                 {
@@ -148,6 +153,21 @@ public sealed class OrganizeService : IOrganizeService
                     progress.Report(new OrganizeProgress
                     {
                         LogLine = $"已中止：{ex.Message}（此前已处理 {done} 个，共 {files.Count} 个）",
+                    });
+                    throw;
+                }
+
+                // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
+                // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
+                consecutivePermanent++;
+                if (consecutivePermanent >= 3)
+                {
+                    // 不改变单次重试（15×15s）与单文件重排队（10 次）的既定口径，
+                    // 只把「整批继续」的终止时机提前。
+                    progress.Report(new OrganizeProgress
+                    {
+                        LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
+                                  $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
                     });
                     throw;
                 }
