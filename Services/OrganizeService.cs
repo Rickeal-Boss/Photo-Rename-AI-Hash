@@ -567,6 +567,10 @@ public sealed class OrganizeService : IOrganizeService
     /// </summary>
     private async Task<string> ExecuteAsync(OrganizeRequest req, string source, string target, string? targetMd5, string md5, string opName, CancellationToken ct)
     {
+        // 入口检查：File.Copy / File.Move 没有 CancellationToken 重载，真正可中断需改写成
+        // FileStream.CopyToAsync(dest, 81920, ct)——本轮不做，此处仅保证「已取消时不再动盘」。
+        ct.ThrowIfCancellationRequested();
+
         // ResolveTarget 已判定「目标存在且内容与源相同」时直接复用结论；
         // Overwrite 路径下 targetMd5 是旧内容 MD5 ≠ 源 md5，不会被误判。
         if (File.Exists(target) && !string.IsNullOrEmpty(targetMd5) && targetMd5 == md5)
@@ -633,12 +637,14 @@ public sealed class OrganizeService : IOrganizeService
 
         try
         {
-            var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir);
-            var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source);
+            // WinRT 异步默认不可取消，必须 .AsTask(ct)：否则备份大文件时点「取消」要等拷贝整个跑完。
+            // 写法与 Helpers/ImageDecoder.cs 一致；取消抛出的 OperationCanceledException 由下方 catch 原样上抛。
+            var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir).AsTask(ct).ConfigureAwait(false);
+            var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source).AsTask(ct).ConfigureAwait(false);
             await srcFile.CopyAsync(
                 backupFolder,
                 Path.GetFileName(source),
-                Windows.Storage.NameCollisionOption.GenerateUniqueName);
+                Windows.Storage.NameCollisionOption.GenerateUniqueName).AsTask(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
