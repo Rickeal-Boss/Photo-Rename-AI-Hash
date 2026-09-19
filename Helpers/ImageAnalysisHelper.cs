@@ -121,7 +121,10 @@ public static class ImageAnalysisHelper
         // 并遵从服务端给出的重试时间提示；重试期间不返回任何结果，
         // 因此调用方不会据此产出 unknown_ 重命名；限流解除后继续。
         var pol = profile.Retry;
-        var sw = Stopwatch.StartNew(); // 总耗时预算的计时基准（含 HTTP 往返与退避等待）
+        // 总耗时预算的计时基准。注意：闸门等待（profile.Gate.WaitAsync）也计入这 180s 预算，
+        // 这是有意为之——用户手填 rpmLimit=1 时门等 60s 会吃掉预算、只剩 2~3 次尝试，
+        // 但这正是「每分钟 1 次」应有的慢；把门等排除在预算外反而会让总时长不可控。
+        var sw = Stopwatch.StartNew();
         int attempt = 1;
         while (attempt <= pol.MaxAttempts)
         {
@@ -229,7 +232,9 @@ public static class ImageAnalysisHelper
     /// 计算本次失败后的等待时长：指数退避为基线，服务端提示（头 / JSON）只作<b>下限</b>——
     /// 服务端明确说「30s 后再来」时我们不会 1s 就重试，但它说「1s」时我们也不会放弃已积累的退避。
     /// 随后按 <see cref="AiRetryPolicy.RetryAfterCap"/> 封顶（防病态值冻死 UI），
-    /// 最后加 0~1s 抖动（加法，不突破下限语义）。
+    /// 最后加 0~1s 抖动（加法，不突破「服务端提示是下限」的语义）。
+    /// 注意：jitter 加在封顶之后，故实际等待允许超出 <c>RetryAfterCap</c> 至多 1s —— 这是有意的，
+    /// 不是 bug：封顶针对的是服务端给的病态值，抖动则是为了打散多客户端同步重试。
     /// </summary>
     private static TimeSpan ComputeDelay(AiProviderProfile profile, int attempt, HttpResponseMessage? resp, string? respText)
     {

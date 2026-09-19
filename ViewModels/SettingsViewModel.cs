@@ -184,9 +184,12 @@ public partial class SettingsViewModel : ObservableObject
         _model.CustomApiModel = CustomApiModel;
         _model.CustomApiKey = CustomApiKey;
         // NumberBox 清空文本时 Value 为 NaN：按「不限」落盘，避免写入未定义的整数
-        _model.CustomApiRpmLimit = double.IsNaN(CustomApiRpmLimit) || CustomApiRpmLimit < 0
+        var rpm = double.IsNaN(CustomApiRpmLimit) || CustomApiRpmLimit < 0
             ? 0
             : (int)Math.Round(CustomApiRpmLimit);
+        _model.CustomApiRpmLimit = rpm;
+        // P2-6：取整后的值必须回写 VM，否则页面仍显示 3.7 而磁盘是 4（显示与落盘不一致）
+        CustomApiRpmLimit = rpm;
 
         await _settings.SaveAsync(_model);
         // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新

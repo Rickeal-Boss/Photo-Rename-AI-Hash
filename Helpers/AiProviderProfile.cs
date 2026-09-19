@@ -94,7 +94,9 @@ public sealed class AiProviderProfile
     /// <summary>退避策略。</summary>
     public AiRetryPolicy Retry { get; init; } = new();
 
-    /// <summary>本供应商在响应头里承载「多久后可重试」的头名列表（按序尝试，首个解析成功者生效）。</summary>
+    /// <summary>本供应商在响应头里承载「多久后可重试」的头名列表（按序尝试，首个解析成功者生效）。
+    /// 默认值直接引用 <see cref="RetryAfterParser.StandardHeaders"/> 这一<b>共享只读数组</b>：
+    /// 多个档位共用同一实例，禁止写入元素，要改请整体替换。</summary>
     public string[] RetryAfterHeaders { get; init; } = RetryAfterParser.StandardHeaders;
 
     /// <summary>是否额外从响应体 JSON 解析重试提示（Gemini 的 <c>error.details[].retryDelay</c> 等）。</summary>
@@ -116,7 +118,9 @@ public sealed class AiProviderProfile
 /// </summary>
 public static class RetryAfterParser
 {
-    /// <summary>OpenAI 系 / 多数网关使用的标准头名。大小写不敏感（HTTP 头本就如此，此处两写仅为可读性）。</summary>
+    /// <summary>OpenAI 系 / 多数网关使用的标准头名。大小写不敏感（HTTP 头本就如此，此处两写仅为可读性）。
+    /// <b>只读共享数组</b>（被多个策略档的 <see cref="AiProviderProfile.RetryAfterHeaders"/> 共同引用）：
+    /// 数组元素<b>禁止写入</b>，要改请整体替换引用。</summary>
     public static readonly string[] StandardHeaders =
     {
         "retry-after-ms",
@@ -127,7 +131,8 @@ public static class RetryAfterParser
         "x-ratelimit-reset",
     };
 
-    /// <summary>Anthropic 专有头名（各维度分别给出「什么时候恢复」，值为 RFC3339 时刻）。</summary>
+    /// <summary>Anthropic 专有头名（各维度分别给出「什么时候恢复」，值为 RFC3339 时刻）。
+    /// 同 <see cref="StandardHeaders"/>：<b>只读共享数组，禁止写入元素</b>。</summary>
     public static readonly string[] AnthropicHeaders =
     {
         "anthropic-ratelimit-requests-reset",
@@ -138,6 +143,11 @@ public static class RetryAfterParser
 
     /// <summary>提示值可信区间上限：超过 1 小时一律视为解析失败（静默失败防线）。</summary>
     private static readonly TimeSpan MaxPlausibleHint = TimeSpan.FromHours(1);
+
+    /// <summary>JSON 体扫描上限（P2-5）：每次 429/5xx 都会调 <see cref="FromJson"/>，
+    /// 不设限会对大响应体（整页 HTML 错误页、几 MB 的报错 JSON）做一次全量 <c>JsonDocument.Parse</c>，
+    /// 而重试提示一定在响应头部几 KB 内。超限即放弃 JSON 解析，退回纯退避。</summary>
+    private const int MaxJsonScanLength = 65536;
 
     /// <summary>时长表达式：<c>1h30m</c> / <c>6m0s</c> / <c>2m59.56s</c> / <c>29s</c>，三段均可选但至少一段非空。</summary>
     private static readonly Regex DurationPattern = new(
@@ -173,6 +183,7 @@ public static class RetryAfterParser
     public static TimeSpan? FromJson(string? body, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(body)) return null;
+        if (body.Length > MaxJsonScanLength) return null; // P2-5：见 MaxJsonScanLength 注释
 
         try
         {
