@@ -7,8 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using PhotoRenameAIHash.Helpers;
 using PhotoRenameAIHash.Models;
-using Windows.Storage;
-
 namespace PhotoRenameAIHash.Services;
 
 /// <summary>
@@ -618,33 +616,42 @@ public sealed class OrganizeService : IOrganizeService
     private const int ErrorOutOfMemory = unchecked((int)0x8007000E);
     private const int ErrorNotEnoughMemory = unchecked((int)0x80070008);
 
+    // HRESULT_FROM_WIN32：ERROR_FILE_EXISTS(80) / ERROR_ALREADY_EXISTS(183)。
+    // File.Copy(overwrite:false) 撞上已存在目标时抛的 IOException 携带其中之一，
+    // 据此区分「换个序号重试」与「真的写失败（如磁盘满）」。
+    private const int ErrorFileExists = unchecked((int)0x80070050);
+    private const int ErrorAlreadyExists = unchecked((int)0x800700B7);
+
+    /// <summary>备份文件名去重的最大尝试次数（原名 + _1…_9998），与 <see cref="SuffixUntilFreeAsync"/> 的 9999 上限一致。</summary>
+    private const int MaxBackupNameAttempts = 9999;
+
     /// <summary>
     /// 重命名模式实际执行前的保险：把原文件复制一份到备份文件夹。
-    /// 采用 MSIX 容器下唯一可靠的写法——通过 FolderPicker 选择路径取得的 StorageFolder/StorageFile
-    /// （携带 Broker 令牌）做 CopyAsync，忽略同名冲突（自动加序号），保证无论是否声明
-    /// broadFileSystemAccess 都能真正落盘到用户选择的备份文件夹。
+    /// 走 <see cref="System.IO"/> 而不是 StorageFolder / StorageFile：<c>GetFolderFromPathAsync</c> 这类
+    /// <b>路径式</b> WinRT 访问受 <c>broadFileSystemAccess</c> 能力门控，而该能力<b>默认 Off</b>，
+    /// 未手动授权的设备上备份必然失败（同文件 ExecuteAsync 一直走 System.IO、始终正常，
+    /// 于是用户看到「整理能用、备份不能用」）。full trust（mediumIL）下的 System.IO 不受该门控，
+    /// 也不依赖 FolderPicker 的 Broker 令牌。
     /// 失败一律抛 <see cref="PermanentOperationException"/>（IsEnvironmentError=true）：备份失败是
     /// 阻断性的、重试无意义，由 <see cref="RunAsync"/> 标记「错误」且不执行 rename，避免丢失原文件；
-    /// 磁盘空间不足单独识别并给出与「权限未授予」不同的提示，避免误导用户排障。
+    /// 同名冲突由 <see cref="CopyWithUniqueName"/> 自行追加 _1/_2 序号（等价于原
+    /// <c>NameCollisionOption.GenerateUniqueName</c>），且<b>永不覆盖</b>已有备份。
+    /// 磁盘空间不足单独识别并给出与「路径不可写」不同的提示，避免误导用户排障。
     /// </summary>
     private static async Task BackupOriginalAsync(string backupDir, string source, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
-        // 事前空间检查：等 CopyAsync 写到一半才失败既浪费一次尝试，又可能在备份目录留下不完整文件。
+        // 事前空间检查：等 File.Copy 写到一半才失败既浪费一次尝试，又可能在备份目录留下不完整文件。
         // 检查本身任何异常都降级为「跳过检查」（见 EnsureEnoughFreeSpace），绝不能阻断备份。
         EnsureEnoughFreeSpace(backupDir, source);
 
         try
         {
-            // WinRT 异步默认不可取消，必须 .AsTask(ct)：否则备份大文件时点「取消」要等拷贝整个跑完。
-            // 写法与 Helpers/ImageDecoder.cs 一致；取消抛出的 OperationCanceledException 由下方 catch 原样上抛。
-            var backupFolder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(backupDir).AsTask(ct).ConfigureAwait(false);
-            var srcFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(source).AsTask(ct).ConfigureAwait(false);
-            await srcFile.CopyAsync(
-                backupFolder,
-                Path.GetFileName(source),
-                Windows.Storage.NameCollisionOption.GenerateUniqueName).AsTask(ct).ConfigureAwait(false);
+            // File.Copy 是同步 API：放进 Task.Run 避免大文件拷贝卡住 UI 线程（原 CopyAsync 是异步的）。
+            // 取消语义：入口已检查一次、Task.Run(ct) 在排队阶段可取消，但拷贝一旦开始便无法中断
+            // ——同步 File.Copy 没有取消通道，这是相对原 WinRT 版本的能力退化，在此注明。
+            await Task.Run(() => CopyWithUniqueName(backupDir, source, ct), ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -662,19 +669,62 @@ public sealed class OrganizeService : IOrganizeService
                     isEnvironmentError: true, inner: ex);
             }
 
-            // 其余失败（未授予文件系统访问权限 / 路径不可访问 / 文件被占用等）：保留原引导语义，
-            // 但改抛永久错误——备份失败是阻断性的，重排队重试无意义。
+            // 其余失败（备份文件夹不存在 / 路径不可访问 / 文件被占用等）：
+            // 改走 System.IO 后本路径已不受 broadFileSystemAccess 门控，故不再引导用户去授予
+            // 「文件系统」访问权限——那会让他去找一个与本次失败无关的开关。
             throw new PermanentOperationException(
-                "备份原始文件失败（请确认已在系统设置中授予本应用「文件系统」访问权限，且备份路径可访问）：" + ex.Message,
+                "备份原始文件失败（请确认备份文件夹存在且当前用户可写入，且源文件未被其它程序独占）：" + ex.Message,
                 isEnvironmentError: true, inner: ex);
         }
     }
 
     /// <summary>
+    /// 把 <paramref name="source"/> 复制到 <paramref name="backupDir"/>，目标名冲突时按 _1/_2 递增，
+    /// 直到拿到一个空位（风格与 <see cref="SuffixUntilFreeAsync"/> 一致）。
+    /// </summary>
+    /// <remarks>
+    /// <b>不做 File.Exists 预检、直接 Copy(overwrite:false)：</b>「先判定再拷贝」两步非原子（TOCTOU），
+    /// 同名文件在备份目录里极常见（<c>IMG_0001.jpg</c> 之类），若将来并发化或跑两个实例，
+    /// 两个线程会同时判定「不存在」然后互相覆盖——备份是用户最后的保险，覆盖等于销毁历史备份。
+    /// 改为捕获「已存在」的 IOException 后换下一个序号重试，把「查」与「占」合成一次原子操作。
+    /// 只有这两种 HRESULT 才重试：磁盘满等其它 IOException 立即上抛，交由上层
+    /// <see cref="IsDiskFull"/> 判定，否则会对一个注定失败的写入空转近万次。
+    /// </remarks>
+    private static void CopyWithUniqueName(string backupDir, string source, CancellationToken ct)
+    {
+        string stem = Path.GetFileNameWithoutExtension(source);
+        string ext = Path.GetExtension(source);
+        string dest = Path.Combine(backupDir, Path.GetFileName(source));
+
+        for (int i = 1; i <= MaxBackupNameAttempts; i++)
+        {
+            ct.ThrowIfCancellationRequested(); // 只能在两次尝试之间检查：拷贝过程本身不可中断
+            try
+            {
+                // overwrite 恒为 false：备份目录里的同名文件是历史备份，覆盖即销毁
+                File.Copy(source, dest, overwrite: false);
+                return;
+            }
+            catch (IOException ex) when (IsAlreadyExists(ex))
+            {
+                dest = Path.Combine(backupDir, $"{stem}_{i}{ext}");
+            }
+        }
+
+        throw new IOException(
+            $"备份目录中没有可用文件名（{Path.GetFileName(source)} 及其 _1…_{MaxBackupNameAttempts - 1} 后缀均已被占用）。");
+    }
+
+    /// <summary>是否「目标已存在」：仅这两种 HRESULT 才换序号重试，其余 IOException 一律上抛
+    /// （否则磁盘满会被误判成重名，进而空转上万次）。</summary>
+    private static bool IsAlreadyExists(IOException ex)
+        => ex.HResult == ErrorFileExists || ex.HResult == ErrorAlreadyExists;
+
+    /// <summary>
     /// 备份前的事前空间检查：比较目标驱动器可用空间与源文件大小，留安全余量（1 MB 或源文件大小的 1%，
-    /// 取较大者）。空间不足直接抛环境级永久错误，避免 CopyAsync 写到一半才失败。
+    /// 取较大者）。空间不足直接抛环境级永久错误，避免 File.Copy 写到一半才失败。
     /// 检查本身任何异常都降级为「跳过检查」——UNC 路径、无盘符、驱动器未就绪、DriveInfo 在 MSIX
-    /// 容器下不可用等情况一律放行，让 CopyAsync 自己报错；检查绝不能阻断正常的备份流程。
+    /// 容器下不可用等情况一律放行，让 File.Copy 自己报错；检查绝不能阻断正常的备份流程。
     /// </summary>
     private static void EnsureEnoughFreeSpace(string backupDir, string source)
     {
