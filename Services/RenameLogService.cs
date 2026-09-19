@@ -57,7 +57,9 @@ public sealed class RenameLogService
     /// <summary>
     /// 读取输出文件夹（含递归子文件夹，用于「按日期归档」分散写入各日期子目录的场景）下的 rename_log.csv，
     /// 汇总「已完成」文件：按 新文件名(NewName) 与 源路径(OriginalPath) 建立索引，供启动时断点续传跳过。
-    /// 仅计入状态不含「错误」的记录；若日志缺失/损坏则返回空集合（非阻断主流程）。
+    /// 仅计入状态既不含「错误」也不含「跳过(已存在)」的记录——这两种状态下文件都未被真正处理，
+    /// 计入索引会让用户改模板/换冲突策略/清掉冲突文件后重跑仍被永久跳过；
+    /// 若日志缺失/损坏则返回空集合（非阻断主流程）。
     /// </summary>
     public Task<CompletedLog> LoadRenameLogAsync(string outputFolder)
     {
@@ -87,7 +89,10 @@ public sealed class RenameLogService
                     var cols = SplitCsvLine(lines[r]);
                     if (iStatus < 0 || iStatus >= cols.Length) continue;
                     string status = cols[iStatus];
-                    if (status.Contains("错误")) continue; // 失败不计入「已完成」，便于下次重试
+                    // 失败不计入「已完成」，便于下次重试；
+                    // 「跳过(已存在)」同理：该状态下文件并未被处理（冲突策略为 Skip 时直接放弃），
+                    // 若计入索引会导致用户改模板/换策略/清掉冲突文件后重跑仍被永久跳过。
+                    if (status.Contains("错误") || status.Contains("跳过(已存在)")) continue;
 
                     if (iNewName >= 0 && iNewName < cols.Length && !string.IsNullOrEmpty(cols[iNewName]))
                         log.DoneByName.Add(cols[iNewName]);

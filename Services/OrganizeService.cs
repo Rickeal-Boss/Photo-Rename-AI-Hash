@@ -371,7 +371,9 @@ public sealed class OrganizeService : IOrganizeService
         if (!md5Cache.TryGetValue(f.Path, out var md5))
         {
             md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
-            md5Cache[f.Path] = md5;
+            // 仅在成功算出 MD5 时入缓存：缓存空串会让重试走到「内容不同」分支，
+            // 在 AutoRename 策略下生成 name_1 / name_2 重复副本。
+            if (md5.Length > 0) md5Cache[f.Path] = md5;
         }
 
         // 拍摄时间
