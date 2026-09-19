@@ -1,7 +1,10 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MetadataExtractor;
+using MetadataExtractor.Formats.Exif;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 
@@ -16,6 +19,12 @@ public static class ImageDecoder
     /// <summary>解码输入硬上限：超过此尺寸的文件直接抛异常进入「超限跳过」分支，避免单次解码把整文件读入内存造成 OOM。
     /// 对应安全设计 §4.3.5「单图解码缓冲」控制；实际解码像素缓冲由缩放目标尺寸决定本就很小，此处仅约束输入读取。</summary>
     private const long MaxInputBytes = 256L * 1024 * 1024; // 256 MB
+
+    /// <summary>EXIF Orientation 标签（0x0112，位于 IFD0）：5/6/7/8 表示 90°/270° 旋转，
+    /// 其中 6 是 iPhone / Android 竖拍照片的默认标记（本项目目标人群里占比最高的一类）。
+    /// 这里直接写 tag 值而非引用库常量：该常量在 MetadataExtractor 各版本里归属类
+    /// （ExifIfd0Directory / ExifDirectoryBase）不完全一致，写死可避免升级时的歧义。</summary>
+    private const int ExifTagOrientation = 0x0112;
 
     /// <summary>把输入流循环读满到内存（ReadAsync 允许短读，必须循环），超过 maxBytes 抛异常。</summary>
     private static async Task<byte[]> ReadCappedAsync(Stream source, long maxBytes, CancellationToken ct)
@@ -114,9 +123,23 @@ public static class ImageDecoder
 
         var pixels = pixelData.DetachPixelData();
 
+        // 上面算出的 nw/nh 处于「源坐标系」（Microsoft Learn：BitmapTransform.ScaledWidth/ScaledHeight
+        // "is defined in the coordinate space of the source image, before rotation and flip are applied"），
+        // 而 RespectExifOrientation 让返回的像素缓冲处于「已旋转坐标系」：Orientation 5/6/7/8 时宽高互换。
+        // 若不互换就交给 SetPixelData，因 w*h*4 字节数恰好相等，编码不会报错、只静默产出斜切花屏图，
+        // AI 看到废图 → 给出错误描述 → 生成错误的文件名。
+        var swapAxes = IsExifOrientationSwapsAxes(bytes);
+        uint outW = swapAxes ? nh : nw;
+        uint outH = swapAxes ? nw : nh;
+
+        // 自检：缩放与旋转都不改变像素总数，尺寸不符说明坐标系判断有误。
+        // 此时宁可抛错（上层按「超限 / 解码失败」跳过该文件）也不要产出损坏图像。
+        if (pixels.Length != (long)outW * outH * 4)
+            throw new InvalidOperationException($"解码后的像素缓冲尺寸与预期不符（期望 {outW}x{outH}，实际 {pixels.Length / 4} 像素），已跳过该文件以避免产出花屏图。");
+
         using var outStream = new InMemoryRandomAccessStream();
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, outStream).AsTask(ct).ConfigureAwait(false);
-        encoder.SetPixelData(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Ignore, nw, nh, 96, 96, pixels);
+        encoder.SetPixelData(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Ignore, outW, outH, 96, 96, pixels);
         encoder.IsThumbnailGenerated = false;
         await encoder.FlushAsync().AsTask(ct).ConfigureAwait(false);
 
@@ -128,5 +151,52 @@ public static class ImageDecoder
         }
 
         return Convert.ToBase64String(outBytes);
+    }
+
+    /// <summary>
+    /// 读取 EXIF Orientation，判断像素缓冲相对源坐标系是否发生了宽高互换（值 5/6/7/8 = 90°/270° 旋转）。
+    /// </summary>
+    /// <remarks>
+    /// 用项目已有依赖 MetadataExtractor 读 EXIF：不引入新的 WinRT API（本机无 SDK，编译风险优先），
+    /// 也不需要文件路径——直接复用 <c>EncodeResizedJpegAsync</c> 已读入内存的字节，
+    /// 因此调用方（ImageAnalysisHelper）无需任何改动。
+    /// 官方文档推荐的等价做法是读 <c>BitmapDecoder.OrientedPixelWidth/OrientedPixelHeight</c>
+    /// （与 WinRT 内部使用的方向源完全一致），此处为规避新 API 面暂未采用。
+    /// </remarks>
+    private static bool IsExifOrientationSwapsAxes(byte[] imageBytes)
+    {
+        try
+        {
+            using var ms = new MemoryStream(imageBytes, writable: false);
+            foreach (var dir in ImageMetadataReader.ReadMetadata(ms).OfType<ExifIfd0Directory>())
+            {
+                if (dir.ContainsTag(ExifTagOrientation) && TryGetInt32(dir.GetObject(ExifTagOrientation), out var orientation))
+                    return orientation >= 5 && orientation <= 8;
+            }
+        }
+        catch
+        {
+            // 格式不支持 / 元数据损坏 / 无 EXIF：按「不旋转」处理，回退到旧行为
+        }
+
+        return false;
+    }
+
+    /// <summary>把标签值安全转成 int：EXIF Orientation 的类型是 SHORT，库里可能存成 ushort / short / int / 字符串，
+    /// 逐个兼容以免某个版本的 TryGetInt32 不做整型转换时静默取不到方向。</summary>
+    private static bool TryGetInt32(object? value, out int result)
+    {
+        switch (value)
+        {
+            case int i: result = i; return true;
+            case short s: result = s; return true;
+            case ushort us: result = us; return true;
+            case byte b: result = b; return true;
+            case sbyte sb: result = sb; return true;
+            case uint ui when ui <= int.MaxValue: result = (int)ui; return true;
+            case long l when l >= int.MinValue && l <= int.MaxValue: result = (int)l; return true;
+            case string str: return int.TryParse(str, out result);
+            default: result = 0; return false;
+        }
     }
 }
