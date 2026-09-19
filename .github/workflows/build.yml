@@ -1284,11 +1284,28 @@ jobs:
 
           git config user.name "ci-bot"
 
-          git add ci-diagnostics.log
+          # 只推诊断日志本身，不推整棵工作树。
+          # 旧实现推的是 HEAD 这个分支引用（origin HEAD:refs/heads/ci-diag-report），
+          # 等于把触发分支的整棵源码树 + 整条历史复制过去：自报告提交的父提交直接
+          # 就是触发分支的头，源码历史跟着每次 dump 一起堆。
+          # orphan 分支无父提交，每次 force push 都把它替换成「一个提交 + 一个文件」。
+
+          git switch --orphan ci-diag-tmp
+
+          git add -f ci-diagnostics.log
 
           git commit -m "ci: diagnostic dump [skip ci]" | Out-Null
 
-          git push --force origin HEAD:refs/heads/ci-diag-report
+          git push --force origin ci-diag-tmp:refs/heads/ci-diag-report
+
+          # 切回触发分支再收尾：否则 job 尾声的 Post Checkout（clean: true）会在
+          # orphan 分支上做清理，语义变脏甚至留下噪声。切不回去就退回当次 sha。
+
+          $back = $env:GITHUB_REF_NAME
+
+          if ($back) { git switch -f $back }
+
+          if ($LASTEXITCODE -ne 0) { git checkout -f $env:GITHUB_SHA }
 
           Write-Host "pushed diagnostics to ci-diag branch"
 
