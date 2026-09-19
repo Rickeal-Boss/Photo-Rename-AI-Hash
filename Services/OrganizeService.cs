@@ -687,8 +687,9 @@ public sealed class OrganizeService : IOrganizeService
     /// 同名文件在备份目录里极常见（<c>IMG_0001.jpg</c> 之类），若将来并发化或跑两个实例，
     /// 两个线程会同时判定「不存在」然后互相覆盖——备份是用户最后的保险，覆盖等于销毁历史备份。
     /// 改为捕获「已存在」的 IOException 后换下一个序号重试，把「查」与「占」合成一次原子操作。
-    /// 只有这两种 HRESULT 才重试：磁盘满等其它 IOException 立即上抛，交由上层
-    /// <see cref="IsDiskFull"/> 判定，否则会对一个注定失败的写入空转近万次。
+    /// 判定为「已存在」才换号重试，磁盘满等其它 IOException 立即上抛，交由上层
+    /// <see cref="IsDiskFull"/> 判定，否则会对一个注定失败的写入空转近万次
+    /// （判定细则见 <see cref="IsAlreadyExists"/>）。
     /// </remarks>
     private static void CopyWithUniqueName(string backupDir, string source, CancellationToken ct)
     {
@@ -705,7 +706,7 @@ public sealed class OrganizeService : IOrganizeService
                 File.Copy(source, dest, overwrite: false);
                 return;
             }
-            catch (IOException ex) when (IsAlreadyExists(ex))
+            catch (IOException ex) when (IsAlreadyExists(ex, dest))
             {
                 dest = Path.Combine(backupDir, $"{stem}_{i}{ext}");
             }
@@ -715,10 +716,27 @@ public sealed class OrganizeService : IOrganizeService
             $"备份目录中没有可用文件名（{Path.GetFileName(source)} 及其 _1…_{MaxBackupNameAttempts - 1} 后缀均已被占用）。");
     }
 
-    /// <summary>是否「目标已存在」：仅这两种 HRESULT 才换序号重试，其余 IOException 一律上抛
-    /// （否则磁盘满会被误判成重名，进而空转上万次）。</summary>
-    private static bool IsAlreadyExists(IOException ex)
-        => ex.HResult == ErrorFileExists || ex.HResult == ErrorAlreadyExists;
+    /// <summary>
+    /// 判断一次失败的 <see cref="File.Copy(string,string,bool)"/> 是否只是「目标已存在」（该换下一个序号），
+    /// 而不是真的写失败（如磁盘满，那必须立即上抛，否则会对注定失败的写入空转近万次）。
+    /// </summary>
+    /// <param name="ex">拷贝抛出的 IOException。</param>
+    /// <param name="dest">本次尝试的目标路径。</param>
+    private static bool IsAlreadyExists(IOException ex, string dest)
+    {
+        // 首选：Win32 错误码（ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS）——与既有 IsDiskFull 同一套机制
+        if (ex.HResult == ErrorFileExists || ex.HResult == ErrorAlreadyExists)
+            return true;
+
+        // 兜底：.NET 也可能抛不带 Win32 HResult 的通用 IOException（HResult = COR_E_IO 0x80131620），
+        // 此时上面的判定恒不命中 → 循环第一次就抛出 → 落到「备份失败」永久错误 → 重名备份功能回归。
+        // 故在「拷贝已失败」之后再看一次目标是否存在：
+        // 这与要规避的 TOCTOU 不是一回事——TOCTOU 是「检查通过后再操作」的窗口，
+        // 这里是操作已失败、且失败本身没有副作用需要回滚，只是据此决定下一个名字。
+        // 宁可多试一个序号，也不要让重名直接失败（失败方向虽不丢数据，但整批会被阻断）。
+        try { return File.Exists(dest); }
+        catch { return false; }
+    }
 
     /// <summary>
     /// 备份前的事前空间检查：比较目标驱动器可用空间与源文件大小，留安全余量（1 MB 或源文件大小的 1%，
