@@ -173,7 +173,32 @@ jobs:
 
 
 
+      # =====================================================================
+      # NuGet 包缓存（性能优化，最佳努力类）。
+      # 实测基线（run 35435866103，全流程 ~215s）：Restore 58s 且完全没命中缓存，
+      # 命中后通常降到 ~10s，一次省 ~48s（约 22%）。保留这个基线，后人才能判断
+      # 缓存是否还生效 —— Restore 步会把命中情况记成 CACHE hit= 写进诊断日志。
+      #
+      # continue-on-error：缓存是性能优化、不是交付物，缓存服务抖动不该把发布刷红
+      # （否则等于把 P1-5「诊断留档失败不得把绿构建刷红」从另一个入口又放回来）。
+      # 代价是"长期不可用没人发现"，所以用 CACHE hit= 把无声降级变成可观测。
+      #
+      # key 用「显式路径」而不是通配：hashFiles() 在没有任何文件匹配时返回空串，
+      # key 会退化成 Windows-nuget-，于是所有构建共用同一个 key、还原到过期包 ——
+      # 那不是"慢"，是"错"。
+      #
+      # key 完备性已核实（全仓 find，排除 bin/obj/.git）：不存在
+      # Directory.Packages.props / Directory.Build.props / Directory.Build.targets /
+      # packages.lock.json / nuget.config，也没有任何自定义 .props / .targets ——
+      # 包版本只能写在 PhotoRenameAIHash.csproj 里，依赖一变 csproj 必变、key 必变。
+      # ⚠ 将来若引入 Directory.Packages.props（集中式包版本管理），包版本就从
+      # csproj 搬走了，必须把它加进 hashFiles(...)，否则会踩上面那个"错"。
+      # =====================================================================
       - name: Cache NuGet packages
+
+        id: nuget-cache
+
+        continue-on-error: true
 
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4（固定 SHA）
 
@@ -181,7 +206,7 @@ jobs:
 
           path: ~/.nuget/packages
 
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('PhotoRenameAIHash.csproj', 'Properties/PublishProfiles/win10-x64.pubxml') }}
 
           restore-keys: ${{ runner.os }}-nuget-
 
@@ -192,6 +217,11 @@ jobs:
         run: |
 
           "CHECKPOINT:restore-start" >> ci-diagnostics.log
+
+          # 缓存命中情况进诊断日志：缓存步带 continue-on-error，长期 miss 或不可用
+          # 不会让 CI 变红，只能靠这行看出来（否则就是无声的性能退化）。
+
+          ("CACHE hit=" + '${{ steps.nuget-cache.outputs.cache-hit }}') >> ci-diagnostics.log
 
           msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64 /p:AppxPackageSigningEnabled=false
 
