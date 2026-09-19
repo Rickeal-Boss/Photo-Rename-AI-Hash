@@ -51,13 +51,16 @@ PhotoRenameAIHash/
 
 ## Installing
 
-Download all three files — they **must be kept in the same folder**:
+The release artifact contains **four files, all of which must be kept in the same folder**.
+Only the first three take part in the installation — `安装说明.txt` is documentation
+(`Install.bat` locates the package by `dir /b PhotoRenameAIHash*_x64.msix` and never reads it):
 
 | File | Purpose |
 |------|---------|
-| `PhotoRenameAIHash_<version>_x64.msix` | the app package (self-contained, no runtime prerequisites) |
-| `PhotoRenameAIHash.cer` | the publisher certificate (public key only) |
-| `Install.bat` | trusts the certificate, then installs the package |
+| `PhotoRenameAIHash_<version>_x64.msix` | the app package (self-contained, no runtime prerequisites) — **required** |
+| `PhotoRenameAIHash.cer` | the publisher certificate (public key only) — **required** |
+| `Install.bat` | trusts the certificate, then installs the package — **required** |
+| `安装说明.txt` | Chinese install guide — documentation only, not required to install |
 
 Then **right-click `Install.bat` and choose "Run as administrator"**. Elevation is required
 because the certificate is imported into the machine-level `TrustedPeople` store.
