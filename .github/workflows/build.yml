@@ -145,7 +145,21 @@ jobs:
                         Where-Object { $_.Line -notmatch '^\s*(//|///|\*)' })
           $hasPath = ($pathHits.Count -gt 0)
 
-          $line = "CAPGUARD forbidden=" + $fhits.Count + " runFullTrust=" + $hasRunFullTrust + " rescap=" + $hasRescapNs + " pathWinRT=" + $hasPath + " pathHits=" + $pathHits.Count
+          # 3b) 弱信号（非阻断）：只有 using Windows.Storage; 而调用点还没出现上述 API。
+          #     它不进 #3 的阻断判定，因为 FolderPicker 返回的 StorageFolder 自带 Broker 令牌、
+          #     不受 bFSA 门控（Views/OrganizePage.xaml.cs 就是这么用的）——判成红灯会误伤合法用法。
+          #     所以这里只发 ::warning:: 让人看见，不拦发布。
+          $usingHits = @(Get-ChildItem -Path . -Recurse -Filter *.cs |
+                         Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
+                         Select-String -Pattern 'using\s+Windows\.Storage\s*;' |
+                         Where-Object { $_.Line -notmatch '^\s*(//|///|\*)' })
+          if ($usingHits.Count -gt 0) {
+            Write-Host ("::warning::检测到 using Windows.Storage;（" +
+              (($usingHits | ForEach-Object { $_.Filename + ':' + $_.LineNumber }) -join ', ') +
+              "）：若用于 GetXxxFromPathAsync 这类路径式访问，必须先恢复 broadFileSystemAccess 声明并引导用户授权（该能力默认 Off 且授权后需重启）；若只用来接 FolderPicker 的返回值则无需处理")
+          }
+
+          $line = "CAPGUARD forbidden=" + $fhits.Count + " runFullTrust=" + $hasRunFullTrust + " rescap=" + $hasRescapNs + " pathWinRT=" + $hasPath + " pathHits=" + $pathHits.Count + " usingStorage=" + $usingHits.Count
           $line >> ci-diagnostics.log
           Write-Host $line
 
