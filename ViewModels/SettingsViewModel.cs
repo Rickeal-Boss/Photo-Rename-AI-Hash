@@ -183,12 +183,16 @@ public partial class SettingsViewModel : ObservableObject
         _model.CustomApiUrl = CustomApiUrl;
         _model.CustomApiModel = CustomApiModel;
         _model.CustomApiKey = CustomApiKey;
-        // NumberBox 清空文本时 Value 为 NaN：按「不限」落盘，避免写入未定义的整数
-        var rpm = double.IsNaN(CustomApiRpmLimit) || CustomApiRpmLimit < 0
-            ? 0
-            : (int)Math.Round(CustomApiRpmLimit);
+        // P1-D：一次性吃掉全部脏输入 —— NaN（NumberBox 清空文本时 Value 就是 NaN）、±∞、
+        // 负数、以及超过 UI 上界 600 的值（此前只钳下界，1e11 会溢出成 int.MinValue 落盘，
+        // 下个会话在 Minimum=0 的 NumberBox 里显示 -2147483648 → UI 谎报）。
+        // AwayFromZero 是必要的：Math.Round 默认 ToEven 会把 0.5 舍成 0，用户想要 1 却变成「不限」。
+        var rpm = double.IsFinite(CustomApiRpmLimit)
+            ? (int)Math.Clamp(Math.Round(CustomApiRpmLimit, MidpointRounding.AwayFromZero), 0, 600)
+            : 0;
         _model.CustomApiRpmLimit = rpm;
-        // P2-6：取整后的值必须回写 VM，否则页面仍显示 3.7 而磁盘是 4（显示与落盘不一致）
+        // P2-6：取整/钳制后的值必须回写 VM，否则页面仍显示 3.7 或 1e11 而磁盘是另一个值
+        //（显示与落盘不一致，P33）
         CustomApiRpmLimit = rpm;
 
         await _settings.SaveAsync(_model);

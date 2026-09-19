@@ -144,21 +144,39 @@ public static class ImageAnalysisHelper
             {
                 resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // 用户主动取消：必须原样上抛，绝不能被下面的「网络/连通性」分支包装成
+                // InvalidOperationException——那会让取消看起来像故障、并被编排层重排队。
+                // 写法与同文件 EncodeAsJpegDataUrlAsync（第 33 行）的过滤器保持一致。
+                throw;
+            }
             catch (Exception ex)
             {
                 // 网络/连通性异常：视为瞬时抖动可重试，次数或退避预算耗尽后抛明确异常。
                 // 不抛 AiPermanentException：保留外层「单文件重排队」兜底（P17）。
+                ct.ThrowIfCancellationRequested(); // 取消优先于一切：不让取消被包装成业务异常
+
                 var netDelay = ComputeDelay(profile, attempt, null, null);
                 if (attempt >= pol.MaxAttempts || sw.Elapsed + netDelay > pol.TotalBudget)
                 {
-                    // 必须区分「次数耗尽」与「退避预算耗尽」并打印累计秒数：
+                    // HttpClient 的 60s 超时抛的是 TaskCanceledException（InnerException 为 TimeoutException），
+                    // 与「用户取消」同型 —— 必须按 InnerException 区分，否则归因完全错误（P23）：
+                    // 超时该说「服务端 60 秒未响应」，而不是让用户去检查网络与端点。
+                    var isTimeout = ex is TaskCanceledException tce && tce.InnerException is TimeoutException;
+                    var kind = isTimeout ? "服务端 60 秒未响应（超时）" : "网络/连通性";
+                    var tail = isTimeout
+                        ? "请稍后重试，或到「设置」更换响应更快的引擎 / 端点。"
+                        : "请检查网络与端点 URL 是否正确。";
+                    // 必须区分「次数耗尽」与「退避预算耗尽」并给出可执行的信息：
                     // 只说「限流/失败」会误导用户以为再等等就好（P23）。
                     var netWhy = attempt >= pol.MaxAttempts
                         ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
-                        : $"累计 {sw.Elapsed.TotalSeconds:F0}s 已耗尽退避预算 {pol.TotalBudget.TotalSeconds:F0}s";
+                        : $"下一次需再等 {netDelay.TotalSeconds:F0}s，累计将达 {(sw.Elapsed + netDelay).TotalSeconds:F0}s，" +
+                          $"超出退避预算 {pol.TotalBudget.TotalSeconds:F0}s（已耗 {sw.Elapsed.TotalSeconds:F0}s）";
                     throw new InvalidOperationException(
-                        $"调用视觉识别接口失败（网络/连通性，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，" +
-                        $"{netWhy}）：{ex.Message}。请检查网络与端点 URL 是否正确。", ex);
+                        $"调用视觉识别接口失败（{kind}，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，" +
+                        $"{netWhy}）：{ex.Message}。{tail}", ex);
                 }
 
                 await Task.Delay(netDelay, ct).ConfigureAwait(false);
@@ -194,9 +212,13 @@ public static class ImageAnalysisHelper
                         // P2-9：携带状态码（.NET 8 起 HttpRequestException.StatusCode 可用），
                         // 调用方按状态码判定而非解析文案。异常文案必须区分「次数耗尽」与「退避预算耗尽」
                         // 并给出累计秒数——只说「限流」会误导用户以为再等等就好（P23）。
+                        // 预算耗尽的判定是「已耗 + 下一次等待 > 预算」，所以已耗必定 < 预算：
+                        // 文案必须说清「下一次再等 X 秒就会达到 Y 秒、超出预算」，否则会出现
+                        // 「累计 154s 已耗尽退避预算 180s」这种自相矛盾、无法归因的输出（P23）。
                         var rateWhy = attempt >= pol.MaxAttempts
                             ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
-                            : $"累计 {sw.Elapsed.TotalSeconds:F0}s 已耗尽退避预算 {pol.TotalBudget.TotalSeconds:F0}s";
+                            : $"下一次需再等 {delay.TotalSeconds:F0}s，累计将达 {(sw.Elapsed + delay).TotalSeconds:F0}s，" +
+                              $"超出退避预算 {pol.TotalBudget.TotalSeconds:F0}s（已耗 {sw.Elapsed.TotalSeconds:F0}s）";
                         throw new HttpRequestException(
                             $"视觉识别接口限流/错误（{code} {resp.StatusCode}），" +
                             $"已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，{rateWhy}：{Snippet(respText)}",
@@ -218,8 +240,12 @@ public static class ImageAnalysisHelper
                     var hint = code == 403
                         ? "（403：若使用 NVIDIA NIM，该模型族可能尚未在你的账号下注册，请到 build.nvidia.com 对应模型页点击一次「Try API」）"
                         : "";
+                    // isBatchLevel 必须按状态码显式分级（见 IsBatchLevel4xx）：
+                    // 不能依赖 AiPermanentException 的默认 true —— 那会把逐文件的 413/415
+                    // 也纳入「连续 3 次熔断中止整批」（P26 三层口径）。
                     throw new AiPermanentException(
-                        $"视觉识别接口返回 {code} {resp.StatusCode}（客户端永久错误，重试无意义）：{snippet}{hint}");
+                        $"视觉识别接口返回 {code} {resp.StatusCode}（客户端永久错误，重试无意义）：{snippet}{hint}",
+                        isBatchLevel: IsBatchLevel4xx(code, respText));
                 }
 
                 return respText;
@@ -302,6 +328,33 @@ public static class ImageAnalysisHelper
 
         // 4) 其余一律按可重试处理 → 走退避重试（P17 红线）
         return false;
+    }
+
+    /// <summary>
+    /// 4xx 永久错误是否「对整批成立」（决定是否参与 OrganizeService 的连续 3 次熔断）。
+    /// 按 P26 三层口径分级：<b>不能一律用 AiPermanentException 的默认 true</b>——
+    /// 单张图过大 / 格式不被接受时服务端回 413 / 415，而相机连拍的大图在目录里连号，
+    /// 连续 3 张极易达成，会把「跳过 3 张」升级成「整批失败」，文案还指向账户/额度，完全误导。
+    /// </summary>
+    private static bool IsBatchLevel4xx(int code, string respText)
+    {
+        // 载荷过大 / 媒体类型不被接受：只针对当前文件 → 逐文件，不熔断
+        if (code == 413 || code == 415) return false;
+
+        // 鉴权 / 权限 / 端点不存在 / 方法不允许：配置级错误，对整批成立
+        if (code == 401 || code == 403 || code == 404 || code == 405) return true;
+
+        // 400 / 422 要区分「配置类」与「逐文件类」：
+        // 智谱的「1211 模型不存在」「1214 参数非法」返回的是 HTTP 400 而不是 429，
+        // 走不到 429 业务码分支，必须在这里按 error.code 白名单显式区分。
+        if (code == 400 || code == 422)
+        {
+            var biz = ReadErrorCode(respText);
+            return biz == "1211" || biz == "1214";
+        }
+
+        // 其余 4xx 无证据表明是逐文件问题 → 保守按整批级
+        return true;
     }
 
     /// <summary>从响应体解析 <c>error.code</c>（字符串或数字皆可）；解析不出返回空串。</summary>
