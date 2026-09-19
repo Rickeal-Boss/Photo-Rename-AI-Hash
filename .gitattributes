@@ -1,0 +1,5 @@
+# 锁死随包说明的换行：本包 TargetDeviceFamily MinVersion=10.0.19041，
+# 受支持系统的记事本都能正确显示 LF（LF 支持自 Win10 1809 / build 17763 起），
+# 故统一为 LF。目的不是"记事本能不能显示"，而是防不同开发者 core.autocrlf
+# 设置不同（Windows 默认 true、跨平台可能 false）导致整文件被重写、diff 变噪音。
+安装说明.txt text eol=lf

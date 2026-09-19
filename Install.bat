@@ -2,6 +2,8 @@
 setlocal
 REM 中文提示按 UTF-8 输出；本文件保存为 UTF-8（无 BOM）。
 REM chcp 必须在任何中文 echo 之前执行，否则 cmd 按 936 解析 UTF-8 字节 -> 乱码。
+REM 文档唯一权威源 = README 的 Installing 章节；本脚本内的提示与随包 安装说明.txt
+REM 都是它的精简版。改安装相关说明时先改 README，再同步这两处，避免三份各自演化。
 chcp 65001 >nul
 cd /d "%~dp0"
 
