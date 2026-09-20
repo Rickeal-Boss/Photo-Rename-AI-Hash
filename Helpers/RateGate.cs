@@ -21,6 +21,13 @@ public sealed class RateGate
     private readonly Queue<DateTimeOffset> _stamps = new();
     private readonly SemaphoreSlim _mutex = new(1, 1);
 
+    /// <summary>
+    /// 窗口内允许的最大请求数（闸门上限，张/分）。
+    /// 只读、仅供 UI 展示「闸门上限 N 张/分」——它与实际速率并排显示，
+    /// 用来说明 N 是<b>上限保护</b>而非速率目标（窗口没满时闸门一次都不会等待）。
+    /// </summary>
+    public int MaxRequests => _maxRequests;
+
     /// <param name="maxRequests">窗口内允许的最大请求数（如 NVIDIA 档的 30）。</param>
     /// <param name="window">滑动窗口长度（如 1 分钟）。</param>
     public RateGate(int maxRequests, TimeSpan window)

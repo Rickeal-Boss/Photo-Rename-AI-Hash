@@ -103,6 +103,12 @@ public sealed class AiProviderProfile
     /// <summary>可选限流闸门：每次真实 HTTP 尝试（含重试）前取名额；null 表示不主动限速。</summary>
     public RateGate? Gate { get; init; }
 
+    /// <summary>
+    /// 闸门上限（张/分）；<see cref="Gate"/> 为 null（本档位不主动限速）时返回 null。
+    /// 展示用：必须与实际速率并排显示——单独写「30 RPM」会被读成速率目标，而它只是上限保护。
+    /// </summary>
+    public int? GateRpm => Gate?.MaxRequests;
+
     /// <summary>退避策略。</summary>
     public AiRetryPolicy Retry { get; init; } = new();
 

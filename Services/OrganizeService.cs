@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -100,6 +101,11 @@ public sealed class OrganizeService : IOrganizeService
 
         IImageAnalysisService? ai = CreateAi(req);
 
+        // 闸门上限（张/分）：null = 该引擎不带闸门（不主动限速）。
+        // 只在批次开始时取一次：档位由 (引擎, 端点, RPM 上限) 三者决定，批次内不会变。
+        // 用途是给 UI 显示「闸门上限 N」——N 是上限保护，不是速率目标。
+        int? gateRpm = AiProviderProfiles.For(req.AiProvider, req.CustomApiUrl, req.CustomApiRpmLimit).GateRpm;
+
         // 暂停令牌必须在扫描之前创建：此前它在处理循环前才 new，而 Pause() 在 _pts == null 时是
         // 静默 no-op，导致「开始后的扫描 / 加载索引窗口内点暂停」完全失效、UI 却谎报已暂停。
         // 上移后这两个窗口内点暂停即可生效：扫描本身不检查暂停，扫描一结束、处理任何文件之前就挂起。
@@ -168,6 +174,11 @@ public sealed class OrganizeService : IOrganizeService
         // AI 自身失败（异常）不入缓存，重试仍会重新请求（瞬时故障需要重试）。
         var aiCache = new Dictionary<string, ImageAnalysisResult>(StringComparer.OrdinalIgnoreCase);
         var md5Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // 本批次的 AI 观测统计（实际速率 / 单张响应时长）：只为 UI 展示，不参与任何控制流判断。
+        // 局部实例而非字段：本类是进程级单例，字段会把上一批的样本带进下一批（跨批次污染 → 谎报）。
+        var aiStats = new AiRunStats();
+
         int done = skippedAtStart; // 已跳过的也算进度推进
 
         try
@@ -179,7 +190,7 @@ public sealed class OrganizeService : IOrganizeService
                 var (f, index) = queue.Dequeue();
                 try
                 {
-                    var entry = await ProcessOneAsync(f, req, output, ai, index, ct, aiCache, md5Cache, claimedThisRun).ConfigureAwait(false);
+                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                     done++;
@@ -188,6 +199,11 @@ public sealed class OrganizeService : IOrganizeService
                         Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                         Result = entry,
                         LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
+                        // 速率三件套只在此处（成功处理一个文件后）刷新：
+                        // 失败/重排队路径不该刷——那会拿失败尝试去算速率。
+                        AiRpm = RecentAiRpm(aiStats.Stamps),
+                        AiLatencyMs = aiStats.LastLatencyMs > 0 ? aiStats.LastLatencyMs : (int?)null,
+                        AiGateRpm = gateRpm,
                     });
                 }
                 catch (PermanentOperationException ex)
@@ -508,8 +524,39 @@ public sealed class OrganizeService : IOrganizeService
         return report;
     }
 
+    /// <summary>
+    /// 最近 60 秒窗口内完成的真实 AI 请求数（窗口正好 1 分钟，故计数即「张/分」）。
+    /// <b>刻意不用闸门自己的记录</b>：闸门在「取名额」时打点，且失败重试也各打一次，
+    /// 拿它当实际速率只会偏高——而用户正是被「闸门 30」误导的，这里不能再给一个偏乐观的数。
+    /// 样本少于 2 次返回 null：单张图片的速率没有参考价值（首张还常含冷启动 / 建连开销）。
+    /// 批次刚起步、窗口未填满时该值偏保守（只是「到目前为止」的计数），随窗口填满逼近真实速率；
+    /// 这与闸门同为 60 秒窗口口径，所以能直接和「闸门上限 N」比大小，正是这行 UI 要回答的问题。
+    /// </summary>
+    private static double? RecentAiRpm(Queue<DateTimeOffset> stamps)
+    {
+        var now = DateTimeOffset.UtcNow;
+        while (stamps.Count > 0 && now - stamps.Peek() >= TimeSpan.FromMinutes(1))
+            stamps.Dequeue();
+        if (stamps.Count < 2) return null;
+        return stamps.Count;
+    }
+
+    /// <summary>
+    /// 单批次的 AI 观测统计：真实请求的完成时刻（算速率）与最近一次请求耗时（算响应时长）。
+    /// 做成类而非用 ref/out 参数：<see cref="ProcessOneAsync"/> 是 async 方法，
+    /// C# 不允许 async 方法声明 ref/out 参数（CS1988），只有把可变状态装进对象才能回传。
+    /// </summary>
+    private sealed class AiRunStats
+    {
+        /// <summary>本批次真实 AI 请求（未命中缓存、确实发过 HTTP）的完成时刻。</summary>
+        public readonly Queue<DateTimeOffset> Stamps = new();
+
+        /// <summary>最近一次真实 AI 请求的端到端时长（毫秒）；0 = 尚无样本。</summary>
+        public int LastLatencyMs;
+    }
+
     private async Task<RenameLogEntry> ProcessOneAsync(
-        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, int index, CancellationToken ct,
+        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, AiRunStats aiStats, int index, CancellationToken ct,
         Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache,
         HashSet<string> claimedThisRun)
     {
@@ -541,7 +588,13 @@ public sealed class OrganizeService : IOrganizeService
         {
             if (!aiCache.TryGetValue(f.Path, out var res))
             {
+                // 只在「真正发请求」的分支计时：命中缓存的文件耗时≈0，
+                // 计入会让速率虚高、响应时长虚低（P33 谎报）。
+                var aiSw = Stopwatch.StartNew();
                 res = await ai.AnalyzeAsync(f.Path, req.Language, ct).ConfigureAwait(false);
+                aiSw.Stop();
+                aiStats.LastLatencyMs = (int)aiSw.Elapsed.TotalMilliseconds;
+                aiStats.Stamps.Enqueue(DateTimeOffset.UtcNow);
                 if (res != null) aiCache[f.Path] = res;
             }
 

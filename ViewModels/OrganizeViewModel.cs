@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -87,6 +89,22 @@ public partial class OrganizeViewModel : ObservableObject
     [ObservableProperty] private int _progress;
 
     [ObservableProperty] private string _statusText = "选择文件夹后点击「开始整理」。";
+
+    /// <summary>
+    /// AI 观测行：「AI 实际 X 张/分 · 服务端响应 Y 秒/张 · 闸门上限 Z 张/分」。
+    /// 存在的意义是消除「设置里写的 30 RPM 就是目标速率」这一误解——
+    /// 三个数并排，能直接看出慢的是服务端还是闸门。空串表示本行不适用（未启用 AI / 样本不足）。
+    /// </summary>
+    [ObservableProperty] private string _rateText = "";
+
+    /// <summary>观测行的可见性：有内容才占位，避免未启用 AI 时进度区留一行空白。</summary>
+    public Visibility RateLineVisibility => RateText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    // RateText 变化时同步刷新可见性（与 OnStatusBarOpenChanged → StatusLineVisibility 同一套路）
+    partial void OnRateTextChanged(string value)
+    {
+        OnPropertyChanged(nameof(RateLineVisibility));
+    }
 
     [ObservableProperty] private string _logText = "";
 
@@ -195,6 +213,7 @@ public partial class OrganizeViewModel : ObservableObject
         Progress = 0;
         Results.Clear();
         LogText = "";
+        RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -226,6 +245,7 @@ public partial class OrganizeViewModel : ObservableObject
             IsBusy = false;
             _cts = null;
             IsPaused = false;
+            RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
 
@@ -277,6 +297,7 @@ public partial class OrganizeViewModel : ObservableObject
         Progress = 0;
         Results.Clear();
         LogText = "";
+        RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -308,6 +329,7 @@ public partial class OrganizeViewModel : ObservableObject
             IsBusy = false;
             _cts = null;
             IsPaused = false;
+            RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
             BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
 
@@ -448,6 +470,11 @@ public partial class OrganizeViewModel : ObservableObject
         }
 
         Progress = p.Percent;
+
+        // 速率观测行：只在服务给出有效样本时刷新（null = 未启用 AI / 真实请求不足 2 次 / 全命中缓存），
+        // 保留上一次的值而不是清空——本批次仍在跑，旧值仍是「最近一分钟」的真实读数。
+        if (p.AiRpm.HasValue) RateText = FormatRateLine(p.AiRpm.Value, p.AiLatencyMs, p.AiGateRpm);
+
         // 限制界面集合增长：超出上限时滚动丢弃最旧一条，始终保留最近 MaxResults 条；
         // 完整结果仍在服务端的 report.Results 与输出目录 rename_log.csv 中。
         if (p.Result != null)
@@ -455,6 +482,36 @@ public partial class OrganizeViewModel : ObservableObject
             if (Results.Count >= MaxResults) Results.RemoveAt(0);
             Results.Add(p.Result);
         }
+    }
+
+    /// <summary>
+    /// 拼出速率观测行：<c>AI 实际 4.0 张/分 · 服务端响应 15.2 秒/张 · 闸门上限 30 张/分（未触发，瓶颈在服务端）</c>。
+    /// 三个数必须同屏：单看「闸门 30」会以为是速率目标，单看「实际 4」又会以为是我们限速限错了；
+    /// 并排之后才能看出 4 &lt;&lt; 30、闸门一次都没满过，慢的是服务端（单张就要 15 秒）。
+    /// </summary>
+    /// <param name="rpm">最近 60 秒窗口内完成的真实请求数。</param>
+    /// <param name="latencyMs">最近一次真实请求的端到端时长（毫秒）；null 时省略该段。</param>
+    /// <param name="gateRpm">闸门上限；null 表示本引擎不带闸门。</param>
+    private static string FormatRateLine(double rpm, int? latencyMs, int? gateRpm)
+    {
+        var sb = new StringBuilder();
+        sb.Append("AI 实际 ").Append(rpm.ToString("F1", CultureInfo.InvariantCulture)).Append(" 张/分");
+        if (latencyMs.HasValue)
+            sb.Append(" · 服务端响应 ").Append((latencyMs.Value / 1000.0).ToString("F1", CultureInfo.InvariantCulture)).Append(" 秒/张");
+
+        sb.Append(" · 闸门");
+        if (gateRpm.HasValue)
+        {
+            sb.Append("上限 ").Append(gateRpm.Value.ToString(CultureInfo.InvariantCulture)).Append(" 张/分");
+            // 实际速率不足上限一半 → 闸门连窗口都没填满过，不可能在等闸门（P33：别把瓶颈赖给限速）
+            if (rpm < gateRpm.Value * 0.5) sb.Append("（未触发，瓶颈在服务端）");
+        }
+        else
+        {
+            // 不带闸门的引擎（智谱/通义/通用档）：明确写「不限」，留空会被误读成「0 张/分」
+            sb.Append(" 不限");
+        }
+        return sb.ToString();
     }
 
     private const int MaxResults = 2000;

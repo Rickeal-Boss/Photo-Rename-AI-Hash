@@ -50,6 +50,26 @@ public class OrganizeProgress
     public string? LogLine { get; set; }
 
     public RenameLogEntry? Result { get; set; }
+
+    /// <summary>
+    /// AI 实际速率（张/分）：本批次「最近 60 秒窗口」内真正发出过 HTTP 的 AI 请求完成数。
+    /// 与限流闸门同取 60 秒窗口，故可直接和 <see cref="AiGateRpm"/> 比较。
+    /// null = 无有效样本（未启用 AI / 真实请求不足 2 次 / 全部命中结果缓存），UI 应隐藏速率行。
+    /// </summary>
+    public double? AiRpm { get; set; }
+
+    /// <summary>
+    /// 最近一次真实 AI 请求的端到端响应时长（毫秒）：含退避等待与重试，即「一张图从发请求到拿到结果」。
+    /// null = 本批次尚无真实请求。
+    /// </summary>
+    public int? AiLatencyMs { get; set; }
+
+    /// <summary>
+    /// 当前引擎的限流闸门上限（张/分）；null = 该引擎不带闸门（不主动限速）。
+    /// <b>它是「60 秒最多放行几次」的上限保护，不是速率目标</b>——与 <see cref="AiRpm"/> 并排显示
+    /// 就是为了让这个区别可见（否则用户会把「闸门 30」读成「应该跑 30 张/分」）。
+    /// </summary>
+    public int? AiGateRpm { get; set; }
 }
 
 /// <summary>整理结果汇总。</summary>

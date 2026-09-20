@@ -156,6 +156,13 @@
                                Visibility="{x:Bind ViewModel.StatusLineVisibility, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                AutomationProperties.LiveSetting="Polite" />
+                    <!-- AI 速率观测行：把「实际速率 / 服务端响应时长 / 闸门上限」并排显示，
+                         说明闸门是「60 秒最多放行几次」的上限保护而非速率目标。
+                         未启用 AI 或真实请求不足 2 次时，由 VM 置空文本并自行收起本行。 -->
+                    <TextBlock Text="{x:Bind ViewModel.RateText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.RateLineVisibility, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               AutomationProperties.LiveSetting="Polite" />
                     <TextBox x:Name="LogBox" Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
                              Style="{StaticResource LogTextBoxStyle}"
                              MinHeight="120" MaxHeight="240" ScrollViewer.VerticalScrollBarVisibility="Auto" />
