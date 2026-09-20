@@ -11,7 +11,7 @@ public class AppSettings
 {
     /// <summary>应用版本号。与 <c>Package.appxmanifest</c> 的 Identity Version 前三段必须一致
     /// （CI 有阻断式断言校验）。发版需递增：MSIX 版本号不变会让「覆盖升级」语义失效。</summary>
-    public const string AppVersion = "3.1.2";
+    public const string AppVersion = "3.1.3";
 
     public AppTheme Theme { get; set; } = AppTheme.System;
 
