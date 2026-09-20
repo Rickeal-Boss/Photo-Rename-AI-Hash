@@ -325,9 +325,18 @@ public sealed class OrganizeService : IOrganizeService
                     //    「跳过 3 张」升级成「整批中止」——那是上一轮刚修掉的误杀，绝不能回来。
                     //    （永久错误不重排队，同一文件在批内只出现一次，故保留文件名后这类计数天然到不了 3；
                     //     真正能凑满 3 的只有「文案里不含文件名的整批级根因」。）
+                    //
+                    // 边界加固（只嵌文件名还不够）：文案里的文件名<b>不含目录</b>，而相机导出的目录
+                    // 天然是同名文件成组出现（DCIM/101/IMG_0001.jpg、DCIM/102/IMG_0001.jpg…），
+                    // 深度优先枚举下它们会连续被处理。若整目录被云盘同步 / 杀软锁住，
+                    // 三个同名文件的 cause 会完全相同 → 误触发整批中止，且中止文案会谎报成
+                    // 「配置 / 账户级问题」。故文案里出现文件名时，再补上完整路径让它与文件一一对应。
+                    // <b>不能无脑给所有逐文件级都补路径</b>：那会让「文案不含文件名的整批级根因」
+                    // （400 Arrearage 欠费等）也变得人人不同 —— 正好把这第二条闸的作用完全抵消掉。
+                    string fileName = Path.GetFileName(f.Path);
                     string cause = ex.IsBatchLevel
-                        ? ex.Message.Replace(Path.GetFileName(f.Path), "{file}")
-                        : ex.Message;
+                        ? ex.Message.Replace(fileName, "{file}")
+                        : (ex.Message.Contains(fileName) ? ex.Message + " @" + f.Path : ex.Message);
                     if (cause == lastPermanentCause) sameCauseCount++;
                     else { lastPermanentCause = cause; sameCauseCount = 1; }
 
@@ -379,9 +388,13 @@ public sealed class OrganizeService : IOrganizeService
                     // （用户已明确确认过这个口径：AI 侧单次调用内最多退避 8 次、总预算 180s，
                     //  叠加 10 次重排队 = 最坏 80 次请求/文件、约 40 分钟，是既定取舍，不动）。
                     // 它们都不是确定性的：网络抖动会过去，模型采样换个种子可能就合规。
-                    // 而「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、解码失败、
-                    // 配置缺失…）上重排队纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
+                    // 而「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、解码失败…）
+                    // 上重排队纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
                     // 故其余异常降到 2 次（给一次「也许刚释放了锁」的机会，然后放弃）。
+                    // 注：「配置缺失 / 端点不合规」（模型名、端点、Key 为空或非 https）已由 AI 层
+                    // 改为抛 AiPermanentException（isBatchLevel: true），在上方
+                    // catch (PermanentOperationException) 分支就被截住——既不重排队，也会连续
+                    // 3 个文件后中止整批，不再经过这里的分档。
                     int cap = IsTransientFailure(ex)
                         ? maxPerFileAttempts
                         : maxDeterministicAttempts;
@@ -1123,7 +1136,11 @@ public sealed class OrganizeService : IOrganizeService
     /// 换一次采样可能就合规，网关偶发返回 HTML 错误页也往往是瞬时的——<b>重试有真实成功率</b>，
     /// 与「配置缺失 / 解码失败」这类必然复现的失败不是一回事。</description></item>
     /// </list>
-    /// 其余（配置缺失、端点不合规、解码失败、MD5 读不出、文件被占用、无权限…）一律 2 次。
+    /// 其余（解码失败、MD5 读不出、文件被占用、无权限、路径非法…）一律 2 次。
+    /// 例外：配置缺失 / 端点不合规（模型名 / 端点 / Key 为空，或端点非 https）已由 AI 层改为抛
+    /// <see cref="AiPermanentException"/>（<c>isBatchLevel: true</c>），在上层
+    /// <c>catch (PermanentOperationException)</c> 就被截住——<b>不重排队</b>，且连续 3 个文件后
+    /// 中止整批；它<b>不会</b>流到这里的分档逻辑。
     /// <para><b>判据一（最可靠）：专用类型 <see cref="AiTransientException"/>。</b>
     /// AI 层在「网络 / 连通性重试耗尽」与「60 秒超时」时抛的就是它——不看文案、不看 inner 类型，
     /// 直接按语义判定。补它的原因见判据二。</para>

@@ -72,7 +72,9 @@ public static class ImageAnalysisHelper
     /// 退避期间点暂停原本要等约 4 分钟才生效，期间还在发请求计费）。
     /// <b>契约必须与 Task.Delay 一致</b>：等满传入的时长后返回，且 <c>ct</c> 取消时抛
     /// <see cref="OperationCanceledException"/>，否则本方法的取消/暂停语义会错乱。</param>
-    /// <exception cref="InvalidOperationException">端点 / 模型 / 密钥为空，或端点不是 https（配置类，重试无意义）。</exception>
+    /// <exception cref="AiPermanentException">端点 / 模型 / 密钥为空，或端点不是 https（<b>配置类</b>，
+    /// 对整批成立、重试无意义：不进文件级重排队，连续 3 个文件命中即中止整批并提示用户去设置页补全）。</exception>
+    /// <exception cref="InvalidOperationException">循环兜底：调用超出最大尝试次数（理论不可达）。</exception>
     /// <exception cref="AiTransientException">网络 / 连通性异常，或服务端 60 秒未响应（超时），且重试次数或退避预算已耗尽
     /// —— 属瞬时故障，换时间点重试有真实成功率（原始异常保留在 <c>InnerException</c>）。</exception>
     /// <exception cref="HttpRequestException">429 限流 / 5xx / 408 / 425 服务端错误重试次数或退避预算耗尽（携带状态码与响应体片段）。</exception>
@@ -82,8 +84,14 @@ public static class ImageAnalysisHelper
         AiProviderProfile profile, CancellationToken ct,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
+        // 配置缺失 = 整批级永久错误：模型名为空时每个文件都会以完全相同的方式失败，
+        // 此前抛裸 InvalidOperationException 会被编排层判成「确定性失败」再重排队 2 次——
+        // 空配置重试没有任何成功可能，只是浪费 2 次请求并推迟「请填写模型名」的提示。
+        // isBatchLevel: true 必须显式写出（P26：不可依赖默认值）。
         if (string.IsNullOrWhiteSpace(model))
-            throw new InvalidOperationException("视觉识别模型名未配置（自定义引擎请在「设置」中填写模型名）。");
+            throw new AiPermanentException(
+                "视觉识别模型名未配置（自定义引擎请在「设置」中填写模型名）。",
+                isBatchLevel: true);
 
         var body = new
         {
@@ -122,16 +130,25 @@ public static class ImageAnalysisHelper
         string endpoint, string apiKey, string jsonBody, AiProviderProfile profile, CancellationToken ct,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
+        // 以下三处与 CallVisionApiAsync 的「模型名为空」同属配置缺失：
+        // 整批级永久错误，不重排队（空配置重试无成功可能），连续 3 个文件命中即中止整批。
+        // 中文文案逐字保持不变，只换异常类型——用户看到的仍是「请到设置页填写 …」的可操作提示。
+        // isBatchLevel: true 一律显式写出（P26：不可依赖 AiPermanentException 的默认值）。
         if (string.IsNullOrWhiteSpace(endpoint))
-            throw new InvalidOperationException("视觉识别端点 URL 未配置（自定义引擎请在「设置」中填写端点）。");
+            throw new AiPermanentException(
+                "视觉识别端点 URL 未配置（自定义引擎请在「设置」中填写端点）。",
+                isBatchLevel: true);
         if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException("API Key 未配置：请在「设置」中填写所选识别引擎的 Key 后再开始整理。");
+            throw new AiPermanentException(
+                "API Key 未配置：请在「设置」中填写所选识别引擎的 Key 后再开始整理。",
+                isBatchLevel: true);
 
         // 安全：端点必须走 https，避免 API Key 与用户照片以明文 HTTP 出站（D-5）。
         // Zhipu/通义/NVIDIA 常量端点均为 https；此处主要约束用户自填的「自定义」端点。
         if (!endpoint.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException(
-                "视觉识别端点必须使用 https（自定义引擎请在「设置」中填写以 https:// 开头的端点，避免 API Key 与照片以明文出站）。");
+            throw new AiPermanentException(
+                "视觉识别端点必须使用 https（自定义引擎请在「设置」中填写以 https:// 开头的端点，避免 API Key 与照片以明文出站）。",
+                isBatchLevel: true);
 
         // 429 限流 / 5xx 服务端错误：按供应商策略档退避重试（次数上限 + 总耗时预算双闸），
         // 并遵从服务端给出的重试时间提示；重试期间不返回任何结果，
