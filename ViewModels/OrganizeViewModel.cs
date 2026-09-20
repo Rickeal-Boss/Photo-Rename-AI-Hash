@@ -88,6 +88,24 @@ public partial class OrganizeViewModel : ObservableObject
 
     [ObservableProperty] private int _progress;
 
+    /// <summary>
+    /// A-11：进度条是否走不确定态——只在「忙但还没有任何具体进度值」时为 true。
+    /// 此前 IsIndeterminate 直接绑 IsBusy，整个运行期都是滚动动画，
+    /// 精心算出来的 Percent 用户根本看不到；有具体百分比后必须切到确定态。
+    /// </summary>
+    public bool IsProgressIndeterminate => IsBusy && Progress <= 0;
+
+    // IsBusy / Progress 任一变化都要让上面的计算属性重新求值（x:Bind OneWay 只认属性变更通知）
+    partial void OnIsBusyChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsProgressIndeterminate));
+    }
+
+    partial void OnProgressChanged(int value)
+    {
+        OnPropertyChanged(nameof(IsProgressIndeterminate));
+    }
+
     [ObservableProperty] private string _statusText = "选择文件夹后点击「开始整理」。";
 
     /// <summary>
@@ -399,6 +417,10 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     public void SyncProviderFromDisk()
     {
+        // A-11：配置读取失败在整理页也要可见 —— 用户可能从不进「设置」页，
+        // 只在下次启动时发现「我填的路径 / 模板 / 引擎全没了」，且原文件已被覆盖、无从察觉。
+        ShowLoadFailureWarningIfNeeded();
+
         int disk = (int)_settings.Load().AiProvider;
         if (disk == AiProviderIndex)
         {
@@ -408,6 +430,27 @@ public partial class OrganizeViewModel : ObservableObject
         if (AiProviderIndex != _syncedProviderIndex) return; // 用户手动改过 → 保留其当次选择
         AiProviderIndex = disk;
         _syncedProviderIndex = disk;
+    }
+
+    /// <summary>
+    /// A-11：settings.json 反序列化 / 读取失败时在整理页也明确告知用户。
+    /// 此时磁盘那份配置读不出来（已被备份到同目录），而内存里是整份归零的默认值——
+    /// 不提示的话用户会以为是自己没填过，还可能在不知情的情况下让整理结束的自动持久化把它写回去。
+    /// </summary>
+    /// <remarks>标志只挂在 <see cref="SettingsService"/> 实现上（不进 ISettingsService 契约），故按具体类型读取。</remarks>
+    private void ShowLoadFailureWarningIfNeeded()
+    {
+        if (_settings is not SettingsService settings) return;
+        if (!settings.LoadFailedFromDisk) return;
+
+        var backup = settings.LastCorruptedBackupPath;
+        var where = string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）";
+        StatusText = "配置文件读取失败" + where +
+                     "，为避免覆盖，本次未自动保存；请在「设置」页检查文件或重新配置。";
+        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error;
+        StatusBarOpen = true;
+        AppendLog("配置文件读取失败" + where +
+                  "，为避免覆盖原文件，整理结果对应的配置本次未自动写入磁盘。");
     }
 
     private OrganizeRequest BuildRequest()
@@ -444,6 +487,18 @@ public partial class OrganizeViewModel : ObservableObject
 
     private async Task PersistConfigAsync()
     {
+        // A-11：配置损坏保护 —— 整理结束的持久化属于「自动保存」，此时 _model 来自失败的 Load
+        // （整份归零的默认值，含 4 个密钥），写下去就把用户还没确认的损坏文件顶掉了。
+        // 原文件在 Load 失败那一刻已备份，但在用户于「设置」页确认之前一律不自动写盘。
+        if (_settings is SettingsService settingsImpl && settingsImpl.HasUnacknowledgedLoadFailure)
+        {
+            var backup = settingsImpl.LastCorruptedBackupPath;
+            AppendLog("配置未保存：配置文件读取失败" +
+                      (string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）") +
+                      "，为避免覆盖原文件本次未自动写入；请在「设置」页确认后保存。");
+            return;
+        }
+
         // P1-A 修复：_model 是 BuildRequest 时（任务开始）加载的快照，长任务期间设置页
         // 可能刚保存过密钥等配置。保存前重读磁盘，只覆盖整理页拥有的字段，避免覆盖其它来源的改动。
         _model = _settings.Load();
@@ -469,7 +524,10 @@ public partial class OrganizeViewModel : ObservableObject
             if (LogText.Length > 20000) LogText = LogText.Substring(LogText.Length - 20000);
         }
 
-        Progress = p.Percent;
+        // A-11 防御：只在服务给出有效正值时推进进度，且不允许倒退。
+        // 静态审查确认当前 18 处 progress.Report 里 4 处不带 Percent 的路径不可达，所以现在不是 bug；
+        // 但服务侧将来只要新增一个漏带 Percent 的 Report，无条件赋值就会把进度条打回 0（用户以为卡死）。
+        if (p.Percent > 0) Progress = System.Math.Max(Progress, p.Percent);
 
         // 速率观测行：只在服务给出有效样本时刷新（null = 未启用 AI / 真实请求不足 2 次 / 全命中缓存），
         // 保留上一次的值而不是清空——本批次仍在跑，旧值仍是「最近一分钟」的真实读数。

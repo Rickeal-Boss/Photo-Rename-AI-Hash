@@ -18,6 +18,18 @@ public partial class SettingsViewModel : ObservableObject
     // 「主题已切换」InfoBar 误弹出（仅抑制提示，保留 _model.Theme 同步逻辑）
     private bool _initializing = true;
 
+    /// <summary>
+    /// A-11：用户在设置页手动改过「AI 区块」（引擎 / 自定义端点 / 模型 / RPM）且尚未落盘。
+    /// 设置页是 NavigationCacheMode="Required"（整会话只构造一次），而 AiProvider 也会被整理页写入；
+    /// 导航回本页时要以磁盘值对齐下拉框，但<b>不能把用户没保存的编辑冲掉</b>——故用此标志区分
+    /// 「值陈旧（应同步）」与「用户手动改过（不应覆盖）」，与 OrganizeViewModel.SyncProviderFromDisk
+    /// 用的是同一套路。
+    /// </summary>
+    private bool _aiBlockDirty;
+
+    /// <summary>A-11：同步 / 初始化期间置位——由同步引起的属性变化不算「用户手动改过」。</summary>
+    private bool _suppressAiDirty;
+
     public SettingsViewModel()
     {
         _model = _settings.Load();
@@ -34,8 +46,32 @@ public partial class SettingsViewModel : ObservableObject
         CustomApiRpmLimit = _model.CustomApiRpmLimit;
         OnPropertyChanged(nameof(ThemeIndex)); // 与 Theme 赋值保持一致，确保索引计算属性就绪
         _initializing = false;
+        _aiBlockDirty = false; // 构造期的赋值由 _initializing 抑制，这里再显式兜一次底
 
         ShowUndecryptableKeysWarningIfNeeded();
+        // A-11：配置读取失败提示（更严重，放在后面以便覆盖上面的解密失败提示）
+        ShowLoadFailureWarningIfNeeded();
+    }
+
+    /// <summary>
+    /// A-11：settings.json 反序列化 / 读取失败时明确告知用户。
+    /// 此时 <see cref="ISettingsService.Load"/> 返回的是<b>整份归零的默认配置</b>（含 4 个密钥），
+    /// 但原文件已被备份、且在用户点「保存设置」确认之前不会被任何保存覆盖。
+    /// 不提示的话用户只会看到「配置莫名其妙空了」，并可能在不知情的情况下把空配置写回去。
+    /// </summary>
+    /// <remarks>标志只挂在 <see cref="SettingsService"/> 实现上（不进契约、不进 AppSettings），故按具体类型读取。</remarks>
+    private void ShowLoadFailureWarningIfNeeded()
+    {
+        if (_settings is not SettingsService settings) return;
+        if (!settings.LoadFailedFromDisk) return;
+
+        var backup = settings.LastCorruptedBackupPath;
+        StatusText = "配置文件读取失败" +
+                     (string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）") +
+                     "，为避免覆盖，本次未自动保存；请检查文件或重新配置。" +
+                     (string.IsNullOrEmpty(settings.LastLoadError) ? "" : "（原因：" + settings.LastLoadError + "）");
+        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error;
+        StatusBarOpen = true;
     }
 
     /// <summary>
@@ -78,10 +114,35 @@ public partial class SettingsViewModel : ObservableObject
         get => (int)_model.AiProvider;
         set
         {
+            // A-11：用户在本页改过引擎 → 标记 AI 区块为脏，导航回本页时不再被磁盘值覆盖
+            // （构造期赋值与同步期赋值都通过 _initializing / _suppressAiDirty 排除）
+            if (!_initializing && !_suppressAiDirty && (int)_model.AiProvider != value) _aiBlockDirty = true;
             _model.AiProvider = (AiProvider)value;
             OnPropertyChanged(nameof(IsCustomProvider));
             OnPropertyChanged(nameof(CustomProviderVisibility));
         }
+    }
+
+    // A-11：自定义端点 / 模型 / RPM 同属「设置页拥有的 AI 区块」。用户在设置页改过但未保存时，
+    // 导航回本页不得以磁盘值覆盖（否则等于静默丢弃他的编辑——正是本次要修的那类静默回退）。
+    partial void OnCustomApiUrlChanged(string value)
+    {
+        MarkAiBlockDirty();
+    }
+
+    partial void OnCustomApiModelChanged(string value)
+    {
+        MarkAiBlockDirty();
+    }
+
+    partial void OnCustomApiRpmLimitChanged(double value)
+    {
+        MarkAiBlockDirty();
+    }
+
+    private void MarkAiBlockDirty()
+    {
+        if (!_initializing && !_suppressAiDirty) _aiBlockDirty = true;
     }
 
     /// <summary>当前选中的是否为「自定义」引擎。</summary>
@@ -155,16 +216,53 @@ public partial class SettingsViewModel : ObservableObject
         _model.Theme = newValue;
         var mainWindow = PhotoRenameAIHash.App.MainWindow;
         if (mainWindow != null) ThemeHelper.Apply(mainWindow, newValue);
-        StatusText = "主题已切换（下次启动也会保留）。";
-        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational; // P1-1：非保存终态用中性提示
-        StatusBarOpen = true;
         OnPropertyChanged(nameof(ThemeIndex));
+
+        // A-11：页面文案写着「切换立即生效并保留 / 下次启动也会保留」，但此前只改内存值不落盘——
+        // 用户切完主题不点「保存设置」直接退出，主题就会回退且无从察觉（P33 谎报）。
+        // 这里在切换的同时立即持久化；保存结果（含失败）由 SaveThemeAsync 出提示。
+        _ = SaveThemeAsync();
+    }
+
+    /// <summary>
+    /// A-11：主题切换后的即时落盘。只写「主题」这一个本页拥有的字段，不触碰其它字段——
+    /// 避免把整理页刚持久化的源/输出文件夹等配置用构造期快照回退。
+    /// </summary>
+    private async Task SaveThemeAsync()
+    {
+        // A-11：沿用 SaveAsync 的既有约定——「重读磁盘快照前先捕获 UI 当前值」。
+        // AiProviderIndex 的 getter 读 _model.AiProvider，若不先捕获、重读后取到的会是磁盘旧值。
+        var pendingProvider = (AiProvider)AiProviderIndex;
+        try
+        {
+            // 重读磁盘（不覆盖 _model，避免打乱本页其余字段的内存状态），只回写主题与引擎
+            var model = _settings.Load();
+            model.Theme = Theme;
+            model.AiProvider = pendingProvider;
+            await _settings.SaveAsync(model);
+
+            StatusText = "主题已切换（已保存，下次启动也会保留）。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success;
+        }
+        catch (Exception ex)
+        {
+            // 保存失败必须出声：否则用户以为主题已保留，下次启动却回退（P33 谎报）
+            StatusText = "主题已切换，但保存到本机失败：" + ex.Message + "。下次启动会回退，请点「保存设置」重试。";
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error;
+        }
+        StatusBarOpen = true;
     }
 
     [RelayCommand]
     private async Task SaveAsync()
     {
         StatusBarOpen = false; // 先收起，避免用户手动关闭后同值赋值不再触发弹出
+
+        // A-11：用户在设置页点「保存设置」= 明确确认「我接受覆盖那份读不出来的配置文件」
+        // （原文件在 Load 失败那一刻已备份，不会不可恢复）。整理结束的自动持久化不调用这里。
+        if (_settings is SettingsService settingsImpl && settingsImpl.LoadFailedFromDisk)
+            settingsImpl.AcknowledgeLoadFailure();
+
         // P1-A 修复：_model 是页面构造时的快照（页面 Required 缓存后整会话不刷新），
         // 直接整文件保存会静默回退整理页等其它来源刚写入的配置。保存前先重读磁盘，
         // 只覆盖本页拥有的字段，其余字段（整理配置等）以磁盘最新值为准。
@@ -215,7 +313,24 @@ public partial class SettingsViewModel : ObservableObject
         //（显示与落盘不一致，P33）
         CustomApiRpmLimit = rpm;
 
-        await _settings.SaveAsync(_model);
+        try
+        {
+            await _settings.SaveAsync(_model);
+        }
+        catch (Exception ex)
+        {
+            // A-11：保存失败必须出声。此前没有 catch，一旦写盘失败（权限/磁盘满/保护闩）
+            // 命令内的异常会被 AsyncRelayCommand 收进 ExecutionTask，界面上什么都不会发生——
+            // 用户以为配置已存，下次启动却是旧值（P33 谎报）。
+            StatusText = "保存失败：" + ex.Message;
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error;
+            StatusBarOpen = true;
+            return;
+        }
+
+        // 已落盘 → 本页 AI 区块与磁盘重新对齐，之后的导航同步不会被误判为「用户改过」
+        _aiBlockDirty = false;
+
         // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新
         OnPropertyChanged(nameof(AiProviderIndex));
         OnPropertyChanged(nameof(CustomProviderVisibility));
@@ -291,8 +406,37 @@ public partial class SettingsViewModel : ObservableObject
     /// </summary>
     public void SyncOwnedFieldsFromDisk()
     {
-        DefaultFolder = _settings.Load().DefaultFolder;
+        var disk = _settings.Load();
+        DefaultFolder = disk.DefaultFolder;
+
+        // A-11：此前这里只同步了 DefaultFolder，AI 引擎下拉框不同步 → 用户在整理页改了引擎并持久化后
+        // 进设置页看到的仍是旧值，再点「保存设置」就把旧引擎写回去了（用户改的引擎静默丢失）。
+        // 现在把设置页拥有的 AI 字段一起与磁盘对齐。
+        // 仅在用户本页没手动改过（_aiBlockDirty == false）时覆盖，否则会把他没保存的编辑冲掉。
+        if (!_aiBlockDirty)
+        {
+            _suppressAiDirty = true; // 同步引起的属性变化不算「用户手动改过」
+            try
+            {
+                AiProviderIndex = (int)disk.AiProvider;
+                CustomApiUrl = disk.CustomApiUrl;
+                CustomApiModel = disk.CustomApiModel;
+                CustomApiRpmLimit = disk.CustomApiRpmLimit;
+                _aiBlockDirty = false;
+            }
+            finally
+            {
+                _suppressAiDirty = false;
+            }
+            // 下拉框与「自定义」区块可见性都依赖 _model.AiProvider，同步后主动刷新
+            OnPropertyChanged(nameof(AiProviderIndex));
+            OnPropertyChanged(nameof(IsCustomProvider));
+            OnPropertyChanged(nameof(CustomProviderVisibility));
+        }
+
         // 设置页整会话只构造一次，解密失败提示要跟着最新的磁盘状态刷新（用户重填保存后不再提示）
         ShowUndecryptableKeysWarningIfNeeded();
+        // A-11：配置读取失败提示（更严重，放在后面以便覆盖上面的解密失败提示）
+        ShowLoadFailureWarningIfNeeded();
     }
 }

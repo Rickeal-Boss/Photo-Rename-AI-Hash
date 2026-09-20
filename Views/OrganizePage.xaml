@@ -150,8 +150,10 @@
                              Message="{x:Bind ViewModel.StatusBarMessage, Mode=OneWay}"
                              IsClosable="True"
                              AutomationProperties.LiveSetting="Polite" />
+                    <!-- A-11：IsIndeterminate 只在「忙但还没有任何进度值」时为 true。
+                         此前恒等于 IsBusy，运行期一直是滚动动画，算好的 Percent 用户根本看不到。 -->
                     <ProgressBar Value="{x:Bind ViewModel.Progress, Mode=OneWay}"
-                                 IsIndeterminate="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                                 IsIndeterminate="{x:Bind ViewModel.IsProgressIndeterminate, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
                                Visibility="{x:Bind ViewModel.StatusLineVisibility, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"

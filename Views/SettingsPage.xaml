@@ -125,7 +125,10 @@
 
             <!-- D-3.5：「保存设置」按钮已上移至标题行右侧，此处不再重复 -->
             <!-- P1-1：保存结果以 InfoBar 提示（含主题切换提示，替代原状态 TextBlock） -->
-            <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=OneWay}"
+            <!-- A-11：IsOpen 必须是 TwoWay（与整理页一致）。此前是 OneWay，用户手动关掉一次后
+                 关闭动作只改了控件、回写不到 VM，VM 里 StatusBarOpen 仍为 true，
+                 后续赋 true 不再触发变更通知 → 提示永久静默（连「密钥解不开」这条安全提示也不再弹）。 -->
+            <InfoBar IsOpen="{x:Bind ViewModel.StatusBarOpen, Mode=TwoWay}"
                      Severity="{x:Bind ViewModel.StatusSeverity, Mode=OneWay}"
                      Message="{x:Bind ViewModel.StatusText, Mode=OneWay}"
                      IsClosable="True"
