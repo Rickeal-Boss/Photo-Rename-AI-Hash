@@ -52,8 +52,18 @@ PhotoRenameAIHash/
 ## Installing
 
 The release artifact contains **four files — keep them together**. Only the first three are
-needed to install — `安装说明.txt` is documentation (`Install.bat` locates the package by
-`dir /b PhotoRenameAIHash*_x64.msix` and never reads it, so it is not required):
+needed to install — `安装说明.txt` is documentation (`Install.bat` never reads it, so it is
+not required).
+
+`Install.bat` looks up the package in **two passes** and never hardcodes a version, so a version
+bump never breaks it:
+
+1. preferred — `dir /b PhotoRenameAIHash*_x64.msix` (the exact shape the build produces)
+2. fallback — `dir /b /o:d PhotoRenameAIHash*.msix`, newest first, used only if pass 1 finds
+   nothing (keeps working if the package is ever renamed, e.g. a different platform segment)
+
+> If you change either pattern in `Install.bat`, update `安装说明.txt` and this section too —
+> CI asserts that every lookup pattern in `Install.bat` is documented in one of the two.
 
 | File | Purpose |
 |------|---------|

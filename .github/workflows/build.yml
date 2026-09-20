@@ -6,7 +6,11 @@ on:
 
   push:
 
-    branches: [main, Hy, pfx, fix]
+    # fix2 必须显式列出：本轮所有审查修复都在 fix2 上做，漏了它 → 推送不触发任何构建，
+    # 全部修复失去验证（此前正是 main/Hy/pfx/fix 四个名字写死，新分支一律不跑）。
+    # fix* 是兜底：后续再拉 fix3 / fix-xxx 一类分支时不必回来改这里，也不会因为
+    # 「名字没登记」而出现「推了但 CI 静默没跑」——那是最难发现的一类失败。
+    branches: [main, Hy, pfx, fix, fix2, fix*]
 
   workflow_dispatch:
 
@@ -174,6 +178,107 @@ jobs:
 
 
       # =====================================================================
+      # 自包含打包不变量断言（阻断式，只读）。
+      # 防的是「被当成无用代码清理掉」这一类退化：下面每一条单独看都像冗余配置，
+      # 删掉之后 CI 照样能出包、照样全绿，崩的是用户机器上启动那一刻（0xc000027b
+      # = STATUS_ASSERTION_FAILURE，于 Microsoft.ui.xaml.dll，无任何可读报错）。
+      #   ① _RemoveFrameworkReferences：自包含必需。删掉它，MSIX 里会残留一条悬空的
+      #      WindowsAppRuntime FrameworkSdkReference，与打进包的运行时并存 → 启动即崩。
+      #   ② WindowsAppSDKSelfContained=true：决定了运行时是否真的打进 .msix。
+      #   ③ pubxml 的 SelfContained + RuntimeIdentifier：决定 .NET 8 运行时是否打进包
+      #      （只有 ② 没有 ③ 的话，没装 .NET 8 桌面运行时的机器装完也起不来）。
+      #   ④ PublishTrimmed=false：WinUI 3 已知问题 microsoft-ui-xaml#9914，
+      #      自包含 Release 默认开剪裁会剪掉 XAML 运行期所需类型 → 启动 0xc000027b。
+      #   ⑤ manifest 不得残留 <PackageDependency>：与 ① 是同一件事的两个面，
+      #      声明了框架依赖却又把运行时打进包，离线安装时依赖校验失败 0x80073CF3。
+      # 位置选在最贵的 Restore/Publish 之前：只读三个文件，fail fast，几秒出结果。
+      #
+      # ⚠ 实现要点：必须先剥掉 XML 注释再匹配。Package.appxmanifest 的注释里
+      #   写着「此处不再声明…PackageDependency」——不剥注释会把它当成真声明，
+      #   断言立刻误报并把绿构建刷红（已实测：原文 -match 'PackageDependency' 为 True）。
+      # =====================================================================
+      - name: Assert self-contained packaging invariants (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:selfcontained-guard-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          function Strip-XmlComments([string]$t) { [regex]::Replace($t, '<!--[\s\S]*?-->', '') }
+
+          $csprojPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.csproj"
+          $manPath    = Join-Path $env:GITHUB_WORKSPACE "Package.appxmanifest"
+          $pubPath    = Join-Path $env:GITHUB_WORKSPACE "Properties/PublishProfiles/win10-x64.pubxml"
+          foreach ($p in @($csprojPath, $manPath, $pubPath)) { if (-not (Test-Path $p)) { Write-Error ("缺少 " + $p + "：自包含打包链路不完整"); exit 1 } }
+
+          $csproj = Strip-XmlComments ([System.IO.File]::ReadAllText($csprojPath))
+          $man    = Strip-XmlComments ([System.IO.File]::ReadAllText($manPath))
+          $pub    = Strip-XmlComments ([System.IO.File]::ReadAllText($pubPath))
+
+          if (-not ($csproj -match '_RemoveFrameworkReferences')) { Write-Error "csproj 缺失 _RemoveFrameworkReferences Target：自包含 MSIX 会残留悬空的 WindowsAppRuntime framework 引用，与包内运行时并存 → 启动 0xc000027b。它看起来像'无用 Target'，删不得。"; exit 1 }
+          if (-not ($csproj -match '<WindowsAppSDKSelfContained>\s*true\s*</WindowsAppSDKSelfContained>')) { Write-Error "csproj 的 WindowsAppSDKSelfContained 不为 true：Windows App SDK 运行时不会打进 .msix，离线安装会因框架未预置失败"; exit 1 }
+          if (-not ($pub -match '<SelfContained>\s*true\s*</SelfContained>')) { Write-Error "pubxml 的 SelfContained 不为 true：.NET 8 运行时不会打进 .msix，与「无需任何运行时预装」的承诺不符"; exit 1 }
+          if (-not ($pub -match '<RuntimeIdentifier>\s*\S+\s*</RuntimeIdentifier>')) { Write-Error "pubxml 缺少 RuntimeIdentifier：自包含发布无法确定目标 RID"; exit 1 }
+          if (-not ($pub -match '<PublishTrimmed>\s*false\s*</PublishTrimmed>')) { Write-Error "pubxml 的 PublishTrimmed 不为 false：WinUI 3 自包含 Release 剪裁会剪掉 XAML 运行期所需类型 → 启动 0xc000027b（microsoft-ui-xaml#9914）"; exit 1 }
+          if ($man -match '<PackageDependency') { Write-Error "Package.appxmanifest 仍声明了 <PackageDependency>：自包含模型下运行时已打进包，再声明框架依赖会让离线安装时依赖校验失败（0x80073CF3）"; exit 1 }
+
+          "SCGUARD ok: framework-target=1 wasdkSC=1 selfContained=1 rid=1 trimmed=false pkgDependency=0" >> ci-diagnostics.log
+          Write-Host "SCGUARD ok: 自包含打包五项不变量全部满足"
+          "CHECKPOINT:selfcontained-guard-done" >> ci-diagnostics.log
+
+      # =====================================================================
+      # Install.bat 不变量断言（阻断式，只读）。
+      # 三条都属同一类：被人"顺手简化"掉之后不会立刻报错，而是退化成
+      # 【静默失败】——正是本项目最难排查的那一类故障。
+      #   ① chcp 65001 必须存在且位于任何中文 echo 之前：
+      #      没有它，cmd 按 936 解析 UTF-8 字节 → 用户看到满屏乱码，
+      #      而脚本功能完全正常、CI 全绿。
+      #   ② 管理员自检（net session / fltmc）必须存在：
+      #      没有它，非管理员双击会在证书导入处失败，一路走到安装才抛看不懂的错。
+      #   ③ Install.bat 里每个 dir /b 查找模式必须在文档里出现过：
+      #      这条防的是"三处各自演化"（Install.bat / README / 安装说明.txt）。
+      #      只做正向（脚本模式 → 文档），不做反向：文档里用的是
+      #      PhotoRenameAIHash_<version>_x64.msix 这种带占位符的写法，
+      #      反向匹配会被占位符绊倒，收益不抵误报。
+      # =====================================================================
+      - name: Assert Install.bat invariants (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:bat-guard-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $batPath = Join-Path $env:GITHUB_WORKSPACE "Install.bat"
+          if (-not (Test-Path $batPath)) { Write-Error "缺少 Install.bat（交付三件套之一）"; exit 1 }
+          $lines = [System.IO.File]::ReadAllLines($batPath)
+          $bat = $lines -join "`n"
+
+          # ① chcp 65001，且必须在第一条含非 ASCII 的 echo 之前
+          $chcpIdx = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match 'chcp\s+65001') { $chcpIdx = $i; break } }
+          if ($chcpIdx -lt 0) { Write-Error "Install.bat 缺少 'chcp 65001'：中文提示会按 936 解析 UTF-8 字节 → 用户看到乱码，而脚本功能正常、CI 全绿（静默退化）"; exit 1 }
+          $firstCjk = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '\S*[一-鿿]\S*' -and $lines[$i] -notmatch '^\s*REM') { $firstCjk = $i; break } }
+          if ($firstCjk -ge 0 -and $chcpIdx -gt $firstCjk) { Write-Error ("Install.bat 的 'chcp 65001'（第 " + ($chcpIdx + 1) + " 行）晚于第一条含中文的非注释行（第 " + ($firstCjk + 1) + " 行）：这一行会以 936 解码成乱码"); exit 1 }
+
+          # ② 管理员自检
+          if (-not ($bat -match 'net\s+session') -and -not ($bat -match 'fltmc')) { Write-Error "Install.bat 缺少管理员自检（net session / fltmc）：证书导入 LocalMachine 必须提权，没有自检时非管理员双击会静默失败到安装步才报错"; exit 1 }
+
+          # ③ 脚本里的 dir /b 查找模式必须在文档里出现过
+          $patterns = @()
+          foreach ($m in [regex]::Matches($bat, "dir\s+/b(?:\s+/o:\S+)?\s+(\S+\.msix)")) { $patterns += $m.Groups[1].Value }
+          $patterns = $patterns | Select-Object -Unique
+          if ($patterns.Count -eq 0) { Write-Error "Install.bat 里没有解析到任何 'dir /b <模式>.msix'：查找逻辑可能被重写，本步无法判断其有效性"; exit 1 }
+          $docs = @()
+          foreach ($d in @("README.md", "安装说明.txt")) { $p = Join-Path $env:GITHUB_WORKSPACE $d; if (Test-Path $p) { $docs += [System.IO.File]::ReadAllText($p) } }
+          if ($docs.Count -eq 0) { Write-Error "找不到 README.md / 安装说明.txt，无法校验查找模式是否同步"; exit 1 }
+          $undocumented = @()
+          foreach ($pat in $patterns) { if (-not (($docs -join "`n") -match [regex]::Escape($pat))) { $undocumented += $pat } }
+          if ($undocumented.Count -gt 0) { Write-Error ("Install.bat 的查找模式 " + ($undocumented -join ', ') + " 在 README.md / 安装说明.txt 中均未提及：三处说明已各自演化，用户按文档判断会得出错误结论。请同步文档（README 的 Installing 章节为权威源）。"); exit 1 }
+
+          ("BATGUARD chcp_line=" + ($chcpIdx + 1) + " first_cjk_line=" + ($firstCjk + 1) + " patterns=" + ($patterns -join ',') ) >> ci-diagnostics.log
+          Write-Host ("BATGUARD ok: chcp@" + ($chcpIdx + 1) + ", patterns=" + ($patterns -join ','))
+          "CHECKPOINT:bat-guard-done" >> ci-diagnostics.log
+
+
+
+      # =====================================================================
       # NuGet 包缓存（性能优化，最佳努力类）。
       # 实测基线（run 35435866103，全流程 ~215s）：Restore 58s 且完全没命中缓存，
       # 命中后通常降到 ~10s，一次省 ~48s（约 22%）。保留这个基线，后人才能判断
@@ -225,6 +330,13 @@ jobs:
 
           msbuild PhotoRenameAIHash.csproj /t:Restore /p:Configuration=Release /p:Platform=x64 /p:AppxPackageSigningEnabled=false
 
+          # ⚠ 原来这里直接落 CHECKPOINT:restore-done，从不看 msbuild 的退出码。
+          #   后果是诊断日志会「说谎」：Restore 失败时 CHECKPOINT 序列照样完整，
+          #   用 CHECKPOINT 定位断点的人会直接跳过 Restore 去找后面的原因。
+          #   msbuild 是原生命令，pwsh 默认不会因为非零退出码终止脚本，
+          #   所以必须显式判 $LASTEXITCODE —— 这是 CHECKPOINT 可信度的底线。
+          if ($LASTEXITCODE -ne 0) { ("RESTORE-FAILED exit=" + $LASTEXITCODE) >> ci-diagnostics.log; exit $LASTEXITCODE }
+
           "CHECKPOINT:restore-done" >> ci-diagnostics.log
 
 
@@ -238,9 +350,17 @@ jobs:
           PFX_B64: ${{ secrets.SIGNING_PFX_B64 }}
 
         run: |
+          # 原来本步没有 $ErrorActionPreference。SIGNING_PFX_B64 内容损坏（截断/被误改/
+          # 复制时带换行以外的字符）时 FromBase64String 抛的是【非终止】错误，
+          # 默认 'Continue' 下会静默跳过 → pfx 没生成，而 Publish 步的判据是
+          # 「secret 变量是否存在」而不是「pfx 文件是否存在」，于是继续往下跑，
+          # 直到 msbuild 报一串看不懂的签名错误才红。显式 Stop 让失败停在最接近根因处。
+          $ErrorActionPreference = 'Stop'
           if ($env:PFX_B64) {
             [System.IO.File]::WriteAllBytes("PhotoRenameAIHash.pfx", [System.Convert]::FromBase64String($env:PFX_B64))
             Write-Host "signing pfx restored from secret"
+            if (-not (Test-Path "PhotoRenameAIHash.pfx")) { Write-Error "pfx 写入后仍不存在：签名素材恢复失败"; exit 1 }
+            ("PFX bytes=" + (Get-Item "PhotoRenameAIHash.pfx").Length) >> ci-diagnostics.log
           } else {
             Write-Host "no SIGNING_PFX_B64 secret; build will be unsigned"
           }
@@ -260,6 +380,10 @@ jobs:
       - name: Warn on signing certificate expiry (non-blocking)
 
         shell: pwsh
+
+        env:
+
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
 
         run: |
 
@@ -303,7 +427,18 @@ jobs:
 
 
 
-            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfx
+            # 同 Verify / Export / Compare cer 三步：无密码读失败时回落带 PFX_PASSWORD 读。
+            # 本步【非阻断】，读不到会落进 catch 只打一条 warning —— 那意味着
+            # 「证书还剩多少天」这个唯一的提前预警渠道静默失明，而它本来就是要
+            # 避免的「到期日突然全红且毫无提前信号」。
+            $cert = $null
+            try { $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfx } catch { $expNoPwdErr = $_ }
+            if ($cert -and -not $cert.Thumbprint) { $cert = $null }
+            if (-not $cert) {
+              if (-not $env:PFX_PASSWORD) { throw ("无密码读取 pfx 失败（" + $expNoPwdErr.Exception.Message + "）且未配置 PFX_PASSWORD") }
+              $sec = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfx, $sec
+            }
 
 
 
@@ -389,6 +524,16 @@ jobs:
             Write-Error "SIGNING_PFX_B64 未配置：禁止产出未签名 MSIX（未签名包 Add-AppxPackage 报 0x800B0100，用户无法安装）"
             exit 1
           }
+          # 原来只判「secret 变量是否存在」，不判「pfx 文件是否真的落盘」——
+          # 两者不是一回事：secret 存在而 Restore 步写盘失败时（见上一步新增的 Stop），
+          # 这里照样放行，直到 msbuild 抛一串 MSB/APPX 签名错误才红，
+          # 而根因在几十行之前。多判一次文件，把失败钉在真正断点上。
+          if (-not (Test-Path "PhotoRenameAIHash.pfx")) {
+            "SIGNING=DISABLED_NO_PFX_FILE" >> ci-diagnostics.log
+            Write-Error "SIGNING_PFX_B64 已配置，但工作区里没有 PhotoRenameAIHash.pfx（Restore signing certificate 步未成功落盘）：继续只会让 msbuild 报一串看不懂的签名错误"
+            exit 1
+          }
+          ("SIGNING pfx_bytes=" + (Get-Item "PhotoRenameAIHash.pfx").Length) >> ci-diagnostics.log
           # P1-9 修复：MSIX 签名时间戳属性名为 AppxPackageSigningTimestampServerUrl（原写成
           # AppxPackageSigningTimestampServer 属无效属性，静默不生效）。注意：WASDK 1.5 的
           # 构建目标即使属性名正确也可能忽略时间戳（上游 bug，1.6 修复），故下方另有
@@ -668,6 +813,26 @@ jobs:
 
           $s = [System.Text.Encoding]::UTF8.GetString($bytes)
 
+          # ⚠ 恒绿断言的实证（第五轮观察项 1 —— 已用真实产物验证，不是推断）：
+          #   本步原本只统计 'processorArchitecture="x64"' 出现次数并断言 ==0。
+          #   实测 artifact-3.1.2/PhotoRenameAIHash_3.1.2.0_x64.msix 内的
+          #   PhotoRenameAIHash.exe（270,848 字节，UTF-8 / UTF-16LE 两种解码直搜）：
+          #       processorArchitecture = 0 次
+          #       <assembly>=1  trustInfo=2  requestedExecutionLevel=2
+          #       dpiAwareness=2  PerMonitorV2=1  longPathAware=0
+          #   → 该 exe 的内嵌 manifest 里【根本没有 assemblyIdentity 块】，
+          #     也就根本没有 processorArchitecture 属性。
+          #   所以历史日志里的 "x64=0" 从来不是「已确认为 amd64」，而是
+          #   「这个字符串压根不存在」——断言是空转的，恒绿等于没有断言。
+          #   改成两级：
+          #     ① 先证明"确实读到了一个 Win32 manifest"（manifest 标记 > 0），
+          #        证明不了就阻断 —— 否则等于对着一段非 manifest 字节做统计还宣布通过；
+          #     ② 只有在【真的出现 processorArchitecture】时才校验其取值不是 x64。
+          #        pa_total=0 是本项目的正常形态（无 SxS assemblyIdentity），不告警；
+          #        一旦上游注入了 processorArchitecture="x64"，pa_total 立刻 >0 且本步阻断，
+          #        原有的 P1 防护能力完整保留且第一次真正具备触发可能。
+          $paTotal = ([regex]::Matches($s, 'processorArchitecture\s*=\s*"[^"]*"')).Count
+
           $x64 = ([regex]::Matches($s, 'processorArchitecture="x64"')).Count
 
           $amd = ([regex]::Matches($s, 'processorArchitecture="amd64"')).Count
@@ -676,11 +841,17 @@ jobs:
 
           $lpa = ([regex]::Matches($s, 'longPathAware')).Count
 
-          $line = "MSIXMANIFEST exe=" + $entryName + " x64=" + $x64 + " amd64=" + $amd + " dpiAwareness=" + $dpi + " longPathAware=" + $lpa
+          $markers = ([regex]::Matches($s, '<\s*assembly[\s>]')).Count + ([regex]::Matches($s, 'trustInfo')).Count + ([regex]::Matches($s, 'requestedExecutionLevel')).Count
+
+          $scanEffective = ($markers -gt 0)
+
+          $line = "MSIXMANIFEST exe=" + $entryName + " x64=" + $x64 + " amd64=" + $amd + " pa_total=" + $paTotal + " manifest_markers=" + $markers + " scan_effective=" + $scanEffective + " dpiAwareness=" + $dpi + " longPathAware=" + $lpa
 
           $line >> ci-diagnostics.log
 
           Write-Host $line
+
+          if (-not $scanEffective) { Write-Error ("包内 exe 里读不到任何 Win32 manifest 标记（<\s*assembly / trustInfo / requestedExecutionLevel 全为 0，MSIX: " + $msix.Name + "）：本次扫描无效，'x64=0' 不能作为通过依据。请核对条目选择、解压与解码是否与真实 manifest 编码一致。"); exit 1 }
 
           if ($x64 -ne 0) { Write-Error ("包内 exe 内嵌 manifest 仍含 processorArchitecture=""x64"" x" + $x64 + "（MSIX: " + $msix.Name + "）：SxS activation context 非法枚举，用户双击 exe 会报""并行配置不正确""。注意现有修补步改的是 loose 文件、不作用于包内，需在打包链路层面修复。"); exit 1 }
 
@@ -918,6 +1089,8 @@ jobs:
 
       - name: Verify MSIX signature (blocking)
         shell: pwsh
+        env:
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
         run: |
           "CHECKPOINT:verify-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'
@@ -931,9 +1104,20 @@ jobs:
           ("VERIFY structural p7x=" + [bool]$p7x) >> ci-diagnostics.log
           if (-not $p7x) { Write-Error "MSIX 内无 AppxSignature.p7x -> 未签名"; exit 1 }
 
-          # 从签名源 pfx 取证书（唯一事实来源），先信任再验证
+          # 从签名源 pfx 取证书（唯一事实来源），先信任再验证。
+          # ⚠ 密码对称性：Publish 与 Re-sign 两步都【带 PFX_PASSWORD】读同一个 pfx，
+          #   而本步原本用无参构造函数读它。当前 pfx 恰好是空密码所以一直没暴露——
+          #   一旦轮换成带密码的 pfx，本步会以 CryptographicException 报红，
+          #   而报错信息里完全看不出「是密码问题」。故先按无密码读，失败再用密码读。
           $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
-          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+          $cert = $null
+          try { $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath } catch { $noPwdErr = $_ }
+          if ($cert -and -not $cert.Thumbprint) { $cert = $null }
+          if (-not $cert -and $env:PFX_PASSWORD) {
+            $sec = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath, $sec
+          }
+          if (-not $cert) { Write-Error ("无法从 pfx 读取签名证书（无密码读失败：" + $noPwdErr.Exception.Message + "；PFX_PASSWORD " + $(if ($env:PFX_PASSWORD) { "已配置但带密码读取仍失败" } else { "未配置" }) + "）"); exit 1 }
           ("VERIFY signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
           # ②（P1）最小信任原则：只导入 TrustedPeople —— MSIX 旁加载的信任链只需要它。
           # 自签名证书本身无 CA 基本约束，放进 Root 等价于宣布「该私钥签的任何东西都被本机
@@ -1018,6 +1202,10 @@ jobs:
 
         shell: pwsh
 
+        env:
+
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
+
         run: |
 
 
@@ -1066,7 +1254,24 @@ jobs:
 
 
 
-            $signCer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+            # 与 Verify / Export 两步保持一致：无密码读失败时回落带 PFX_PASSWORD 读。
+            # 本步【非阻断】，读不到 pfx 只会落到外层 catch 打一条 warning —— 那等于
+            # 「仓库 cer 漂移」这个护栏静默失明，而它唯一的发声渠道就是这里。
+            $signCer = $null
+
+            try { $signCer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath } catch { $pinNoPwdErr = $_ }
+
+            if ($signCer -and -not $signCer.Thumbprint) { $signCer = $null }
+
+            if (-not $signCer) {
+
+              if (-not $env:PFX_PASSWORD) { throw ("无密码读取 pfx 失败（" + $pinNoPwdErr.Exception.Message + "）且未配置 PFX_PASSWORD") }
+
+              $sec = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+
+              $signCer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath, $sec
+
+            }
 
 
 
@@ -1118,14 +1323,27 @@ jobs:
       # 与实际签名证书永远一致（杜绝"仓库 cer 未同步 → 0x800B0109 不受信任"复发）。
       - name: Export signing certificate for artifact
         shell: pwsh
+        env:
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
         run: |
+          "CHECKPOINT:cer-export-start" >> ci-diagnostics.log
           $ErrorActionPreference = 'Stop'
           $pfxPath = Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.pfx"
-          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath
+          # 同 Verify 步：无密码读失败时回落带 PFX_PASSWORD 读，避免换带密码 pfx 后
+          # 本步以看不懂的 CryptographicException 报红（本步是阻断式，红了就没有 artifact cer）。
+          $cert = $null
+          try { $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath } catch { $noPwdErr = $_ }
+          if ($cert -and -not $cert.Thumbprint) { $cert = $null }
+          if (-not $cert -and $env:PFX_PASSWORD) {
+            $sec = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $pfxPath, $sec
+          }
+          if (-not $cert) { Write-Error ("无法从 pfx 读取签名证书（无密码读失败：" + $noPwdErr.Exception.Message + "；PFX_PASSWORD " + $(if ($env:PFX_PASSWORD) { "已配置但带密码读取仍失败" } else { "未配置" }) + "）"); exit 1 }
           $der = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
           [System.IO.File]::WriteAllBytes((Join-Path $env:GITHUB_WORKSPACE "PhotoRenameAIHash.cer"), $der)
           ("signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
           Write-Host ("artifact cer = signing cert " + $cert.Thumbprint)
+          "CHECKPOINT:cer-export-done" >> ci-diagnostics.log
 
       # =====================================================================
 
@@ -1188,6 +1406,29 @@ jobs:
           if (-not (Test-Path $doc)) { Write-Error "缺少 安装说明.txt（应已提交到仓库根；它是随包说明，不参与安装）"; exit 1 }
 
           Copy-Item $doc -Destination $stage -Force
+
+          # A-15 的延伸护栏（阻断式）：staging 只保证「三个文件同层」，从未保证 Install.bat
+          # 真能【找到】那个包。Install.bat 第 46 行是用
+          #   for /f "delims=" %%f in ('dir /b PhotoRenameAIHash*_x64.msix 2^>nul') do ...
+          # 定位包的。若 MSIX 命名变了（平台段改叫 win-x64、被夹进 _Test 后缀等），
+          # 三个文件照样同层、staging 照样绿，而用户双击 Install.bat 只会看到
+          # 「本目录下未找到 PhotoRenameAIHash*_x64.msix」——典型的假绿灯：
+          # CI 全绿、产物齐全、用户就是装不上。
+          # 以下两级判据与 Install.bat 的两级查找一一对应：
+          #   宽判据(阻断) 'PhotoRenameAIHash*.msix' —— Install.bat 的兜底查找模式。
+          #     连它都不匹配 = 用户双击 Install.bat 必然报「未找到安装包」，必须拦下。
+          #   窄判据(告警) 'PhotoRenameAIHash*_x64.msix' —— Install.bat 的首选查找模式。
+          #     不匹配只说明命名漂移（如平台段改成 win-x64、或夹了 _Test 后缀），
+          #     兜底查找仍能装上，所以只告警、不阻断；但它值得被看见：
+          #     说明 Install.bat / 安装说明.txt / README 里的文件名约定已经过时了。
+          $batWide  = 'PhotoRenameAIHash*.msix'
+          $batNarrow = 'PhotoRenameAIHash*_x64.msix'
+
+          if ($msix.Name -notlike $batWide) { Write-Error ("MSIX 文件名 '" + $msix.Name + "' 连 Install.bat 的兜底查找模式 '" + $batWide + "' 都不匹配：用户双击 Install.bat 必然报「未找到安装包」。请核对打包产物命名与 Install.bat 第 46 行起的 dir /b 通配。"); exit 1 }
+
+          if ($msix.Name -notlike $batNarrow) { Write-Host ("::warning::MSIX 文件名 '" + $msix.Name + "' 不匹配 Install.bat 的首选模式 '" + $batNarrow + "'（已由兜底模式 '" + $batWide + "' 接住，用户仍可安装）：命名约定已漂移，请同步三处 —— Install.bat 的 dir /b 通配、README 的 Installing 章节（权威源）、安装说明.txt（随包精简版）。") }
+
+          ("STAGE bat_wide_match=" + ($msix.Name -like $batWide) + " bat_narrow_match=" + ($msix.Name -like $batNarrow) + " name=" + $msix.Name) >> ci-diagnostics.log
 
           $files = @(Get-ChildItem $stage -File)
 

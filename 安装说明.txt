@@ -12,7 +12,9 @@ PhotoRenameAIHash 安装说明
   3. Install.bat                         —— 安装脚本（信任证书 + 安装包）
   4. 安装说明.txt                        —— 本文件，不参与安装，可随时删除
 
-Install.bat 是按 PhotoRenameAIHash*_x64.msix 这个文件名模式找安装包的，
+Install.bat 是分两步找安装包的，两步都不写死版本号，所以版本升级不会失效：
+  首选：PhotoRenameAIHash*_x64.msix（打包链路实际产出的形态）
+  兜底：PhotoRenameAIHash*.msix（只在首选落空时才用，按修改时间取最新的那个）
 即使删掉本说明文件也不影响安装。
 
 只下载 .msix 直接双击会失败，原因见下方「常见问题」。

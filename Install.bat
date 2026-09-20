@@ -43,10 +43,24 @@ if not exist "%CER%" (
 )
 
 set "APPMSIX="
+REM 0 = 首选命中的标准命名包；1 = 走了兜底（命名已漂移，需让用户知情）
+set "USEFALLBACK=1"
+REM 首选：精确形态 PhotoRenameAIHash_<版本>_x64.msix（当前打包链路的产物名）。
 for /f "delims=" %%f in ('dir /b PhotoRenameAIHash*_x64.msix 2^>nul') do set "APPMSIX=%%f"
+REM 注意：必须用单行 if 而不是括号块来置 USEFALLBACK —— 括号块里的变量在【解析时】
+REM 就被展开，读不到上面 for 刚写进去的新值（即经典的延迟展开陷阱）。
+if defined APPMSIX set "USEFALLBACK=0"
+REM 兜底（纯增量，不会改变上面命中时的行为）：若上游某天改了命名（平台段改叫
+REM win-x64、夹进 _Test 后缀等），首选模式会落空，而用户看到的只是「未找到安装包」，
+REM 与「少下载了文件」完全无法区分。这里退一步按 PhotoRenameAIHash*.msix 找，
+REM /o:d 升序排列使循环结束后 APPMSIX 落在最新的那个包上。
+REM 注意不能放宽到 *.msixbundle：Add-AppxPackage 对 bundle 的信任校验路径不同。
+if not defined APPMSIX (
+  for /f "delims=" %%f in ('dir /b /o:d PhotoRenameAIHash*.msix 2^>nul') do set "APPMSIX=%%f"
+)
 if not defined APPMSIX (
   echo.
-  echo   [失败] 本目录下未找到 PhotoRenameAIHash*_x64.msix 。
+  echo   [失败] 本目录下未找到 PhotoRenameAIHash*.msix 安装包 。
   echo   请把 .msix / .cer / Install.bat 三个文件放在同一个文件夹里。
   echo.
   pause
@@ -54,6 +68,14 @@ if not defined APPMSIX (
 )
 echo   证书:   %CER%
 echo   安装包: %APPMSIX%
+REM 走兜底时必须说清楚：兜底是按【修改时间】选包，不是按版本语义，
+REM 同目录有多个包时有选错的可能 —— 静默替用户做选择是本项目最忌讳的失败模式。
+if "%USEFALLBACK%"=="1" (
+  echo.
+  echo   [注意] 未找到标准命名包，已按修改时间回退匹配到上面这个文件。
+  echo         请确认它就是你要装的版本；若同目录有多个 .msix，请把要装的
+  echo         那个单独放进一个空文件夹再运行本脚本。
+)
 echo   OK.
 
 echo [2/3] 信任发布者证书 ...
@@ -71,8 +93,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-REM 自诊断：打印被信任的证书指纹，与 MSIX 实际签名证书比对，防止 0x800B0109 静默复发
+REM 自诊断：打印被信任的证书指纹，与 MSIX 实际签名证书比对，防止 0x800B0109 静默复发。
+REM 原来只打了 .cer 侧的指纹，却在第 107-108 行让用户「核对 .msix 实际签名的证书指纹」——
+REM 那个指纹脚本根本没给，用户无从核对（提示了但没给工具）。这里补上 .msix 侧。
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('%CER%'); Write-Host ('  已信任证书指纹: ' + $c.Thumbprint)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { $s = Get-AuthenticodeSignature -FilePath '%APPMSIX%'; if ($s.SignerCertificate) { Write-Host ('  MSIX 签名证书指纹: ' + $s.SignerCertificate.Thumbprint) } else { Write-Host ('  MSIX 未取到签名证书（状态: ' + $s.Status + '）') } } catch { Write-Host ('  MSIX 签名指纹读取失败: ' + $_.Exception.Message) }"
 echo   OK.
 
 echo [3/3] 安装 PhotoRenameAIHash ...
@@ -90,6 +115,9 @@ if errorlevel 1 (
 )
 
 echo.
+REM 回显实际装上的版本：兜底路径存在选错包的可能，且 MSIX 装在 WindowsApps 下看不见，
+REM 不给版本号的话用户无法确认装的是不是自己想要的那个。
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-AppxPackage *PhotoRenameAIHash*; if ($p) { Write-Host ('  已安装: ' + $p.Name + ' ' + $p.Version) } else { Write-Host '  未能查询到已安装的包：请手动在开始菜单确认' }"
 echo ============================================================
 echo   安装完成！请从开始菜单启动 "PhotoRenameAIHash"。
 echo ============================================================
