@@ -51,6 +51,9 @@ public sealed class RenameLogService
                 Csv(entry.OriginalPath),
                 Csv(entry.NewPath),
                 Csv(entry.Message),
+                // 必须保持「最后一列」（列位 <see cref="FingerprintColumnIndex"/>）：
+                // LoadRenameLogAsync 在旧表头（无该列）场景下按这个固定列位兜底读取，
+                // 将来若新增列请追加在它之后，不要插到它前面。
                 Csv(entry.Fingerprint), // Csv() 统一加引号，指纹含 '|' / ',' 也能正确往返
             }));
 
@@ -86,6 +89,8 @@ public sealed class RenameLogService
     /// 这是刻意选择：宁可重做（重做时内容相同的文件会被判为「未改动(内容相同)」，不产生副本），
     /// 也绝不能延续「改了参数却整批静默跳过」的 P0 缺陷。届时 UI 会给出
     /// <see cref="CompletedLog.IgnoredByFingerprint"/> 提示，用户可据此判断。
+    /// <b>仅限「首次」：</b>表头只在文件创建时写一次，若不按 <see cref="FingerprintColumnIndex"/>
+    /// 兜底定位，升级后新写入的记录也会一直读不到指纹 → 变成「每次都整批重做」的永久回归。
     /// </remarks>
     public Task<CompletedLog> LoadRenameLogAsync(string outputFolder, string fingerprint)
     {
@@ -110,6 +115,15 @@ public sealed class RenameLogService
                     int iStatus = Array.IndexOf(header, "Status");
                     int iOriginalPath = Array.IndexOf(header, "OriginalPath");
                     int iFingerprint = Array.IndexOf(header, "Fingerprint");
+
+                    // 兼容「旧表头 + 新记录」混合的日志：表头只在文件首次创建时写一次，
+                    // 老用户升级后其 rename_log.csv 的表头仍是 9 列（无 Fingerprint），
+                    // 而此后追加的记录一律是 10 列（指纹固定写在最后一列）。
+                    // 若只按列名找，这里会得到 -1 → 连升级后<b>新写入</b>的记录也被判为「参数不一致」
+                    // → 断点续传对老用户不是「升级后首次重跑」，而是「以后每次都整批重做」，
+                    // 续传功能等于永久失效（且每次都会报 N 条「参数不一致」，用户无从判断）。
+                    // 故表头缺该列时按固定列位兜底；旧数据行只有 9 列、取不到该列 → 仍判为忽略（安全方向）。
+                    if (iFingerprint < 0) iFingerprint = FingerprintColumnIndex;
 
                     for (int r = 1; r < lines.Length; r++)
                     {
@@ -153,6 +167,14 @@ public sealed class RenameLogService
     }
 
     private const string LogFileName = "rename_log.csv";
+
+    /// <summary>
+    /// Fingerprint 在 CSV 行中的固定列位（0 基；表头顺序见 <see cref="AppendRenameLogAsync"/>）。
+    /// 仅当表头<b>缺少</b>该列名时（老版本写出的 9 列表头）用它兜底定位，
+    /// 使升级后新写入的 10 列记录仍能被索引到（详见 LoadRenameLogAsync 内注释）。
+    /// 新增列请追加在指纹之后，不要插到它前面，否则该兜底会失准。
+    /// </summary>
+    private const int FingerprintColumnIndex = 9;
 
     /// <summary>
     /// 目录枚举选项：与 <c>PhotoService.DirOptions</c> 同口径——
