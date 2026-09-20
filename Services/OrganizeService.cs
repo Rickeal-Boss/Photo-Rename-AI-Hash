@@ -228,6 +228,15 @@ public sealed class OrganizeService : IOrganizeService
         // 模型不存在 / 参数非法）对整批都成立，继续只会产生 N 次必然失败的请求与 N 行同因错误。
         int consecutivePermanent = 0;
 
+        // 「同因计数」的两条并列状态（与 consecutivePermanent 并列，任一达到 3 即中止整批）。
+        // 它补的是 consecutivePermanent 覆盖不到的整批级根因：IsBatchLevel4xx 对 400/422 只在命中
+        // 智谱 1211/1214 时判「整批级」，其余厂商（通义欠费 400 Arrearage、OpenAI / 自建网关模型名写错）
+        // 会被判成「逐文件级」→ consecutivePermanent 永不累加 → 1000 张的目录会连发 1000 次真实请求
+        // 与 1000 行同因错误，而熔断本应在第 3 个就停。
+        // 故这里不看 IsBatchLevel，只看「原因是不是同一个」。
+        string lastPermanentCause = "";
+        int sameCauseCount = 0;
+
         // A-01：重试会把同一文件重新入队，但重试只应针对「AI 之后」的失败（目标被占用、
         // 备份失败、路径异常等）。缓存成功结果，避免单文件最坏 10 次重复计费与请求放大；
         // AI 自身失败（异常）不入缓存，重试仍会重新请求（瞬时故障需要重试）。
@@ -252,6 +261,11 @@ public sealed class OrganizeService : IOrganizeService
                     var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
+                    // 同因计数一并清零：中止文案写的是「连续 3 个文件出现相同原因的错误」，
+                    // 若不在成功时清零，散落在整批里的同类失败（如偶然的 413）会累积成中止，
+                    // 既与文案不符，也会误杀一批本来能跑完的任务。
+                    lastPermanentCause = "";
+                    sameCauseCount = 0;
                     done++;
                     progress.Report(new OrganizeProgress
                     {
@@ -298,31 +312,62 @@ public sealed class OrganizeService : IOrganizeService
                         throw;
                     }
 
-                    // 仅「对整批成立」的永久错误才累计熔断：
-                    // 逐文件永久错误（如单个文件无法解码）按既定口径只记该文件的错误、继续处理其它文件。
-                    if (ex.IsBatchLevel)
+                    // 同因计数：**无论 IsBatchLevel 是 true 还是 false 都参与**。
+                    // 理由：「逐文件级」只说明「该错误对当前这一张图成立」，并不排除「整批都因同一个
+                    // 配置 / 账户根因失败」——通义欠费（400 Arrearage）、自建网关模型名写错都是这个形态，
+                    // 却被 IsBatchLevel4xx 判成了逐文件级，于是原来的 consecutivePermanent 永不累加。
+                    //
+                    // 原因键的取法（决定会不会误触发，改动前务必先读）：
+                    //  · 整批级 → 把当前文件名从文案里抹成 "{file}"。整批级文案通常不含文件名，
+                    //    抹一下是防将来某条文案内嵌了路径，导致「每个文件的键都不同、永远凑不满 3」。
+                    //  · 逐文件级 → 保留原文案。逐文件级文案（如「无法解码图片…：IMG_001.HEIC」）自带
+                    //    文件名，正是用来区分「不同文件各自的原因」；若也抹掉，三张连号的损坏 HEIC 就会把
+                    //    「跳过 3 张」升级成「整批中止」——那是上一轮刚修掉的误杀，绝不能回来。
+                    //    （永久错误不重排队，同一文件在批内只出现一次，故保留文件名后这类计数天然到不了 3；
+                    //     真正能凑满 3 的只有「文案里不含文件名的整批级根因」。）
+                    string cause = ex.IsBatchLevel
+                        ? ex.Message.Replace(Path.GetFileName(f.Path), "{file}")
+                        : ex.Message;
+                    if (cause == lastPermanentCause) sameCauseCount++;
+                    else { lastPermanentCause = cause; sameCauseCount = 1; }
+
+                    // 仅「对整批成立」的永久错误才累计 consecutivePermanent（原有口径原样保留：
+                    // 逐文件级有意「既不累加也不归零」——不累加 → 单个坏文件不触发熔断；
+                    // 不归零 → 不掩盖此前已累积的整批级证据，4xx → 4xx → 解码失败 → 4xx 仍会中止）。
+                    if (ex.IsBatchLevel) consecutivePermanent++;
+
+                    // 两条闸并列，任一触发即中止整批。先判 consecutivePermanent：它是有明确证据的
+                    // 「整批级」判据，文案也更具体，保持既有行为与文案不变。
+                    if (consecutivePermanent >= 3)
                     {
                         // 非环境的永久错误（AI 账户/额度/模型配置类）按既定口径仍记单文件失败，
                         // 但若连续多个文件都命中，说明是整批级根因：提前中止，避免刷满 N 行同因错误。
-                        consecutivePermanent++;
-                        if (consecutivePermanent >= 3)
+                        // 不改变单次调用内的退避重试（供应商策略档：默认最多 8 次 / 总预算 180s）
+                        // 与单文件重排队（10 次）的既定口径，
+                        // 只把「整批继续」的终止时机提前。
+                        progress.Report(new OrganizeProgress
                         {
-                            // 不改变单次调用内的退避重试（供应商策略档：默认最多 8 次 / 总预算 180s）
-                            // 与单文件重排队（10 次）的既定口径，
-                            // 只把「整批继续」的终止时机提前。
-                            progress.Report(new OrganizeProgress
-                            {
-                                Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                                LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
-                                          $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
-                            });
-                            throw;
-                        }
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            LogLine = $"已中止：连续 {consecutivePermanent} 个文件命中不可恢复的识别错误（{ex.Message}）" +
+                                      $"（此前已处理 {done} 个，共 {files.Count} 个）。请处理账户/额度或模型配置后重跑。",
+                        });
+                        throw;
                     }
-                    // 逐文件级（IsBatchLevel == false）有意「既不累加也不归零」：
-                    // 不累加 → 单个坏文件（如无法解码）不会触发熔断；
-                    // 不归零 → 也不掩盖此前已累积的整批级证据（4xx → 4xx → 解码失败 → 4xx 仍会中止）。
-                    // 归零只发生在上面 try 分支里「文件被成功处理」时。
+
+                    if (sameCauseCount >= 3)
+                    {
+                        // 文案里的 {cause} 用的是「抹掉文件名后」的稳定原因：既便于用户一眼看出根因，
+                        // 也避免把同一个文件名重复念三遍（原始 ex.Message 已在上面逐文件报过一行）。
+                        progress.Report(new OrganizeProgress
+                        {
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            LogLine = $"已中止：连续 {sameCauseCount} 个文件出现相同原因的错误：{cause}。" +
+                                      "这通常是配置/账户级问题（端点、模型名、密钥、额度），" +
+                                      "已中止剩余处理以避免继续计费。" +
+                                      $"此前已处理 {done} 个，共 {files.Count} 个。",
+                        });
+                        throw;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -330,13 +375,14 @@ public sealed class OrganizeService : IOrganizeService
                     attempts.TryGetValue(f.Path, out int n);
                     n++;
 
-                    // 重排队分档：只有「网络 / 超时」这类瞬时故障才配得上 10 次重排队
+                    // 重排队分档：只有「网络 / 超时」与「AI 结果不可用」这两类配得上 10 次重排队
                     // （用户已明确确认过这个口径：AI 侧单次调用内最多退避 8 次、总预算 180s，
                     //  叠加 10 次重排队 = 最坏 80 次请求/文件、约 40 分钟，是既定取舍，不动）。
-                    // 但把这个口径套到「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、
-                    // 解码失败…）上纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
+                    // 它们都不是确定性的：网络抖动会过去，模型采样换个种子可能就合规。
+                    // 而「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、解码失败、
+                    // 配置缺失…）上重排队纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
                     // 故其余异常降到 2 次（给一次「也许刚释放了锁」的机会，然后放弃）。
-                    int cap = IsTransientNetworkError(ex)
+                    int cap = IsTransientFailure(ex)
                         ? maxPerFileAttempts
                         : maxDeterministicAttempts;
 
@@ -361,14 +407,19 @@ public sealed class OrganizeService : IOrganizeService
                         {
                             OriginalName = f.Name,
                             Status = "错误",
-                            Message = ex.Message,
+                            // 终态必须自带「已尝试 N 次」：确定性失败的重排队上限由 10 降到 2 是
+                            // 用户可感知的行为变更，而这类异常的 Message 本身不带次数
+                            // （AI 网络类异常的文案自带「已尝试 8 次 / 累计 123s」，这类没有），
+                            // 不补这一句的话用户只看到一句孤零零的错误，无从判断「是不是已经试过了」。
+                            // 用 n（真实尝试次数）而非 cap：分档会随异常类型变化，中途降档时 n 可能 > cap。
+                            Message = $"（已尝试 {n} 次）{ex.Message}",
                         };
                         report.Results.Add(err);
                         progress.Report(new OrganizeProgress
                         {
                             Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                             Result = err,
-                            LogLine = $"{f.Name} [错误] {ex.Message}",
+                            LogLine = $"{f.Name} [错误]（已尝试 {n} 次）{ex.Message}",
                         });
                     }
                 }
@@ -734,7 +785,9 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         // 暂停检查点（AI 之后、写文件之前）：接住「AI 调用进行中」点下的暂停。
-        // 注意：AI 内部（退避等待 / HTTP 往返）无法被中断，暂停只能在它返回后生效——
+        // 注意：AI 内部的**退避等待**已可通过 delayAsync 钩子被暂停打断
+        //（见 DelayBackoffHonoringPauseAsync），但一次 HTTP 往返本身仍不可中断；
+        // 无论哪种情况，暂停都只能在 AnalyzeAsync 返回后于此处真正挂起——
         // 这是有意的取舍：把暂停改成取消会丢弃已扫描的工作队列，违背暂停语义。
         if (_pts != null) await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
 
@@ -1061,22 +1114,38 @@ public sealed class OrganizeService : IOrganizeService
         => ex.HResult == ErrorDiskFull || ex.HResult == ErrorOutOfMemory || ex.HResult == ErrorNotEnoughMemory;
 
     /// <summary>
-    /// 是否为「网络 / 超时」类瞬时故障——单文件重排队 10 次的口径只保留给这一类。
-    /// <b>为什么必须顺着 InnerException 链找：</b>AI 层把「网络 / 连通性异常」与「60 秒超时」
-    /// 一并包装成 <c>InvalidOperationException</c>（<c>ImageAnalysisHelper</c> 网络重试分支，
-    /// 原异常作为 inner 保留），仅看顶层类型无法把它们与「解析失败 / 模型没返回 JSON /
-    /// 配置缺失」区分开——前者该重试 10 次（用户裁定的口径），后者该 2 次。
-    /// 而 HttpClient 的 60s 超时抛的是 <c>TaskCanceledException</c>，其 <c>InnerException</c>
-    /// 正是 <c>TimeoutException</c>，顺着链即可归因，不必去解析异常文案。
-    /// 顶层直接命中 <c>HttpRequestException</c> 的情况是「429/5xx 重试或退避预算耗尽」，
-    /// 同属用户裁定的可重试口径。
+    /// 是否值得按「单文件重排队 10 次」的口径重试。只有两类配得上：
+    /// <list type="bullet">
+    /// <item><description>网络 / 超时类瞬时故障（429/5xx 重试或退避预算耗尽、连接失败、60 秒超时）
+    /// ——用户已明确确认过的 10 次口径，不动。</description></item>
+    /// <item><description><see cref="AiResultInvalidException"/>：AI 返回了内容但不可用
+    /// （响应体不是合法 JSON，或模型输出解析不出结构化结果）。temperature=0.3 下模型输出并非确定性，
+    /// 换一次采样可能就合规，网关偶发返回 HTML 错误页也往往是瞬时的——<b>重试有真实成功率</b>，
+    /// 与「配置缺失 / 解码失败」这类必然复现的失败不是一回事。</description></item>
+    /// </list>
+    /// 其余（配置缺失、端点不合规、解码失败、MD5 读不出、文件被占用、无权限…）一律 2 次。
+    /// <para><b>判据一（最可靠）：专用类型 <see cref="AiTransientException"/>。</b>
+    /// AI 层在「网络 / 连通性重试耗尽」与「60 秒超时」时抛的就是它——不看文案、不看 inner 类型，
+    /// 直接按语义判定。补它的原因见判据二。</para>
+    /// <para><b>判据二：顺着 InnerException 链找 <c>HttpRequestException</c> / <c>TimeoutException</c>。</b>
+    /// 保留这一档有两个用处：① AI 层历史上把这两类包装成裸 <c>InvalidOperationException</c>
+    /// （原异常作为 inner 保留），链上找得到就仍按瞬时故障处理，不必依赖改动落地顺序；
+    /// ② 顶层直接命中 <c>HttpRequestException</c> 的情况是「429/5xx 重试或退避预算耗尽」，同属可重试口径。
+    /// HttpClient 的 60s 超时抛的是 <c>TaskCanceledException</c>，其 <c>InnerException</c> 正是
+    /// <c>TimeoutException</c>，顺着链即可归因，不必解析异常文案。</para>
+    /// <para>判据二单独用是脆弱的：HttpClient 抛出的原始异常类型随 .NET 版本与底层 IO 实现变化
+    /// （可能是 <c>IOException</c> / <c>SocketException</c>），那种情况会被漏判成确定性失败、
+    /// 只重排 2 次，违背「网络类宁可慢也不产出 unknown_ 垃圾名」的既定口径。这正是补上判据一的原因。</para>
     /// </summary>
-    private static bool IsTransientNetworkError(Exception ex)
+    private static bool IsTransientFailure(Exception ex)
     {
+        // 结果不可用：按类型精确判定（AI 层为此新增了该类型，省去「无 inner 的 IOE」这种粗糙反推）
+        if (ex is AiResultInvalidException) return true;
+
         int depth = 0; // 防御：异常链理论上不会自环，但深度上限可杜绝病态构造导致的死循环
         for (Exception? e = ex; e != null && depth < 8; e = e.InnerException, depth++)
         {
-            if (e is HttpRequestException or TimeoutException) return true;
+            if (e is AiTransientException or HttpRequestException or TimeoutException) return true;
         }
         return false;
     }
@@ -1280,13 +1349,25 @@ public sealed class OrganizeService : IOrganizeService
         return sb.ToString();
     }
 
-    private static IImageAnalysisService? CreateAi(OrganizeRequest req)
+    /// <summary>
+    /// 构造本批次的 AI 引擎实例。
+    /// <b>已改为实例方法</b>（原为 static）：需要把 <see cref="DelayBackoffHonoringPauseAsync"/>
+    /// 作为「退避等待替换钩子」注入各引擎的构造函数——该钩子要读实例字段 <c>_pts</c>（暂停令牌），
+    /// 静态方法拿不到。注意构造发生在 <c>_pts</c> 创建之前（见 <c>RunAsync</c>），但委托里是
+    /// <b>调用时</b>才读 <c>_pts</c>，处理循环开始时它必定已就绪。
+    /// </summary>
+    private IImageAnalysisService? CreateAi(OrganizeRequest req)
     {
         if (req.AiProvider == AiProvider.None) return null;
 
         if (string.IsNullOrWhiteSpace(req.AiApiKey))
             throw new InvalidOperationException(
                 $"已选择识别引擎「{req.AiProvider}」但未配置 API Key。请打开「设置」填写对应 Key 后再开始整理。");
+
+        // 退避等待钩子：把 AI 层内部的 Task.Delay 换成本方法，让「暂停」能打断 AI 退避
+        // （否则退避期间点暂停要等整段 AI 调用结束才生效，最长约 4 分钟，期间界面已显示
+        //  「已暂停」却仍在发请求计费 —— P33 谎报）。四个引擎的构造函数都已支持该参数。
+        Func<TimeSpan, CancellationToken, Task> delayAsync = DelayBackoffHonoringPauseAsync;
 
         if (req.AiProvider == AiProvider.Custom)
         {
@@ -1295,16 +1376,69 @@ public sealed class OrganizeService : IOrganizeService
             if (string.IsNullOrWhiteSpace(req.CustomApiModel))
                 throw new InvalidOperationException("自定义引擎未配置模型名：请打开「设置」填写自定义模型名。");
             // rpmLimit 为 0 时保持端点嗅探得出的闸门（不替用户猜 RPM）
-            return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey, req.CustomApiRpmLimit);
+            return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey, req.CustomApiRpmLimit,
+                delayAsync);
         }
 
         return req.AiProvider switch
         {
-            AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey),
-            AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey),
-            AiProvider.Nvidia => new NvidiaImageAnalysisService(req.AiApiKey),
+            AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey, delayAsync),
+            AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey, delayAsync),
+            AiProvider.Nvidia => new NvidiaImageAnalysisService(req.AiApiKey, delayAsync),
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// 退避等待期间的暂停轮询粒度：250ms 兼顾「暂停响应足够及时」与「不空转 CPU」。
+    /// 最坏一次退避 120s + 抖动 ≈ 480 次唤醒，代价可忽略。
+    /// </summary>
+    private static readonly TimeSpan PausePollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// AI 层「退避等待」的替换实现（契约见 <see cref="ImageAnalysisHelper.CallVisionApiAsync"/> 的
+    /// <c>delayAsync</c>）：把 <c>Task.Delay</c> 换成「可被暂停打断」的等待。
+    /// <para><b>为什么是「分段轮询」而不是
+    /// <c>Task.WhenAny(Task.Delay(d, ct), _pts.WaitWhilePausedAsync(ct))</c>：</b>
+    /// <see cref="PauseTokenSource.WaitWhilePausedAsync"/> 的语义是「<b>若</b>当前已暂停则挂起」，
+    /// <b>不是</b>「等到被暂停为止」——未暂停时它返回的是一个<b>已完成的</b> Task，
+    /// 于是 WhenAny 会立刻返回、整段退避被跳过，指数退避直接失效（退化为全速重试、疯狂撞限流）。
+    /// 故这里改为每 <see cref="PausePollInterval"/> 检查一次暂停状态：暂停期间不推进剩余时长，
+    /// 恢复后继续把剩余退避等满。</para>
+    /// <para><b>与 AI 层计数 / 预算的关系：</b>暂停不会产生新的重试循环迭代，故<b>不递增</b> AI 层的
+    /// attempt 计数；但 AI 层的 180s 退避预算是墙钟 <c>Stopwatch</c>，暂停时长会被计入
+    /// （本侧无法扣减，也不偷偷改 AI 层语义）——影响见交付说明。</para>
+    /// <para>契约与 <see cref="Task.Delay(TimeSpan, CancellationToken)"/> 一致：等满时长后返回，
+    /// <paramref name="ct"/> 取消时抛 <see cref="OperationCanceledException"/>。</para>
+    /// </summary>
+    private async Task DelayBackoffHonoringPauseAsync(TimeSpan delay, CancellationToken ct)
+    {
+        var pts = _pts;
+        if (pts == null)
+        {
+            // 未创建暂停令牌（理论上处理循环内不会发生）：退回原生等待，行为与改造前一致
+            await Task.Delay(delay, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var remaining = delay;
+        while (remaining > TimeSpan.Zero)
+        {
+            if (pts.IsPaused)
+            {
+                await pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
+                // 必须在这里显式检查取消：WaitWhilePausedAsync 被 ct 唤醒时是「正常返回」而不是抛异常，
+                // 而此刻 _paused 仍为 true、waiter 仍是那个已完成的 TCS —— 直接 continue 会在下一轮
+                // 立刻再次返回，形成 100% CPU 的空转死循环（暂停态下点取消就会命中）。
+                ct.ThrowIfCancellationRequested();
+                continue; // 暂停不计入退避时长：恢复后重新等满剩余部分
+            }
+
+            var slice = remaining < PausePollInterval ? remaining : PausePollInterval;
+            var sliceSw = Stopwatch.StartNew();
+            await Task.Delay(slice, ct).ConfigureAwait(false);
+            remaining -= sliceSw.Elapsed;
+        }
     }
 }
 

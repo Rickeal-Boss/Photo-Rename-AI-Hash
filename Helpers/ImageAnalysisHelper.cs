@@ -72,7 +72,9 @@ public static class ImageAnalysisHelper
     /// 退避期间点暂停原本要等约 4 分钟才生效，期间还在发请求计费）。
     /// <b>契约必须与 Task.Delay 一致</b>：等满传入的时长后返回，且 <c>ct</c> 取消时抛
     /// <see cref="OperationCanceledException"/>，否则本方法的取消/暂停语义会错乱。</param>
-    /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试次数或退避预算耗尽）。</exception>
+    /// <exception cref="InvalidOperationException">端点 / 模型 / 密钥为空，或端点不是 https（配置类，重试无意义）。</exception>
+    /// <exception cref="AiTransientException">网络 / 连通性异常，或服务端 60 秒未响应（超时），且重试次数或退避预算已耗尽
+    /// —— 属瞬时故障，换时间点重试有真实成功率（原始异常保留在 <c>InnerException</c>）。</exception>
     /// <exception cref="HttpRequestException">429 限流 / 5xx / 408 / 425 服务端错误重试次数或退避预算耗尽（携带状态码与响应体片段）。</exception>
     /// <exception cref="AiPermanentException">4xx 客户端永久错误（模型不存在 / 参数非法 / 401 / 403 / 404 等），或 429 命中永久业务规则，重试无意义。</exception>
     public static Task<string> CallVisionApiAsync(
@@ -169,6 +171,7 @@ public static class ImageAnalysisHelper
             {
                 // 网络/连通性异常：视为瞬时抖动可重试，次数或退避预算耗尽后抛明确异常。
                 // 不抛 AiPermanentException：保留外层「单文件重排队」兜底（P17）。
+                // 抛 AiTransientException（而非裸 InvalidOperationException）：见下方 throw 处的说明。
                 ct.ThrowIfCancellationRequested(); // 取消优先于一切：不让取消被包装成业务异常
 
                 var netDelay = ComputeDelay(profile, attempt, null, null);
@@ -188,7 +191,12 @@ public static class ImageAnalysisHelper
                         ? $"已达最大尝试次数 {pol.MaxAttempts} 次"
                         : $"下一次需再等 {netDelay.TotalSeconds:F0}s，累计将达 {(sw.Elapsed + netDelay).TotalSeconds:F0}s，" +
                           $"超出退避预算 {pol.TotalBudget.TotalSeconds:F0}s（已耗 {sw.Elapsed.TotalSeconds:F0}s）";
-                    throw new InvalidOperationException(
+                    // 抛专用类型而非裸 InvalidOperationException：本分支是「网络 / 连通性」与「60 秒超时」
+                    // 两类**瞬时故障**，按用户已裁定的口径应保留「单文件 10 次重排队」；
+                    // 而裸 InvalidOperationException 与「配置缺失 / 解析失败」同型，编排层只能靠 inner 链反推
+                    // （HttpClient 抛出的原始异常类型不稳定，IOException / SocketException 会被漏判成确定性失败）。
+                    // 文案与 inner 一律保持原样：inner 仍保留原始异常，既有 inner 链判据继续成立（双重保险）。
+                    throw new AiTransientException(
                         $"调用视觉识别接口失败（{kind}，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，" +
                         $"{netWhy}）：{ex.Message}。{tail}", ex);
                 }
@@ -551,7 +559,11 @@ public static class ImageAnalysisHelper
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException("解析视觉识别响应失败：" + ex.Message, ex);
+            // 用专用类型而非裸 InvalidOperationException：让编排层能把「响应体不是合法 JSON」
+            // （网关偶发返回 HTML 错误页，重试有意义）与「配置缺失 / 端点错误」分开计重排队次数。
+            // 继承 InvalidOperationException，既有 catch 行为完全不变（纯增量）。
+            // inner 必须保留：编排层靠 inner 链识别网络 / 超时。
+            throw new AiResultInvalidException("解析视觉识别响应失败：" + ex.Message, ex);
         }
 
         var text = StripThink(content).Trim();

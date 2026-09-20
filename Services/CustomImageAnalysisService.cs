@@ -63,12 +63,13 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
-        // 解析不出结构化结果：此处有意保持「可重试」（普通 InvalidOperationException），不改成
-        // AiPermanentException —— 理由：temperature=0.3 下模型输出并非确定性，重试有真实成功率；
-        // 而判永久会让「连续 3 个文件命中」直接熔断整批（P26 红线），代价大于收益。
+        // 解析不出结构化结果：抛专用类型 AiResultInvalidException 而非裸 InvalidOperationException——
+        // 语义是「模型给了内容但内容不可用，重试有意义」（temperature=0.3 下输出并非确定性），
+        // 让编排层能与「配置缺失 / 端点错误」分档计重排队次数。
+        // 不改成 AiPermanentException：判永久会让「连续 3 个文件命中」直接熔断整批（P26 红线），代价大于收益。
         // 真正确定性的那一种（finish_reason=length 截断）已在 ImageAnalysisHelper.ExtractContent
         // 用「截断 + 解析不出」这一精确判据短路为整批级永久错误，不会走到这里。
-        return result ?? throw new InvalidOperationException(
+        return result ?? throw new AiResultInvalidException(
             $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}。" +
             "若同一批反复出现，请更换识别模型或检查模型名；偶发情况会自动重试该文件。");
     }

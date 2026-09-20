@@ -79,10 +79,10 @@ public sealed class ZhipuImageAnalysisService : IImageAnalysisService
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
-        // 与 CustomImageAnalysisService 同口径：解析不出保持「可重试」，不判永久
-        // （temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。
+        // 与 CustomImageAnalysisService 同口径：解析不出抛 AiResultInvalidException（重试有意义），
+        // 不判永久（temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。
         // 截断类确定性失败已由 ImageAnalysisHelper.ExtractContent 精确短路，不走这里。
-        return result ?? throw new InvalidOperationException(
+        return result ?? throw new AiResultInvalidException(
             $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}。" +
             "若同一批反复出现，请更换识别模型或检查模型名；偶发情况会自动重试该文件。");
     }
