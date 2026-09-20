@@ -336,7 +336,7 @@ public sealed class OrganizeService : IOrganizeService
                     // 但把这个口径套到「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、
                     // 解码失败…）上纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
                     // 故其余异常降到 2 次（给一次「也许刚释放了锁」的机会，然后放弃）。
-                    int cap = ex is HttpRequestException or TimeoutException
+                    int cap = IsTransientNetworkError(ex)
                         ? maxPerFileAttempts
                         : maxDeterministicAttempts;
 
@@ -1061,6 +1061,27 @@ public sealed class OrganizeService : IOrganizeService
         => ex.HResult == ErrorDiskFull || ex.HResult == ErrorOutOfMemory || ex.HResult == ErrorNotEnoughMemory;
 
     /// <summary>
+    /// 是否为「网络 / 超时」类瞬时故障——单文件重排队 10 次的口径只保留给这一类。
+    /// <b>为什么必须顺着 InnerException 链找：</b>AI 层把「网络 / 连通性异常」与「60 秒超时」
+    /// 一并包装成 <c>InvalidOperationException</c>（<c>ImageAnalysisHelper</c> 网络重试分支，
+    /// 原异常作为 inner 保留），仅看顶层类型无法把它们与「解析失败 / 模型没返回 JSON /
+    /// 配置缺失」区分开——前者该重试 10 次（用户裁定的口径），后者该 2 次。
+    /// 而 HttpClient 的 60s 超时抛的是 <c>TaskCanceledException</c>，其 <c>InnerException</c>
+    /// 正是 <c>TimeoutException</c>，顺着链即可归因，不必去解析异常文案。
+    /// 顶层直接命中 <c>HttpRequestException</c> 的情况是「429/5xx 重试或退避预算耗尽」，
+    /// 同属用户裁定的可重试口径。
+    /// </summary>
+    private static bool IsTransientNetworkError(Exception ex)
+    {
+        int depth = 0; // 防御：异常链理论上不会自环，但深度上限可杜绝病态构造导致的死循环
+        for (Exception? e = ex; e != null && depth < 8; e = e.InnerException, depth++)
+        {
+            if (e is HttpRequestException or TimeoutException) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// 计算最终写入目标路径：
     /// - 不存在（且未被本批次占用）→ 直接返回；
     /// - 存在且内容相同(MD5) → 返回该路径（调用方按「未改动」处理）；
@@ -1125,7 +1146,10 @@ public sealed class OrganizeService : IOrganizeService
         string ext = Path.GetExtension(candidate);
         string target = Path.Combine(output, candidate);
 
-        // 循环内先判空位再换下一个序号：换号与判定一体，避免末尾多出一个「未检查就返回」的分支。
+        // 循环内先判空位再换下一个序号：换号与判定一体，末尾不再有「赋值完就退出」的裸分支。
+        // 覆盖的候选是 candidate 及其 _1…_9998（循环内 9999 个），循环结束后再补查 _9999：
+        // 比原实现<b>多检查了末尾这 1 个候选</b>——原实现正是把它未检查就返回，才导致
+        // 后续 File.Move/Copy 必然抛 IOException（AutoRename 下 → 重排队空转）。
         for (int i = 1; i <= MaxSuffixAttempts; i++)
         {
             if (!File.Exists(target) && !claimedThisRun.Contains(target))
@@ -1238,15 +1262,21 @@ public sealed class OrganizeService : IOrganizeService
     private static string ComputeFingerprint(OrganizeRequest req, string output)
     {
         var sb = new StringBuilder();
+        // 自由文本字段（用户可直接输入，可能含分隔符 '|'）统一走 Field() 加「长度前缀」：
+        // 不加长度的话，(模板="a|1", 语言="") 与 (模板="a", 语言="1") 会拼出同一个指纹，
+        // 碰撞方向恰好是「参数明明变了却被当成没变 → 续传跳过」，也就是本修复要消灭的那个 bug。
+        // 枚举 / 布尔字段不含 '|'，无需前缀。
+        void Field(string v) => sb.Append('|').Append(v.Length).Append(':').Append(v);
+
         sb.Append(FingerprintVersion);
         sb.Append('|').Append(req.Mode);                 // 模式决定目标目录与是否原地改名
         sb.Append('|').Append(req.Conflict);             // 冲突策略决定同名文件处理方式
-        sb.Append('|').Append(req.NamingTemplate);       // 命名模板直接影响输出文件名
+        Field(req.NamingTemplate ?? "");                 // 命名模板直接影响输出文件名
         sb.Append('|').Append(req.UseExifDate ? 1 : 0);  // 日期来源影响 {yyyy}{MM}{dd} 等占位符（归档还影响子目录）
-        sb.Append('|').Append(req.Language);             // 提示语言影响 AI 产出的命名内容
+        Field(req.Language ?? "");                       // 提示语言影响 AI 产出的命名内容
         sb.Append('|').Append(req.AiProvider);           // 引擎不同 → 命名结果不同（None 时走日期回退模板）
-        sb.Append('|').Append(req.CustomApiModel);       // 自定义模型名：不同模型命名风格不同
-        sb.Append('|').Append(output);                   // 输出目录：换目录就该往新目录重做
+        Field(req.CustomApiModel ?? "");                 // 自定义模型名：不同模型命名风格不同
+        Field(output);                                   // 输出目录：换目录就该往新目录重做
         return sb.ToString();
     }
 
