@@ -128,14 +128,35 @@ public static class ImageDecoder
         // 而 RespectExifOrientation 让返回的像素缓冲处于「已旋转坐标系」：Orientation 5/6/7/8 时宽高互换。
         // 若不互换就交给 SetPixelData，因 w*h*4 字节数恰好相等，编码不会报错、只静默产出斜切花屏图，
         // AI 看到废图 → 给出错误描述 → 生成错误的文件名。
-        var swapAxes = IsExifOrientationSwapsAxes(bytes);
+        //
+        // P1：判据改用 WinRT 自己的真值源 OrientedPixelWidth / OrientedPixelHeight ——
+        // 它与上面 GetPixelDataAsync(..., RespectExifOrientation) 用的是同一份 EXIF 解析结果、与输出 100% 同源。
+        // 旧判据 IsExifOrientationSwapsAxes 依赖 MetadataExtractor 解析成功，
+        // 元数据损坏 / 无 EXIF / 某些 HEIC 会静默回退「不旋转」（该文件注释自陈），
+        // 而下面的像素总数自检拦不住这种判错：宽高互换不改变 w*h 的乘积，自检 100% 通过。
+        bool swapAxes;
+        uint ow = decoder.OrientedPixelWidth;
+        uint oh = decoder.OrientedPixelHeight;
+        if (ow > 0 && oh > 0)
+        {
+            // 定向后宽高任一变化 ⟺ 发生了 90°/270° 旋转（Orientation 5/6/7/8）→ 宽高互换；
+            // Orientation 2 / 3 / 4（镜像、180°）不改变宽高 → 不互换。
+            // 正方形图 w == h 时两个分支等价，互换与否无差别。
+            swapAxes = ow != w || oh != h;
+        }
+        else
+        {
+            // 兜底：正常解码器恒 > 0，这里只为「定向宽高不可用」的极端情形留退路，
+            // 沿用旧的 EXIF 解析判据（失败模式与改造前一致，且仍受下面的像素总数自检保护）。
+            swapAxes = IsExifOrientationSwapsAxes(bytes);
+        }
         uint outW = swapAxes ? nh : nw;
         uint outH = swapAxes ? nw : nh;
 
-        // 自检：缩放与旋转都不改变像素总数，尺寸不符说明坐标系判断有误。
+        // 自检：缩放与旋转都不改变像素总数，尺寸不符说明坐标系判断有误（如 nw/nh 取整差异）。
         // 此时宁可抛错（上层按「超限 / 解码失败」跳过该文件）也不要产出损坏图像。
-        // 若此自检在真实样本上被触发，说明 EXIF 方向判断有误，应切换到 OrientedPixelWidth/OrientedPixelHeight
-        // 方案（见 IsExifOrientationSwapsAxes 的注释）。
+        // 注意：本自检拦不住「宽高互换判错」（乘积不变）——那一条已由上面的 OrientedPixelWidth 判据解决；
+        // 但它仍能拦住取整差异等真实尺寸不符，不要删除。
         if (pixels.Length != (long)outW * outH * 4)
             throw new InvalidOperationException($"解码后的像素缓冲尺寸与预期不符（期望 {outW}x{outH}，实际 {pixels.Length / 4} 像素），已跳过该文件以避免产出花屏图。");
 
@@ -159,15 +180,15 @@ public static class ImageDecoder
     /// 读取 EXIF Orientation，判断像素缓冲相对源坐标系是否发生了宽高互换（值 5/6/7/8 = 90°/270° 旋转）。
     /// </summary>
     /// <remarks>
-    /// 用项目已有依赖 MetadataExtractor 读 EXIF：不引入新的 WinRT API（本机无 SDK，编译风险优先），
-    /// 也不需要文件路径——直接复用 <c>EncodeResizedJpegAsync</c> 已读入内存的字节，
-    /// 因此调用方（ImageAnalysisHelper）无需任何改动。
-    /// <b>未来可切换的等价方案：</b>微软官方推荐读 <c>BitmapDecoder.OrientedPixelWidth</c> /
-    /// <c>OrientedPixelHeight</c>——它用的是 WinRT 自己解析的方向源，与 RespectExifOrientation 的输出
-    /// 100% 一致，且不依赖外部库解析成功。本轮未采用的原因是「不引入新 WinRT API」（本机无 SDK，无法编译验证）。
-    /// 若后续升级 Windows App SDK，或遇到 MetadataExtractor 解析不出 Orientation 的样本，优先切到该方案。
-    /// 注意：本方案的失败模式是「读不到 EXIF → 回退旧行为」，而旧行为现在有下面的像素总数自检兜底，
-    /// 最坏结果是该文件被跳过，不会再静默产出花屏图。
+    /// <b>本方法现已降级为兜底</b>：主判据改用 <c>BitmapDecoder.OrientedPixelWidth</c> /
+    /// <c>OrientedPixelHeight</c>（见 <c>EncodeResizedJpegAsync</c>）——它用的是 WinRT 自己解析的方向源，
+    /// 与 <c>RespectExifOrientation</c> 的输出 100% 一致，且不依赖外部库解析成功。
+    /// 本方法只在「定向宽高不可用（返回 0）」这一理论上才会被走到。
+    /// 保留它的原因：MetadataExtractor 是本项目既有依赖、零额外成本，且它不需要文件路径——
+    /// 直接复用 <c>EncodeResizedJpegAsync</c> 已读入内存的字节，调用方（ImageAnalysisHelper）无需任何改动。
+    /// <b>它的已知弱点（所以才有主判据）：</b>格式不支持 / 元数据损坏 / 无 EXIF 时一律按「不旋转」处理，
+    /// 而 WinRT 侧仍可能已按 EXIF 旋转 → 宽高互换判错 → 静默花屏；
+    /// 像素总数自检拦不住这种情况，因为宽高互换不改变 <c>w*h</c> 的乘积。
     /// </remarks>
     private static bool IsExifOrientationSwapsAxes(byte[] imageBytes)
     {

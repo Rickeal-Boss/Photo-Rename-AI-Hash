@@ -33,7 +33,16 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
     /// 进程级共享，跨整理批次仍然生效（同一 key 的额度本就是连续计费的）。</summary>
     private readonly string _apiKey;
 
-    public NvidiaImageAnalysisService(string apiKey) => _apiKey = apiKey;
+    /// <summary>可选的「退避等待」替换钩子（语义见 <see cref="ImageAnalysisHelper.CallVisionApiAsync"/> 的 delayAsync）：
+    /// null（默认）时行为与改造前完全一致（内部 Task.Delay）；非 null 时 AI 退避等待改走它，
+    /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
+    private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
+
+    public NvidiaImageAnalysisService(string apiKey, Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        _apiKey = apiKey;
+        _delayAsync = delayAsync;
+    }
 
     public async Task<ImageAnalysisResult?> AnalyzeAsync(string imagePath, string language, CancellationToken ct = default)
     {
@@ -70,16 +79,22 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
 
         // 走 Nvidia 策略档（本仓唯一默认带 RPM 闸门的档位：60 秒 30 次），
         // 闸门在每次真实 HTTP 尝试（含重试）前生效。
-        // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null。
-        // 4xx（含 403）现已由 CallVisionApiRawAsync 直接抛 AiPermanentException（并附 403 定向引导），
-        // 此处不再按状态码二次包装——HttpRequestException 过滤器已永不命中（死代码）。
+        // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null；
+        // 4xx（含 403）由 CallVisionApiRawAsync 直接抛 AiPermanentException（并附 403 定向引导），
+        // 故本方法不再按状态码做任何二次包装——这里也确实没有任何 catch / 异常过滤器。
+        // （旧注释曾写「HttpRequestException 过滤器已永不命中（死代码）」，但那段过滤器早随
+        //   状态码判定上移而删除，注释指向不存在的代码，会误导维护者，故改为上述准确描述。）
         var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
             Endpoint, _apiKey, JsonSerializer.Serialize(body),
-            AiProviderProfiles.For(AiProvider.Nvidia), ct).ConfigureAwait(false);
+            AiProviderProfiles.For(AiProvider.Nvidia), ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractNemotronContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
+        // 与 CustomImageAnalysisService 同口径：解析不出保持「可重试」，不判永久
+        // （temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。
+        // 截断类确定性失败已由 ImageAnalysisHelper.ExtractContent 精确短路，不走这里。
         return result ?? throw new InvalidOperationException(
-            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}");
+            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}。" +
+            "若同一批反复出现，请更换识别模型或检查模型名；偶发情况会自动重试该文件。");
     }
 }

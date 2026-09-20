@@ -58,18 +58,27 @@ public static class ImageAnalysisHelper
     /// 限流与退避语义全部由 <paramref name="profile"/> 决定（见 <see cref="AiProviderProfiles"/>）：
     /// 闸门按供应商（如 NVIDIA 30 RPM；智谱/通义/自定义默认无闸门），退避为指数退避
     /// （1s 起、×2、单次封顶按档位、带 0~1s jitter），并<b>遵从服务端 Retry-After / ratelimit-reset /
-    /// JSON retryDelay 作为等待下限</b>（单次封顶 120s），整轮总耗时预算 180s。
-    /// 遇 HTTP 429（限流）或 5xx（服务端错误）按上述策略重试；重试期间不返回任何结果，
+    /// JSON retryDelay 作为等待下限</b>（单次封顶 120s），整轮退避等待预算 180s
+    /// （<b>口径：只约束「等待」，不含最后一次 HTTP 请求本身的耗时</b>——HttpClient.Timeout = 60s，
+    /// 故单文件墙钟最坏 ≈ 180s 等待 + 60s 请求 ≈ 240s+，不要对外承诺「总耗时 180s」）。
+    /// 遇 HTTP 429（限流）、5xx（服务端错误）、408（请求超时）、425（过早）按上述策略重试；
+    /// 重试期间不返回任何结果，
     /// 因此调用方不会据此产出 <c>unknown_</c> 重命名；限流解除后继续。
-    /// 4xx（非 429）为客户端永久错误，不重试、直接抛 <see cref="AiPermanentException"/>；
+    /// 其余 4xx 为客户端永久错误，不重试、直接抛 <see cref="AiPermanentException"/>；
     /// 429 命中档位的永久错误规则（如智谱欠费/额度类业务码）同样判永久。
     /// </summary>
+    /// <param name="delayAsync">可选的「退避等待」替换钩子：null（默认）时内部走 <see cref="Task.Delay(TimeSpan, CancellationToken)"/>；
+    /// 非 null 时改由调用方实现等待——用于让「暂停」能打断退避等待（组织层暂停检查点夹在 AI 调用前后，
+    /// 退避期间点暂停原本要等约 4 分钟才生效，期间还在发请求计费）。
+    /// <b>契约必须与 Task.Delay 一致</b>：等满传入的时长后返回，且 <c>ct</c> 取消时抛
+    /// <see cref="OperationCanceledException"/>，否则本方法的取消/暂停语义会错乱。</param>
     /// <exception cref="InvalidOperationException">端点/模型/密钥为空，或网络/连通性异常（重试次数或退避预算耗尽）。</exception>
-    /// <exception cref="HttpRequestException">429 限流 / 5xx 服务端错误重试次数或退避预算耗尽（携带状态码与响应体片段）。</exception>
+    /// <exception cref="HttpRequestException">429 限流 / 5xx / 408 / 425 服务端错误重试次数或退避预算耗尽（携带状态码与响应体片段）。</exception>
     /// <exception cref="AiPermanentException">4xx 客户端永久错误（模型不存在 / 参数非法 / 401 / 403 / 404 等），或 429 命中永久业务规则，重试无意义。</exception>
     public static Task<string> CallVisionApiAsync(
         string endpoint, string model, string apiKey, string prompt, string dataUrl,
-        AiProviderProfile profile, CancellationToken ct)
+        AiProviderProfile profile, CancellationToken ct,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         if (string.IsNullOrWhiteSpace(model))
             throw new InvalidOperationException("视觉识别模型名未配置（自定义引擎请在「设置」中填写模型名）。");
@@ -95,7 +104,9 @@ public static class ImageAnalysisHelper
             max_tokens = 1024,
         };
 
-        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), profile, ct);
+        // delayAsync 必须透传：本方法只是构造默认请求体的包装，
+        // 漏传会让「暂停可打断退避」在走 CallVisionApiAsync 的引擎（自定义 / 通义）上静默失效。
+        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), profile, ct, delayAsync);
     }
 
     /// <summary>
@@ -104,8 +115,10 @@ public static class ImageAnalysisHelper
     /// 校验、重试、限流语义与 <see cref="CallVisionApiAsync"/> 完全一致，
     /// 均由 <paramref name="profile"/>（见 <see cref="AiProviderProfiles"/>）决定。
     /// </summary>
+    /// <param name="delayAsync">同 <see cref="CallVisionApiAsync"/> 的同名参数：可选的退避等待替换钩子。</param>
     public static async Task<string> CallVisionApiRawAsync(
-        string endpoint, string apiKey, string jsonBody, AiProviderProfile profile, CancellationToken ct)
+        string endpoint, string apiKey, string jsonBody, AiProviderProfile profile, CancellationToken ct,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new InvalidOperationException("视觉识别端点 URL 未配置（自定义引擎请在「设置」中填写端点）。");
@@ -180,7 +193,7 @@ public static class ImageAnalysisHelper
                         $"{netWhy}）：{ex.Message}。{tail}", ex);
                 }
 
-                await Task.Delay(netDelay, ct).ConfigureAwait(false);
+                await DelayAsync(delayAsync, netDelay, ct).ConfigureAwait(false);
                 attempt++;
                 continue;
             }
@@ -208,8 +221,12 @@ public static class ImageAnalysisHelper
                         isBatchLevel: true);
                 }
 
-                // 429 限流 / 5xx 服务端错误：按策略档退避后重试，期间不做任何重命名
-                if (code == 429 || code >= 500)
+                // 429 限流 / 5xx 服务端错误 / 408 请求超时 / 425 过早：按策略档退避后重试，期间不做任何重命名。
+                // 408 / 425 在此显式并入可重试集合（此前随「其余 4xx」被判整批级永久错误、一次都不重试）：
+                // - 408 Request Timeout：RFC 9110 明确「客户端可以重发请求」，服务端只是没等到/主动放弃；
+                // - 425 Too Early：用于防重放，语义是「换个时间再来」。
+                // 两者都不是配置类错误，改成可重试才符合本项目「宁可慢也不产出 unknown_」的既定口径。
+                if (code == 429 || code == 408 || code == 425 || code >= 500)
                 {
                     var delay = ComputeDelay(profile, attempt, resp, respText);
                     if (attempt >= pol.MaxAttempts || sw.Elapsed + delay > pol.TotalBudget)
@@ -230,7 +247,7 @@ public static class ImageAnalysisHelper
                             null, resp.StatusCode);
                     }
 
-                    await Task.Delay(delay, ct).ConfigureAwait(false);
+                    await DelayAsync(delayAsync, delay, ct).ConfigureAwait(false);
                     attempt++;
                     continue;
                 }
@@ -259,6 +276,21 @@ public static class ImageAnalysisHelper
 
         // 兜底：循环内已保证在最后一次失败后抛出，此处仅满足编译器「所有路径均有返回值」要求
         throw new InvalidOperationException($"视觉识别接口调用超出最大尝试次数（{pol.MaxAttempts}）。");
+    }
+
+    /// <summary>
+    /// 退避等待的唯一出口：<paramref name="delayAsync"/> 为 null 时就是 <see cref="Task.Delay(TimeSpan, CancellationToken)"/>，
+    /// 行为与改造前<b>逐字节一致</b>（默认 null → 所有既有调用点不受影响）。
+    /// 非 null 时改走调用方实现（目前用途：让「暂停」能打断退避等待——组织层的两个暂停检查点
+    /// 夹在 AI 调用前后，退避期间点暂停原本要等满约 4 分钟才生效，期间仍在发请求计费）。
+    /// 注意 C# 语法：async 方法里不能用 ref / out（本项目踩过 CS1988），故「可替换等待」只能用委托参数表达。
+    /// </summary>
+    private static Task DelayAsync(Func<TimeSpan, CancellationToken, Task>? delayAsync, TimeSpan delay, CancellationToken ct)
+    {
+        if (delayAsync == null) return Task.Delay(delay, ct);
+        // 委托返回 null 会让 await 抛 NullReferenceException → 落到组织层通用 catch → 一次重试都没做就失败
+        // 并被重排队 10 次（P18 静默失败）。此处回退到 Task.Delay 兜底。
+        return delayAsync(delay, ct) ?? Task.Delay(delay, ct);
     }
 
     /// <summary>
@@ -395,6 +427,9 @@ public static class ImageAnalysisHelper
     /// 按 P26 三层口径分级：<b>不能一律用 AiPermanentException 的默认 true</b>——
     /// 单张图过大 / 格式不被接受时服务端回 413 / 415，而相机连拍的大图在目录里连号，
     /// 连续 3 张极易达成，会把「跳过 3 张」升级成「整批失败」，文案还指向账户/额度，完全误导。
+    /// <para>前置条件：408（请求超时）与 425（过早）已在调用处被分流进「可重试」分支，
+    /// <b>不会走到本方法</b>；若将来有人把它们移回 4xx 分流，必须同步在本方法里按 false 处理，
+    /// 否则「超时」会被读成账户/额度问题（P26 三层口径）。</para>
     /// </summary>
     private static bool IsBatchLevel4xx(int code, string respText)
     {
@@ -456,7 +491,18 @@ public static class ImageAnalysisHelper
         // 顺序不可反：先截断（见上），再对这 500 字符脱敏
         s = Regex.Replace(s, @"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", "$1***");
         s = Regex.Replace(s, @"(?i)((?:api[_-]?key|apikey|access[_-]?token|secret)\s*[:=]\s*""?)[A-Za-z0-9._\-]{8,}", "$1***");
-        s = Regex.Replace(s, @"(?i)([?&](?:key|api[_-]?key|access_token|token)=)[^&\s""]+", "$1***");
+        // 「&amp;」是 HTML 转义的「&」：企业代理的错误页模板（Squid 等）会把查询串转义后回显，
+        // 只认裸 & 会让 ?key= 的脱敏整条失效（漏一圈等于没脱敏）。
+        s = Regex.Replace(s, @"(?i)([?&](?:amp;)?(?:key|api[_-]?key|access_token|token)=)[^&\s""]+", "$1***");
+
+        // 以下两条补「无关键字邻接的裸 Key 回显」（如 "invalid key sk-proj-xxxx"、路径内嵌 /v1/sk-xxx）：
+        // 上面三条都依赖关键字（bearer / apikey / ?key=）邻接，厂商直接把 Key 拼进错误文案时全部漏网。
+        // 下限取 16 而非 8：显式前缀虽强，但 "task-oriented" / "risk-management" 这类正常英文单词也含 "sk-"，
+        // 8 字符下限会误伤（误伤虽不致错，却会让错误文案被 *** 打碎到无法阅读）；真实 Key 长度远大于 16。
+        // 前缀用 \b 界定：避免 "task-…" 里的 "sk-" 被当成 OpenAI 前缀。
+        s = Regex.Replace(s, @"(?i)(\b(?:sk|gsk|xai)[-_])[A-Za-z0-9._\-]{16,}", "$1***");
+        // Google / Gemini 的 Key 形如 "AIzaSy…"：AIza 后面直接跟字符、无分隔符，故本条不要求分隔符
+        s = Regex.Replace(s, @"(\bAIza)[A-Za-z0-9._\-]{16,}", "$1***");
         return s;
     }
 
@@ -464,10 +510,14 @@ public static class ImageAnalysisHelper
     /// 从 OpenAI 兼容响应体中抽取 message content，并兼容「思考型模型」的多种返回形态：
     /// content 为空时依次回退 <c>message.reasoning_content</c>（智谱 GLM-4.6V 系列命名）与
     /// <c>message.reasoning</c>（NVIDIA NIM 命名），随后剥离内联 &lt;think&gt; 段。
-    /// 若正文为空且 <c>finish_reason == "length"</c>，说明输出预算被思维链耗尽，
-    /// 抛出可归因的明确异常（而非让上层误判为「模型不按要求返回 JSON」）。
+    /// 若 <c>finish_reason == "length"</c>（输出被 max_tokens 截断）且解析不出结构化结果
+    /// —— 含正文为空与「留下半截 JSON」两种形态 —— 说明输出预算被思维链耗尽，
+    /// 抛 <see cref="AiPermanentException"/> 短路（而非让上层误判为「模型不按要求返回 JSON」后重排队 10 次）；
+    /// 截断但 JSON 恰好完整时正常返回，不受影响。
     /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因。
     /// </summary>
+    /// <exception cref="InvalidOperationException">响应体含 error 字段，或不是可解析的 chat/completions 响应。</exception>
+    /// <exception cref="AiPermanentException">输出被 max_tokens 截断且解析不出结果（整批级，不重试）。</exception>
     public static string ExtractContent(string raw)
     {
         string content;
@@ -505,12 +555,33 @@ public static class ImageAnalysisHelper
         }
 
         var text = StripThink(content).Trim();
-        if (text.Length == 0 && string.Equals(finishReason, "length", StringComparison.OrdinalIgnoreCase))
+
+        // finish_reason == "length" 表示输出被 max_tokens 截断。此前只在「正文为空」时判永久，
+        // 但更常见的形态是「留下半截 JSON」：正文非空 → 本方法照常返回 → 四个引擎的 Parse 返回 null →
+        // 抛普通 InvalidOperationException → OrganizeService 对同一张图重排队 10 次，
+        // 每次都用同样的 max_tokens 重发、结果高度确定，却付费 10 次。
+        // 故此处补一条精确判据：截断 + 解析不出结构化结果 = 确定性失败，直接短路为整批级永久错误。
+        if (string.Equals(finishReason, "length", StringComparison.OrdinalIgnoreCase) && Parse(text) == null)
+        {
+            // 只在截断分支里才调 Parse：正常响应不付这份解析开销，行为也与改造前逐字节一致。
+            // 「截断但 JSON 恰好完整」的正常结果在此被保留——Parse 成功即返回文本，不短路。
             // 该条件对同一模型配置是确定性的：调大 max_tokens 前重试多少次都一样，
             // 且失败结果不进 aiCache，每次重试都要重新付费。
+            //
+            // 已知残留（刻意不为它增加复杂度）：Parse 取的是「首个 { 到最后一个 }」的贪心片段，
+            // 若模型在完整 JSON 之后又吐了一段自带 '}' 的内容，贪心片段非法 → 会走到本分支误判永久。
+            // 触发概率极低（提示词已要求「只输出一个 JSON 对象」），且旧行为同样是失败后重排队 10 次
+            // （同样不成功、同样付费 10 次），故收益不值得引入一段括号配平扫描。
             throw new AiPermanentException(
-                "视觉识别输出被 max_tokens 截断（finish_reason=length）且正文为空：模型可能开启了思考模式，" +
-                "已耗尽输出预算。请关闭思考模式或提高最大输出 tokens 后重试。");
+                "视觉识别输出被 max_tokens 截断（finish_reason=length）" +
+                (text.Length == 0 ? "且正文为空" : "，返回的是不完整的 JSON，无法解析") +
+                "：模型可能开启了思考模式，已耗尽输出预算。" +
+                "请关闭思考模式或提高最大输出 tokens 后重试。",
+                // P1-G：显式写出而非依赖 AiPermanentException 的默认值 true。权衡：截断源于 max_tokens
+                // 与模型配置（同一批所有文件同源），故确实应为 true；但默认值有「被将来新增的逐文件
+                // 规则静默纳入」的风险（P26），必须显式声明——与下面 429 永久分支同一口径。
+                isBatchLevel: true);
+        }
 
         return text;
     }

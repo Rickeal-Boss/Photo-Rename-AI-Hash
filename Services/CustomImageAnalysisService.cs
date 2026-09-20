@@ -22,16 +22,24 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
     /// 却会重复做 host 嗅探与字典查找，且让「闸门是跨调用存活的共享实例」这一事实在调用点不可见。</summary>
     private readonly AiProviderProfile _profile;
 
+    /// <summary>可选的「退避等待」替换钩子（语义见 <see cref="ImageAnalysisHelper.CallVisionApiAsync"/> 的 delayAsync）：
+    /// null（默认）时行为与改造前完全一致（内部 Task.Delay）；非 null 时 AI 退避等待改走它，
+    /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
+    private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
+
     /// <param name="endpoint">完整的 chat/completions 端点 URL</param>
     /// <param name="model">模型名，如 gpt-4o</param>
     /// <param name="apiKey">API Key</param>
     /// <param name="rpmLimit">每分钟请求上限（用户在「设置」填写）；0 = 不限（不替用户猜 RPM），
     /// &gt; 0 时覆盖端点嗅探得出的闸门。</param>
-    public CustomImageAnalysisService(string endpoint, string model, string apiKey, int rpmLimit = 0)
+    /// <param name="delayAsync">可选的退避等待替换钩子（见 <see cref="_delayAsync"/>）。</param>
+    public CustomImageAnalysisService(string endpoint, string model, string apiKey, int rpmLimit = 0,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _endpoint = endpoint;
         _model = model;
         _apiKey = apiKey;
+        _delayAsync = delayAsync;
         // 端点 host 嗅探（智谱/阿里/Anthropic/Gemini 各有档位，未命中走通用档）；
         // 填了「每分钟请求上限」时在档位基础上挂闸门（闸门实例进程级共享，跨图片、跨批次生效）。
         _profile = AiProviderProfiles.For(AiProvider.Custom, endpoint, rpmLimit);
@@ -51,11 +59,17 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
         // 用构造函数里建好的策略档（闸门实例进程级共享，跨图片/跨批次累计计数，限速才真的生效）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language), dataUrl, _profile, ct).ConfigureAwait(false);
+            ImageAnalysisHelper.BuildPrompt(language), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
+        // 解析不出结构化结果：此处有意保持「可重试」（普通 InvalidOperationException），不改成
+        // AiPermanentException —— 理由：temperature=0.3 下模型输出并非确定性，重试有真实成功率；
+        // 而判永久会让「连续 3 个文件命中」直接熔断整批（P26 红线），代价大于收益。
+        // 真正确定性的那一种（finish_reason=length 截断）已在 ImageAnalysisHelper.ExtractContent
+        // 用「截断 + 解析不出」这一精确判据短路为整批级永久错误，不会走到这里。
         return result ?? throw new InvalidOperationException(
-            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}");
+            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}。" +
+            "若同一批反复出现，请更换识别模型或检查模型名；偶发情况会自动重试该文件。");
     }
 }

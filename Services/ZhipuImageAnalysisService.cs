@@ -25,7 +25,16 @@ public sealed class ZhipuImageAnalysisService : IImageAnalysisService
 
     private readonly string _apiKey;
 
-    public ZhipuImageAnalysisService(string apiKey) => _apiKey = apiKey;
+    /// <summary>可选的「退避等待」替换钩子（语义见 <see cref="ImageAnalysisHelper.CallVisionApiAsync"/> 的 delayAsync）：
+    /// null（默认）时行为与改造前完全一致（内部 Task.Delay）；非 null 时 AI 退避等待改走它，
+    /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
+    private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
+
+    public ZhipuImageAnalysisService(string apiKey, Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        _apiKey = apiKey;
+        _delayAsync = delayAsync;
+    }
 
     public async Task<ImageAnalysisResult?> AnalyzeAsync(string imagePath, string language, CancellationToken ct = default)
     {
@@ -66,11 +75,15 @@ public sealed class ZhipuImageAnalysisService : IImageAnalysisService
         // 档位同时承载智谱的永久错误业务码表（欠费/额度/套餐类 429 立即失败，1302/1305 仍重试）。
         // CallVisionApiRawAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null。
         var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
-            Endpoint, _apiKey, JsonSerializer.Serialize(body), AiProviderProfiles.For(AiProvider.Zhipu), ct).ConfigureAwait(false);
+            Endpoint, _apiKey, JsonSerializer.Serialize(body), AiProviderProfiles.For(AiProvider.Zhipu), ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);
+        // 与 CustomImageAnalysisService 同口径：解析不出保持「可重试」，不判永久
+        // （temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。
+        // 截断类确定性失败已由 ImageAnalysisHelper.ExtractContent 精确短路，不走这里。
         return result ?? throw new InvalidOperationException(
-            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}");
+            $"视觉识别返回内容无法解析为结构化结果（模型可能未按要求返回 JSON）：{System.IO.Path.GetFileName(imagePath)}。" +
+            "若同一批反复出现，请更换识别模型或检查模型名；偶发情况会自动重试该文件。");
     }
 }

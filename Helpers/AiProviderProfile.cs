@@ -45,7 +45,12 @@ public sealed class AiRetryPolicy
     /// <summary>服务端提示可接受的上限：超过即按本值等待（防服务端给出小时级值冻死 UI）。</summary>
     public TimeSpan RetryAfterCap { get; init; } = TimeSpan.FromSeconds(120);
 
-    /// <summary>本轮（单文件/单次调用）重试的总耗时预算：累计耗时 + 下一次等待超过预算即放弃等待并抛出。</summary>
+    /// <summary>本轮（单文件/单次调用）重试的<b>退避等待预算</b>：累计耗时 + 下一次等待超过预算即放弃等待并抛出。
+    /// <para><b>口径必须写清：它只约束「等待」（含限流闸门的等待），不含最后一次 HTTP 请求本身的耗时。</b>
+    /// 最后一次请求最多再占 <c>HttpClient.Timeout</c>（60s，见 <c>ImageAnalysisHelper.Http</c>），
+    /// 故单文件墙钟最坏 ≈ 180s 等待 + 60s 请求 ≈ 240s+。
+    /// 早先写作「总耗时预算 180s」会让人以为单文件最多 3 分钟，与实测（4 分钟以上）对不上，
+    /// 排查「为什么点了暂停要等这么久」时会误判预算没生效。</para></summary>
     public TimeSpan TotalBudget { get; init; } = TimeSpan.FromSeconds(180);
 
     /// <summary>第 <paramref name="attempt"/> 次尝试失败后的退避时长（attempt 从 1 开始）：
