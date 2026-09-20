@@ -22,6 +22,15 @@ public class RenameLogEntry
     /// <summary>源文件 MD5，用于冲突检测（内容相同则跳过或加序号）。</summary>
     public string Md5 { get; set; } = "";
 
+    /// <summary>
+    /// 本次运行的「参数指纹」：由模式 / 冲突策略 / 命名模板 / 是否取 EXIF 日期等
+    /// <b>影响输出文件名或目标路径</b>的参数算出（算法见 <c>OrganizeService.ComputeFingerprint</c>）。
+    /// 续传索引只采纳指纹相同的历史记录——用户改了模板 / 换模式 / 换冲突策略后重跑，
+    /// 旧记录不再让对应文件被静默跳过（此前只排除了「错误」与「跳过(已存在)」，成功记录一律计入，
+    /// 导致改参数重跑整批被跳过）。留空表示未知（旧日志），一律不采纳。
+    /// </summary>
+    public string Fingerprint { get; set; } = "";
+
     /// <summary>操作类型：复制 / 移动 / 重命名 / 归档。</summary>
     public string Operation { get; set; } = "";
 

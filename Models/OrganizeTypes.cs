@@ -38,6 +38,15 @@ public class OrganizeRequest
     public string Language { get; set; } = "zh-CN";
 
     public bool UseExifDate { get; set; } = true;
+
+    /// <summary>
+    /// 本次运行的「参数指纹」：由 <c>OrganizeService</c> 在批次开始时按「影响输出文件名 / 目标路径」
+    /// 的参数算出（模式 / 冲突策略 / 命名模板 / 取 EXIF 日期 / 识别引擎 / 输出目录…），
+    /// <b>调用方（ViewModel）无需也不应设置</b>，默认空串仅供构造期占位。
+    /// 用途：写入 rename_log.csv，供下次续传时比对——指纹不同的历史记录不参与「已处理」跳过判定，
+    /// 避免用户改模板 / 换模式 / 换冲突策略后重跑，整批被旧记录静默跳过。
+    /// </summary>
+    public string Fingerprint { get; set; } = "";
 }
 
 /// <summary>整理进度回调（在 UI 线程上派发）。</summary>

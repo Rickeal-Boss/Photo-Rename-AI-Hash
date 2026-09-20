@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Http;            // HttpRequestException：重排队分级里用它判定「网络瞬时故障」
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -99,7 +100,24 @@ public sealed class OrganizeService : IOrganizeService
             return report;
         }
 
-        IImageAnalysisService? ai = CreateAi(req);
+        // 运行指纹：把「影响输出文件名 / 目标路径」的参数固化成一个字符串，写入 rename_log.csv。
+        // 续传索引只采纳指纹相同的记录——改模板 / 换模式 / 换冲突策略后重跑不再被旧记录静默跳过。
+        req.Fingerprint = ComputeFingerprint(req, output);
+
+        IImageAnalysisService? ai;
+        try
+        {
+            ai = CreateAi(req);
+        }
+        catch
+        {
+            // 与 :87-89「源文件夹无效」早退同源：构造 AI 失败是 throw 而非 return，发生在
+            // _pts 创建之前、try/finally 不会执行，若不在此清掉待应用标记，它会残留到下一批次
+            // → 用户没点过暂停，下一批一创建令牌却被应用 → 一启动即暂停。
+            _pendingPause = false;
+            _pts = null;
+            throw;
+        }
 
         // 闸门上限（张/分）：null = 该引擎不带闸门（不主动限速）。
         // 只在批次开始时取一次：档位由 (引擎, 端点, RPM 上限) 三者决定，批次内不会变。
@@ -111,12 +129,26 @@ public sealed class OrganizeService : IOrganizeService
         // 上移后这两个窗口内点暂停即可生效：扫描本身不检查暂停，扫描一结束、处理任何文件之前就挂起。
         _pts = new PauseTokenSource();
         ApplyPendingPause(); // 补应用「令牌创建之前」（校验 / 构造 AI 阶段）点下的暂停
-        var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
+        IReadOnlyList<PhotoFile> files;
+        try
+        {
+            files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 同上：扫描失败（取消 / 目录不可访问）也是「令牌刚创建、try/finally 尚未进入」的窗口，
+            // 必须在这里清掉待应用标记与令牌，否则下一批一启动就处于暂停态。
+            _pendingPause = false;
+            _pts = null;
+            throw;
+        }
         report.Total = files.Count;
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过「已按目标格式命名完成」的文件，
         // 避免重复处理（例如已正确命名的 game_古建筑竞技场_..._screenshot.png）。
-        var completed = await _log.LoadRenameLogAsync(output).ConfigureAwait(false);
+        // 第二参数是指纹：历史记录的指纹与本次不同（或旧日志根本没有该列）则一律不计入索引，
+        // 宁可重做——重做的最坏结果是「内容相同则跳过 / 加序号」，而静默跳过是用户完全无感的丢活。
+        var completed = await _log.LoadRenameLogAsync(output, req.Fingerprint).ConfigureAwait(false);
 
         // 工作队列：文件处理失败（如视觉模型偶发未按 JSON 返回、网络抖动、瞬时限流等）不直接跳过，
         // 而是重新入队到队尾稍后再次尝试，最大化「成功重命名」的比例；达到单文件最大尝试次数仍失败才放弃。
@@ -143,6 +175,7 @@ public sealed class OrganizeService : IOrganizeService
                     OriginalName = f.Name,
                     Operation = OpName(req.Mode),
                     Status = "跳过(日志已完成)",
+                    Fingerprint = req.Fingerprint,
                 };
                 report.Results.Add(skipEntry);
                 // 续传跳过也要带 Percent：OrganizeProgress.Percent 默认 0，VM 无条件赋值，
@@ -158,12 +191,38 @@ public sealed class OrganizeService : IOrganizeService
             queue.Enqueue((f, order));
         }
 
+        // 索引可信度告警（放在建队之后：Percent 用同源的 skippedAtStart 计数）。
+        // 必须带 Percent：VM 无条件赋值 Progress = p.Percent，不带会把进度条打回 0。
+        if (completed.IgnoredByFingerprint > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录与本次参数（模式/冲突策略/命名模板）不一致，" +
+                          "已忽略这些记录、将重新处理对应文件；若希望沿用旧记录，请保持参数不变。",
+            });
+        }
+        if (completed.EnumerationIncomplete)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                LogLine = "警告：续传索引可能不完整（部分子目录无法访问），已按可读取的部分处理。",
+            });
+        }
+
         var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        const int maxPerFileAttempts = 10; // 单文件最大尝试次数：兜底防止个别图片永久卡死循环
+        const int maxPerFileAttempts = 10; // 单文件最大尝试次数：网络/超时类瞬时故障沿用用户已确认的口径
+        const int maxDeterministicAttempts = 2; // 其余「确定性失败」的重试上限（见下方 catch 的分档说明）
 
         // 本批次已实际落地的目标路径：ResolveTargetAsync 据此拒绝 Overwrite 覆盖本批次自己产出的文件。
         // 只按批次存活、不做实例字段：本类是单例，实例字段会在并发批次之间互相污染。
         var claimedThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 本批次已备份过的源文件路径（重命名模式的保险备份）。
+        // 重排队会让同一文件被处理多次，此前每次都会再拷一份备份 → 单文件最多 10 份冗余备份
+        // （既占用备份盘空间，也让用户误以为备份了 10 个不同文件）。按批次去重，只备份首次。
+        var backedUpThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 连续命中「不可恢复的识别错误」的文件数。达到阈值说明该问题（账户欠费 / 额度耗尽 /
         // 模型不存在 / 参数非法）对整批都成立，继续只会产生 N 次必然失败的请求与 N 行同因错误。
@@ -190,7 +249,7 @@ public sealed class OrganizeService : IOrganizeService
                 var (f, index) = queue.Dequeue();
                 try
                 {
-                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun).ConfigureAwait(false);
+                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                     done++;
@@ -270,7 +329,18 @@ public sealed class OrganizeService : IOrganizeService
                     if (ex is OperationCanceledException) throw; // 取消立即向上传播，不进入重试逻辑
                     attempts.TryGetValue(f.Path, out int n);
                     n++;
-                    if (n < maxPerFileAttempts)
+
+                    // 重排队分档：只有「网络 / 超时」这类瞬时故障才配得上 10 次重排队
+                    // （用户已明确确认过这个口径：AI 侧单次调用内最多退避 8 次、总预算 180s，
+                    //  叠加 10 次重排队 = 最坏 80 次请求/文件、约 40 分钟，是既定取舍，不动）。
+                    // 但把这个口径套到「确定性失败」（文件被占用、无权限、MD5 读不出、路径非法、
+                    // 解码失败…）上纯属空转：同样的异常必然再抛一次，还要再付一遍 AI 请求。
+                    // 故其余异常降到 2 次（给一次「也许刚释放了锁」的机会，然后放弃）。
+                    int cap = ex is HttpRequestException or TimeoutException
+                        ? maxPerFileAttempts
+                        : maxDeterministicAttempts;
+
+                    if (n < cap)
                     {
                         // 重新排队到队尾，稍后再次尝试（保留原序号，避免重命名序号错乱）
                         attempts[f.Path] = n;
@@ -279,7 +349,7 @@ public sealed class OrganizeService : IOrganizeService
                         {
                             // 重试不算完成（done 未递增），沿用当前百分比即可：不给值会被 VM 打回 0%
                             Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
-                            LogLine = $"{f.Name} [重试 {n}/{maxPerFileAttempts}] 上次失败：{ex.Message}",
+                            LogLine = $"{f.Name} [重试 {n}/{cap}] 上次失败：{ex.Message}",
                         });
                     }
                     else
@@ -358,17 +428,53 @@ public sealed class OrganizeService : IOrganizeService
             return report;
         }
 
+        // 同 RunAsync：运行指纹（归档的目标子目录由「输出目录 + 日期来源」决定，故同样纳入）
+        req.Fingerprint = ComputeFingerprint(req, req.OutputFolder);
+
         // 本批次已实际落地的目标路径（语义同 RunAsync）
         var claimedThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 同 RunAsync：暂停令牌必须在扫描之前创建，否则扫描 / 加载索引窗口内点暂停是静默 no-op。
         _pts = new PauseTokenSource();
         ApplyPendingPause(); // 同 RunAsync：补应用令牌创建之前点下的暂停
-        var files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
+        IReadOnlyList<PhotoFile> files;
+        try
+        {
+            files = await _photo.ScanAsync(req.SourceFolder, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 与 RunAsync 同源：扫描失败发生在「令牌已创建、try/finally 尚未进入」的窗口，
+            // 必须清掉待应用标记与令牌，否则下一批次一启动就处于暂停态。
+            _pendingPause = false;
+            _pts = null;
+            throw;
+        }
         report.Total = files.Count;
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
-        var completed = await _log.LoadRenameLogAsync(req.OutputFolder).ConfigureAwait(false);
+        // 同 RunAsync：指纹不一致的历史记录不计入索引（参数变了就该重做）。
+        var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint).ConfigureAwait(false);
+
+        // 索引可信度告警（与 RunAsync 同文案、同口径；Percent 取 0：此时本批次尚未处理任何文件）
+        if (completed.IgnoredByFingerprint > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = 0,
+                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录与本次参数（模式/冲突策略/命名模板）不一致，" +
+                          "已忽略这些记录、将重新处理对应文件；若希望沿用旧记录，请保持参数不变。",
+            });
+        }
+        if (completed.EnumerationIncomplete)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = 0,
+                LogLine = "警告：续传索引可能不完整（部分子目录无法访问），已按可读取的部分处理。",
+            });
+        }
+
         try
         {
             int done = 0;
@@ -390,6 +496,7 @@ public sealed class OrganizeService : IOrganizeService
                         OriginalName = f.Name,
                         Operation = "归档",
                         Status = "跳过(日志已完成)",
+                        Fingerprint = req.Fingerprint,
                     };
                     report.Results.Add(skipEntry);
                     progress.Report(new OrganizeProgress
@@ -403,7 +510,14 @@ public sealed class OrganizeService : IOrganizeService
                 RenameLogEntry? entry = null;
                 try
                 {
-                    string md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
+                    // 与 RunAsync 同口径：算不出 MD5 必须显式失败，不能退化成空串。
+                    // 空串会让 ResolveTargetAsync 的「内容相同」判定恒 false，
+                    // 于是同名文件被判为「内容不同」→ 加 _1 生成重复副本（静默占用空间且难以察觉）。
+                    string? rawMd5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false);
+                    if (rawMd5 == null)
+                        throw new InvalidOperationException(
+                            "无法读取文件内容以计算 MD5（文件可能已被删除、被其它程序独占，或位于不可用的网络/云盘位置）：" + f.Path);
+                    string md5 = rawMd5;
                     DateTime when = f.LastModified;
                     if (req.UseExifDate)
                     {
@@ -414,7 +528,7 @@ public sealed class OrganizeService : IOrganizeService
                     string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
                     if (!req.DryRun) Directory.CreateDirectory(destDir);
 
-                    var (resolved, targetMd5, degraded) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, claimedThisRun, ct).ConfigureAwait(false);
+                    var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
                     if (resolved == null)
                     {
                         entry = new RenameLogEntry
@@ -424,14 +538,17 @@ public sealed class OrganizeService : IOrganizeService
                             Md5 = md5,
                             Operation = "归档",
                             Status = "跳过(已存在)",
+                            Fingerprint = req.Fingerprint,
                         };
                     }
                     else
                     {
                         string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
 
-                        // 与 RunAsync 同口径：登记本批次已落地的目标；模拟运行不登记。
-                        if (!req.DryRun) claimedThisRun.Add(resolved);
+                        // 与 RunAsync 同口径：登记本批次已落地的目标。
+                        // 模拟运行也要登记（此前 `if (!req.DryRun)` 只在实跑登记）：
+                        // 不登记会让模拟结果互相「占位失败」，模拟与实跑口径不一致、模拟会多报覆盖。
+                        claimedThisRun.Add(resolved);
 
                         entry = new RenameLogEntry
                         {
@@ -442,11 +559,11 @@ public sealed class OrganizeService : IOrganizeService
                             Md5 = md5,
                             Operation = "归档",
                             Status = status,
+                            Fingerprint = req.Fingerprint,
                         };
                         if (degraded)
                         {
-                            entry.Message = $"目标已被本批次其他文件占用，已自动重命名为 {Path.GetFileName(resolved)}" +
-                                            "（Overwrite 不会覆盖本批次已产出的文件，避免静默丢数据）";
+                            entry.Message = degradeReason;
                         }
                         if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
                     }
@@ -558,15 +675,22 @@ public sealed class OrganizeService : IOrganizeService
     private async Task<RenameLogEntry> ProcessOneAsync(
         PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, AiRunStats aiStats, int index, CancellationToken ct,
         Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache,
-        HashSet<string> claimedThisRun)
+        HashSet<string> claimedThisRun, HashSet<string> backedUpThisRun)
     {
         // A-01：MD5 结果缓存——重试时复用，避免对同一文件重复计算（大图 MD5 为全文件读取）。
         if (!md5Cache.TryGetValue(f.Path, out var md5))
         {
-            md5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false) ?? "";
-            // 仅在成功算出 MD5 时入缓存：缓存空串会让重试走到「内容不同」分支，
-            // 在 AutoRename 策略下生成 name_1 / name_2 重复副本。
-            if (md5.Length > 0) md5Cache[f.Path] = md5;
+            // 算不出 MD5 必须显式失败，不能退化成空串：
+            // 空串会让 ResolveTargetAsync 的「内容相同」判定（!string.IsNullOrEmpty(md5)）恒 false，
+            // 于是与目标同名的文件一律被判为「内容不同」→ AutoRename 下加 _1 生成重复副本。
+            // 典型成因：文件已删除 / 被其它程序独占 / 位于不可用的网络或云盘位置。
+            string? rawMd5 = await _hash.TryComputeMd5Async(f.Path, ct).ConfigureAwait(false);
+            if (rawMd5 == null)
+                throw new InvalidOperationException(
+                    "无法读取文件内容以计算 MD5（文件可能已被删除、被其它程序独占，或位于不可用的网络/云盘位置）：" + f.Path);
+            md5 = rawMd5;
+            // 仅在成功算出 MD5 时入缓存（此处必为非空，缓存空串的隐患已在上一步消除）
+            md5Cache[f.Path] = md5;
         }
 
         // 拍摄时间
@@ -624,7 +748,7 @@ public sealed class OrganizeService : IOrganizeService
         string candidate = baseName + Path.GetExtension(f.Name);
 
         // 目标冲突检测（P2-7：一并取回目标 MD5，ExecuteAsync 直接复用，避免重复计算）
-        var (resolved, targetMd5, degraded) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, claimedThisRun, ct).ConfigureAwait(false);
+        var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
         if (resolved == null)
         {
             var skip = new RenameLogEntry
@@ -634,6 +758,7 @@ public sealed class OrganizeService : IOrganizeService
                 Md5 = md5,
                 Operation = OpName(req.Mode),
                 Status = "跳过(已存在)",
+                Fingerprint = req.Fingerprint,
             };
             if (!req.DryRun) await _log.AppendRenameLogAsync(output, skip).ConfigureAwait(false);
             return skip;
@@ -644,14 +769,22 @@ public sealed class OrganizeService : IOrganizeService
             !string.IsNullOrWhiteSpace(req.BackupFolder) &&
             !string.Equals(resolved, f.Path, StringComparison.OrdinalIgnoreCase))
         {
-            await BackupOriginalAsync(req.BackupFolder, f.Path, ct).ConfigureAwait(false);
+            // 同一文件在本批次内只备份一次：重排队会让 ProcessOneAsync 对同一文件跑多遍，
+            // 此前每跑一遍就拷一份（最多 10 份冗余备份），既占备份盘也误导用户以为备份了多个文件。
+            // 注意：只在备份<b>成功之后</b>才登记，失败时不登记，下次重试仍会再试一次备份。
+            if (!backedUpThisRun.Contains(f.Path))
+            {
+                await BackupOriginalAsync(req.BackupFolder, f.Path, ct).ConfigureAwait(false);
+                backedUpThisRun.Add(f.Path);
+            }
         }
 
         string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, OpName(req.Mode), ct).ConfigureAwait(false);
 
         // 登记本批次已落地的目标：Overwrite 不得再覆盖它（判定见 ResolveTargetAsync）。
-        // 模拟运行不登记：没有真实落地，登记会让模拟结果互相「占位」，与实跑不一致。
-        if (!req.DryRun) claimedThisRun.Add(resolved);
+        // 模拟运行也要登记（此前只在实跑登记）：模拟不落地就登记看似矛盾，但实跑时该路径同样会被占用，
+        // 不登记会让模拟「少算冲突、多报覆盖」，与实跑口径不一致——模拟的价值就在于口径一致。
+        claimedThisRun.Add(resolved);
 
         var entry = new RenameLogEntry
         {
@@ -662,13 +795,14 @@ public sealed class OrganizeService : IOrganizeService
             Md5 = md5,
             Operation = OpName(req.Mode),
             Status = status,
+            Fingerprint = req.Fingerprint,
         };
-        // 退化提示：Overwrite 撞上本批次自己刚写的文件时会退化为自动重命名，写明原因，
-        // 避免用户疑惑「为什么多了一个 _1 后缀」，也表明这不是失败。
+        // 退化提示：Overwrite 撞上本批次自己刚写的文件、或重命名模式下撞上源目录里已存在的
+        // 另一个文件时，都会退化为自动重命名，写明原因，避免用户疑惑「为什么多了一个 _1
+        // 后缀」，也表明这不是失败。
         if (degraded)
         {
-            entry.Message = $"目标已被本批次其他文件占用，已自动重命名为 {Path.GetFileName(resolved)}" +
-                            "（Overwrite 不会覆盖本批次已产出的文件，避免静默丢数据）";
+            entry.Message = degradeReason;
         }
         if (!req.DryRun) await _log.AppendRenameLogAsync(output, entry).ConfigureAwait(false);
         return entry;
@@ -678,6 +812,8 @@ public sealed class OrganizeService : IOrganizeService
     /// 执行实际的 copy/move/rename。
     /// - 若目标已存在且内容相同(MD5)，视为已存在、不重复写入；
     /// - Overwrite 模式直接覆盖；其余模式目标已处理为唯一名。
+    /// <b>重命名模式下 Overwrite 不生效</b>（见下方 overwrite 取值）：原地重命名时目标就在源目录里，
+    /// 覆盖等于删除源目录中的另一个文件，而备份只备份 source、不备份 target → 不可恢复的静默丢数据。
     /// P2-7：<paramref name="targetMd5"/> 为 ResolveTargetAsync 阶段算得的目标 MD5
     /// （内容相同时即源 MD5），直接复用其结论，不再重复计算一次目标 MD5。
     /// </summary>
@@ -695,7 +831,10 @@ public sealed class OrganizeService : IOrganizeService
         if (req.DryRun)
             return "模拟(" + opName + ")";
 
-        bool overwrite = req.Conflict == ConflictStrategy.Overwrite;
+        // 重命名模式下绝不覆盖：原地重命名的 target 落在源目录，覆盖会替换掉源目录里的另一个文件，
+        // 而备份（BackupOriginalAsync）只备份 source、不备份 target → 被覆盖的那个文件没有任何副本，
+        // 等于静默删除且不可恢复。冲突让 ResolveTargetAsync 加序号解决（Degraded 提示写明改名）。
+        bool overwrite = req.Conflict == ConflictStrategy.Overwrite && req.Mode != OperationMode.Rename;
         try
         {
             if (req.Mode == OperationMode.Rename)
@@ -726,6 +865,24 @@ public sealed class OrganizeService : IOrganizeService
                 "（输出目录可能残留不完整文件，请检查。）",
                 isEnvironmentError: true, inner: ex);
         }
+        catch (IOException ex) when (ex.HResult == ErrorSharingViolation || ex.HResult == ErrorLockViolation)
+        {
+            // 文件被其它程序占用（看图软件 / 编辑器 / 云盘同步 / 杀软扫描）。
+            // 此前落通用 catch → 空转重排队 10 次、且归因文案是裸的 IOException。
+            // 这是「关闭占用程序后就能过」的确定性失败：包装成非环境级、非整批级的永久错误，
+            // 让它只记当前这一个文件的错误并继续处理其它文件（不熔断整批、不刷 10 行重试）。
+            throw new PermanentOperationException(
+                $"文件被其它程序占用，无法处理：{Path.GetFileName(source)}。请关闭可能占用它的看图软件/编辑器/云盘同步后重试。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            // 权限不足（只读属性、ACL、受保护目录、被策略拒绝）。
+            // 同上：逐文件失败、不熔断整批；给出可执行的排障建议而非裸异常文本。
+            throw new PermanentOperationException(
+                $"没有权限访问：{Path.GetFileName(source)}。请检查文件/文件夹权限或以管理员身份运行。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
     }
 
     // HRESULT_FROM_WIN32：ERROR_DISK_FULL(112) / ERROR_OUTOFMEMORY(14) / ERROR_NOT_ENOUGH_MEMORY(8)。
@@ -739,6 +896,12 @@ public sealed class OrganizeService : IOrganizeService
     // 据此区分「换个序号重试」与「真的写失败（如磁盘满）」。
     private const int ErrorFileExists = unchecked((int)0x80070050);
     private const int ErrorAlreadyExists = unchecked((int)0x800700B7);
+
+    // HRESULT_FROM_WIN32：ERROR_SHARING_VIOLATION(32) / ERROR_LOCK_VIOLATION(33)。
+    // 文件被其它进程独占或锁定（看图软件 / 编辑器 / 云盘同步 / 杀软）时由 File.Move / File.Copy 抛出。
+    // 与「磁盘满」区分：前者关掉占用程序即可恢复，后者必须清理空间，提示语必须不同。
+    private const int ErrorSharingViolation = unchecked((int)0x80070020);
+    private const int ErrorLockViolation = unchecked((int)0x80070021);
 
     /// <summary>备份文件名去重的最大尝试次数（原名 + _1…_9998），与 <see cref="SuffixUntilFreeAsync"/> 的 9999 上限一致。</summary>
     private const int MaxBackupNameAttempts = 9999;
@@ -899,54 +1062,90 @@ public sealed class OrganizeService : IOrganizeService
 
     /// <summary>
     /// 计算最终写入目标路径：
-    /// - 不存在 → 直接返回；
+    /// - 不存在（且未被本批次占用）→ 直接返回；
     /// - 存在且内容相同(MD5) → 返回该路径（调用方按「未改动」处理）；
     /// - 存在且内容不同 → 按策略：Skip 返回 null（跳过），Overwrite 返回该路径，AutoRename 追加 _1/_2 直到唯一（同样以 MD5 判定是否重复内容）。
     /// P2-7：目标已存在时一并返回其 MD5，供 ExecuteAsync 复用，避免每文件重复计算 MD5。
     /// <paramref name="claimedThisRun"/>：本批次已实际落地的目标路径。Overwrite 撞上其中的路径时
     /// 退化为自动重命名（Degraded=true）——覆盖它会静默销毁本批次已产出的成果，Move 模式等于丢数据。
-    /// <returns>Degraded：仅当「本应选 Overwrite 但因撞上本批次产出而改为加序号」时为 true。</returns>
+    /// <paramref name="mode"/>：重命名模式下 Overwrite 一律不得生效（target 在源目录里，
+    /// 覆盖会删掉源目录中的另一个文件且无备份），同样退化为自动重命名。
+    /// <returns>Degraded：仅当「本应选 Overwrite 但因撞上本批次产出 / 重命名模式而改为加序号」时为 true；
+    /// DegradeReason 为该退化的用户可读说明（已含改后的文件名，直接进 RenameLogEntry.Message）。</returns>
     /// </summary>
-    private async Task<(string? Target, string? TargetMd5, bool Degraded)> ResolveTargetAsync(
-        string output, string candidate, string md5, ConflictStrategy conflict,
+    private async Task<(string? Target, string? TargetMd5, bool Degraded, string DegradeReason)> ResolveTargetAsync(
+        string output, string candidate, string md5, ConflictStrategy conflict, OperationMode mode,
         HashSet<string> claimedThisRun, CancellationToken ct)
     {
         string target = Path.Combine(output, candidate);
-        if (!File.Exists(target)) return (target, null, false);
+        // 「占用」= 磁盘上已存在 或 本批次已登记（含模拟运行：模拟也登记，口径与实跑一致）。
+        // 此前只判 File.Exists → 模拟运行时不登记 claimed，于是模拟会比实跑少算冲突、多报覆盖。
+        if (!claimedThisRun.Contains(target) && !File.Exists(target)) return (target, null, false, "");
 
         string existing = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
         if (!string.IsNullOrEmpty(md5) && md5 == existing)
-            return (target, existing, false); // 内容相同，无需动作
+            return (target, existing, false, ""); // 内容相同，无需动作
 
-        // 原写法是 switch 表达式，加入「Overwrite 撞本批次产出」的条件分支后需带 when 子句，
+        // 原写法是 switch 表达式，加入「Overwrite 撞本批次产出 / 重命名模式」的条件分支后需带 when 子句，
         // 故改为 if/else 语句形式，语义等价且分支更直观（Skip / Overwrite / 其余=AutoRename 全覆盖）。
-        if (conflict == ConflictStrategy.Skip) return (null, null, false);
+        if (conflict == ConflictStrategy.Skip) return (null, null, false, "");
 
-        if (conflict == ConflictStrategy.Overwrite && !claimedThisRun.Contains(target))
-            return (target, existing, false);
+        if (conflict == ConflictStrategy.Overwrite && mode != OperationMode.Rename && !claimedThisRun.Contains(target))
+            return (target, existing, false, "");
 
-        // 走到这里有两种情况：AutoRename，或 Overwrite 但 target 是本批次自己刚写进去的文件。
-        // 后者必须退化为自动重命名：覆盖它会静默销毁本批次已产出的成果，Move 模式尤其致命——
+        // 走到这里有三种情况：AutoRename，或 Overwrite 但 target 是本批次自己刚写进去的文件，
+        // 或 Overwrite 但处于重命名模式（target 在源目录，覆盖会静默删掉另一个文件且没有备份）。
+        // 后两者必须退化为自动重命名：覆盖会静默销毁数据，Move 模式尤其致命——
         // 源文件已移出源目录且不做备份，被覆盖的内容没有任何副本，等于直接丢数据。
-        var (suffixed, suffixMd5) = await SuffixUntilFreeAsync(output, candidate, md5, ct).ConfigureAwait(false);
-        return (suffixed, suffixMd5, conflict == ConflictStrategy.Overwrite);
+        var (suffixed, suffixMd5) = await SuffixUntilFreeAsync(output, candidate, md5, claimedThisRun, ct).ConfigureAwait(false);
+        bool degraded = conflict == ConflictStrategy.Overwrite;
+        string reason = "";
+        if (degraded)
+        {
+            reason = mode == OperationMode.Rename
+                ? $"重命名模式下不会覆盖源文件夹中的其它文件，已自动改名为 {Path.GetFileName(suffixed)}"
+                : $"目标已被本批次其他文件占用，已自动重命名为 {Path.GetFileName(suffixed)}" +
+                  "（Overwrite 不会覆盖本批次已产出的文件，避免静默丢数据）";
+        }
+        return (suffixed, suffixMd5, degraded, reason);
     }
 
-    /// <summary>P2-7：返回最终空位目标路径；窗口内 MD5 命中相同内容时一并传出该目标 MD5。</summary>
-    private async Task<(string Target, string? TargetMd5)> SuffixUntilFreeAsync(string output, string candidate, string md5, CancellationToken ct)
+    /// <summary>序号后缀 _1…_9999 的最大尝试次数。</summary>
+    private const int MaxSuffixAttempts = 9999;
+
+    /// <summary>
+    /// P2-7：返回最终空位目标路径；窗口内 MD5 命中相同内容时一并传出该目标 MD5。
+    /// <paramref name="claimedThisRun"/>：与 <see cref="ResolveTargetAsync"/> 同口径，
+    /// 本批次（含模拟运行）已登记的路径也算「已占用」，否则模拟与实跑会给出不同的结果。
+    /// </summary>
+    private async Task<(string Target, string? TargetMd5)> SuffixUntilFreeAsync(
+        string output, string candidate, string md5, HashSet<string> claimedThisRun, CancellationToken ct)
     {
         string name = Path.GetFileNameWithoutExtension(candidate);
         string ext = Path.GetExtension(candidate);
         string target = Path.Combine(output, candidate);
-        int i = 1;
-        while (File.Exists(target))
+
+        // 循环内先判空位再换下一个序号：换号与判定一体，避免末尾多出一个「未检查就返回」的分支。
+        for (int i = 1; i <= MaxSuffixAttempts; i++)
         {
+            if (!File.Exists(target) && !claimedThisRun.Contains(target))
+                return (target, null); // 拿到空位
+
             string em = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
             if (!string.IsNullOrEmpty(md5) && md5 == em)
                 return (target, em); // 该序号名下已是相同内容
+
             target = Path.Combine(output, $"{name}_{i}{ext}");
-            if (++i > 9999) break;
         }
+
+        // 走到这里说明 candidate 与其 _1…_9999 全被占用（含本批次已登记的）。
+        // 旧实现在这里直接 return 最后一次赋值的 name_9999——该路径未经存在性检查，
+        // 后续 File.Move/Copy 必然抛 IOException（AutoRename 下 → 重排队 10 次空转）。
+        // 必须显式失败并说清原因，绝不能返回一个「已知被占用」的路径。
+        if (File.Exists(target) || claimedThisRun.Contains(target))
+            throw new IOException(
+                $"目标文件夹中没有可用文件名（{candidate} 及其 _1…_{MaxSuffixAttempts} 后缀均已被占用），" +
+                "请清理输出目录或改用「跳过 / 覆盖」以外的冲突策略。");
 
         return (target, null);
     }
@@ -1018,6 +1217,38 @@ public sealed class OrganizeService : IOrganizeService
         OperationMode.Move => "移动",
         _ => "重命名",
     };
+
+    /// <summary>指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
+    private const string FingerprintVersion = "fp1";
+
+    /// <summary>
+    /// 计算本次运行的「参数指纹」：把所有<b>影响输出文件名或目标路径</b>的参数拼成一个字符串。
+    /// 用途：写入 rename_log.csv，下次续传时只有指纹相同的记录才被当作「已处理」——
+    /// 用户改了命名模板 / 换模式 / 换冲突策略 / 换引擎后重跑，对应文件会被重新处理，
+    /// 而不是被上一轮的成功记录永久跳过（这正是 P0 缺陷：改模板重跑整批静默不动）。
+    /// </summary>
+    /// <param name="req">本次请求参数。</param>
+    /// <param name="output">本次实际的输出目录（重命名模式下即源目录）。</param>
+    /// <remarks>
+    /// 刻意<b>不</b>纳入：API Key（敏感信息，不落盘）、CustomApiUrl / CustomApiRpmLimit
+    /// （端点地址与速率上限不改变「命名结果」本身，修端点不该让整批重做）。
+    /// 宁可多包含也不要漏：漏了会退回「静默跳过」的老 bug；多了的代价只是「重做」，
+    /// 而重做时内容相同的文件会被判为「未改动(内容相同)」直接跳过，不会生成垃圾副本。
+    /// </remarks>
+    private static string ComputeFingerprint(OrganizeRequest req, string output)
+    {
+        var sb = new StringBuilder();
+        sb.Append(FingerprintVersion);
+        sb.Append('|').Append(req.Mode);                 // 模式决定目标目录与是否原地改名
+        sb.Append('|').Append(req.Conflict);             // 冲突策略决定同名文件处理方式
+        sb.Append('|').Append(req.NamingTemplate);       // 命名模板直接影响输出文件名
+        sb.Append('|').Append(req.UseExifDate ? 1 : 0);  // 日期来源影响 {yyyy}{MM}{dd} 等占位符（归档还影响子目录）
+        sb.Append('|').Append(req.Language);             // 提示语言影响 AI 产出的命名内容
+        sb.Append('|').Append(req.AiProvider);           // 引擎不同 → 命名结果不同（None 时走日期回退模板）
+        sb.Append('|').Append(req.CustomApiModel);       // 自定义模型名：不同模型命名风格不同
+        sb.Append('|').Append(output);                   // 输出目录：换目录就该往新目录重做
+        return sb.ToString();
+    }
 
     private static IImageAnalysisService? CreateAi(OrganizeRequest req)
     {
