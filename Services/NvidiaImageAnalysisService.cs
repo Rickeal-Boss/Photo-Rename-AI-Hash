@@ -89,7 +89,7 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
             AiProviderProfiles.For(AiProvider.Nvidia), ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractNemotronContent(raw);
-        var result = ImageAnalysisHelper.Parse(content);
+        var result = ImageAnalysisHelper.Parse(content, _template);
         // 与 CustomImageAnalysisService 同口径：解析不出抛 AiResultInvalidException（重试有意义），
         // 不判永久（temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。
         // 截断类确定性失败已由 ImageAnalysisHelper.ExtractContent 精确短路，不走这里。

@@ -853,12 +853,23 @@ public static class ImageAnalysisHelper
 
     /// <summary>从模型原始响应（或模型直接返回的 JSON 文本）中解析结构化结果。
     /// 兼容模型偶发的格式瑕疵：markdown 代码围栏（```json … ```）、尾随逗号、行内注释。
-    /// <para><b>P0-2：六个字段全部为空时返回 null（判为解析失败）</b>，而不是返回一个「字段全空」的
-    /// 对象当成功——后者会让编排层继续走完，把每个空字段替换成 <c>unknown</c>，落地
-    /// <c>unknown_unknown_…</c> 垃圾名并记为成功（付费成功、用户无任何报错）。判据严格限定为
-    /// 「全部为空」：AI 本来就可能只填一部分字段，<b>部分字段为空属正常</b>，不得误伤。</para>
+    /// <para><b>P0-2（模板感知）：本次命名真正依赖的 AI 字段「一个都没拿到」时返回 null（判为解析失败）</b>，
+    /// 而不是返回一个「关键字段全空」的对象当成功——后者会让编排层继续走完，把空字段替换成 <c>unknown</c>，
+    /// 落地 <c>unknown_…</c> 垃圾名、记为成功、并在续传指纹里被永久锁定（永不重做）。</para>
+    /// <para>判据的松紧经过权衡：
+    /// <list type="bullet">
+    /// <item><description><b>不取「任一字段为空」</b>：AI 本来就可能只填一部分字段，那属正常，误判会带来 10 倍无效计费。</description></item>
+    /// <item><description><b>不取「六个字段全空」</b>：模板只要 <c>{category}</c> 而模型只回了 <c>{"scene":…}</c> 时，
+    /// 六字段里有非空值，旧判据会放行 → 照样产出 <c>unknown_…</c>（这是用户更容易撞到的形态）。</description></item>
+    /// <item><description><b>取「模板真正用到的字段全空」</b>：只有本次命名真正依赖的字段一个都没拿到，才算结果不可用。</description></item>
+    /// </list></para>
+    /// <para><paramref name="template"/> 为 null / 空 / 不含 AI 占位符时，<see cref="RequiredAiKeys"/> 兜底返回全部 6 个字段，
+    /// 判据自然退化为「六字段全空」（保持既有行为不退化；<see cref="ExtractContent"/> 的截断探测即走此路）。</para>
+    /// <para>返回 null 后由调用方（四个引擎的 <c>result ?? throw new AiResultInvalidException(...)</c>）接管，
+    /// 走「重试有意义」的 10 次档——<b>绝不能改成永久错误</b>，否则连续 3 个文件会熔断整批（P26）。</para>
     /// </summary>
-    public static ImageAnalysisResult? Parse(string? json)
+    /// <param name="template">命名模板：决定「哪些字段算本次命名必需」。null 时按全部 6 个字段兜底。</param>
+    public static ImageAnalysisResult? Parse(string? json, string? template = null)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
         var obj = ExtractJsonObject(json);
@@ -883,21 +894,17 @@ public static class ImageAnalysisHelper
                 Source = Str(root, "source"),
             };
 
-            // P0-2：六个字段全空 = 模型返回了合法 JSON 但没有任何可用字段。典型触发形态（全部是合法 JSON，
-            // 故上面不会抛、result 非 null）：包装层 {"result":{…}} / {"data":{…}}、键名本地化 {"分类":…}、
-            // 键名大小写漂移 {"Category":…}、值不是字符串 {"category":1}、空对象 {}。
-            // 若不判失败：BuildName 会把每个空字段替换成 "unknown" → 落地 unknown_… 垃圾名且写入成功日志。
-            // 返回 null 后，四个引擎既有的 `result ?? throw new AiResultInvalidException(...)` 自动接管，
-            // 走「重试有意义」的 10 次档（与已裁定口径一致），无需改编排层。
-            if (string.IsNullOrWhiteSpace(result.Category) &&
-                string.IsNullOrWhiteSpace(result.Scene) &&
-                string.IsNullOrWhiteSpace(result.People) &&
-                string.IsNullOrWhiteSpace(result.Action) &&
-                string.IsNullOrWhiteSpace(result.Subtitle) &&
-                string.IsNullOrWhiteSpace(result.Source))
+            // P0-2：模板真正用到的 AI 字段「全部为空」→ 判解析失败（返回 null）。
+            // 典型触发形态（全部是合法 JSON，故上面不会抛、result 非 null）：包装层 {"result":{…}} / {"data":{…}}、
+            // 键名本地化 {"分类":…}、键名大小写漂移 {"Category":…}、值不是字符串 {"category":1}、空对象 {}，
+            // 以及「模型只回了模板用不到的字段」（如模板要 category，模型只给 scene）。
+            // 模板未知（null/空/无 AI 占位符）时 RequiredAiKeys 兜底为全部 6 个字段，判据退化为「六字段全空」。
+            bool anyRequired = false;
+            foreach (var key in RequiredAiKeys(template))
             {
-                return null;
+                if (!string.IsNullOrWhiteSpace(FieldOf(result, key))) { anyRequired = true; break; }
             }
+            if (!anyRequired) return null;
 
             return result;
         }
@@ -906,6 +913,19 @@ public static class ImageAnalysisHelper
             return null;
         }
     }
+
+    /// <summary>按字段名取 <see cref="ImageAnalysisResult"/> 上的值。
+    /// 键名取自 <see cref="AiPlaceholders"/> 去掉花括号后的固定小写名（见 <see cref="RequiredAiKeys"/>）。</summary>
+    private static string FieldOf(ImageAnalysisResult r, string key) => key switch
+    {
+        "category" => r.Category,
+        "scene" => r.Scene,
+        "people" => r.People,
+        "action" => r.Action,
+        "subtitle" => r.Subtitle,
+        "source" => r.Source,
+        _ => "",
+    };
 
     /// <summary>从可能夹带说明文字 / markdown 围栏的模型输出中，提取最外层的 JSON 对象文本。</summary>
     private static string? ExtractJsonObject(string json)

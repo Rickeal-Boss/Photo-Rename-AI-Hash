@@ -62,7 +62,7 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
             ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
-        var result = ImageAnalysisHelper.Parse(content);
+        var result = ImageAnalysisHelper.Parse(content, _template);
         // 解析不出结构化结果：抛专用类型 AiResultInvalidException 而非裸 InvalidOperationException——
         // 语义是「模型给了内容但内容不可用，重试有意义」（temperature=0.3 下输出并非确定性），
         // 让编排层能与「配置缺失 / 端点错误」分档计重排队次数。
