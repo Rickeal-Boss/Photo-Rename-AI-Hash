@@ -842,16 +842,21 @@ public sealed class OrganizeService : IOrganizeService
                             entry.Message = degradeReason;
                         }
                         // 归档路径<b>没有备份</b>（备份只在重命名模式的 ProcessOneAsync 里）：
-                        // 若本次是「覆盖」且目标位置原本已有同名且内容不同的文件，那个文件已被替换且没有副本，
-                        // 必须在常驻日志里说清。判据与 ExecuteAsync 的 overwrite 取值同源：
+                        // 若本次是「覆盖」且目标位置原本已有同名且内容不同的文件，那个文件已被替换且没有副本。
+                        // 判据与 ExecuteAsync 的 overwrite 取值同源：
                         // targetMd5 非空 ⇒ 目标曾存在；targetMd5 != md5 ⇒ 内容不同（内容相同会在
                         // ResolveTargetAsync / ExecuteAsync 里提前判「未改动」返回）。
-                        // 刻意只写日志行、<b>不写 entry.Message</b>——VM 的 ReportDegradedSummary 靠匹配
-                        // Message 文案分桶，新增文案会被误归进「未按覆盖处理、已自动加序号改名」，
-                        // 反而把「已覆盖」谎报成「已改名」。要进 Message 需先与 UI 侧约定新桶。
+                        // 与 degraded 互斥：degraded 表示「Overwrite 未生效、退化为加序号」，
+                        // 本判据表示「Overwrite 已生效、真的覆盖了」，二者不可能同时为真。
                         overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
                                             req.Mode != OperationMode.Rename &&
                                             !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
+                        if (overwroteExisting)
+                        {
+                            // 结果行的 Message 也要点名（此前只写日志行，会被 UI 中性桶谎报成「已改名」）。
+                            // UI 侧已同步新增「已覆盖」桶，两侧共用 OverwriteNoBackupNotice 的「已覆盖」关键字。
+                            entry.Message = OverwriteNoBackupNotice;
+                        }
                         if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
                     }
 
@@ -1211,6 +1216,19 @@ public sealed class OrganizeService : IOrganizeService
         if (degraded)
         {
             entry.Message = degradeReason;
+        }
+        // 与归档路径同一契约：Move/Copy 模式 + 冲突策略=覆盖 + 目标位置原本已有同名且内容不同的
+        // 文件时，该文件被<b>无备份地</b>覆盖（备份只发生在「重命名模式」的源文件上，见上方
+        // BackupOriginalAsync）。此前这条路径没有任何提示，与归档侧口径不一致，故一并写 Message。
+        // 判据与 ExecuteAsync 的 overwrite 取值同源（targetMd5 非空 ⇒ 目标曾存在；!= md5 ⇒ 内容不同）。
+        // 与 degraded 互斥：degraded 是「Overwrite 未生效」，本判据是「Overwrite 已生效」。
+        bool overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
+                                 req.Mode != OperationMode.Rename &&
+                                 !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
+        if (overwroteExisting)
+        {
+            // UI 侧靠「已覆盖」关键字分桶，两侧共用 OverwriteNoBackupNotice，不要各写一套。
+            entry.Message = OverwriteNoBackupNotice;
         }
         if (!req.DryRun) await _log.AppendRenameLogAsync(output, entry).ConfigureAwait(false);
         return entry;
@@ -1761,6 +1779,19 @@ public sealed class OrganizeService : IOrganizeService
     /// <see cref="BuildName"/> 两处都要用，写两份必然漂移。
     /// </summary>
     private const string DefaultNamingTemplate = "{yyyy}{MM}{dd}_{name}_{n}";
+
+    /// <summary>
+    /// 「冲突策略=覆盖 且目标位置原本已有同名且内容不同的文件，被无备份地覆盖」时写进
+    /// <see cref="RenameLogEntry.Message"/> 的文案。归档与整理（Move/Copy）两条路径共用同一常量，
+    /// 避免两边各写一套而漂移。
+    /// <para>
+    /// <b>必须包含「已覆盖」三个字</b>：UI 侧 <c>OrganizeViewModel.TrackBatchIssues</c> 靠 Message
+    /// 文案分桶，「已覆盖」是两边约定的关键字。文案刻意<b>不含</b>「重命名模式」「本批次」「已改名」
+    /// 「自动加序号」等字样——否则会被既有分桶规则（<c>_degradedRenameMode</c> /
+    /// <c>_degradedBatchCollision</c> / <c>_degradedOther</c>）误匹配，把「已覆盖」谎报成「已改名」。
+    /// </para>
+    /// </summary>
+    private const string OverwriteNoBackupNotice = "已覆盖输出目录中已存在的同名文件（该文件没有备份）";
 
     /// <summary>
     /// 按命名模板生成最终基名（不含扩展名）。
