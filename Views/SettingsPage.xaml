@@ -37,8 +37,10 @@
                 </RadioButtons>
             </sc:SettingsCard>
 
-            <!-- 语言（P2-8：改为下拉，替代自由文本，避免无效值） -->
-            <sc:SettingsCard Header="语言">
+            <!-- 命名语言（不是软件 UI 语言）：传给识别引擎，让模型以指定语言输出命名结果。
+                 软件本身的 UI 文案是中文，不会跟随此设置切换。-->
+            <sc:SettingsCard Header="命名语言"
+                             Description="传给识别引擎，让模型以指定语言输出命名结果（不影响本软件界面）。">
                 <ComboBox SelectedIndex="{x:Bind ViewModel.LanguageIndex, Mode=TwoWay}" Width="220">
                     <ComboBoxItem Content="中文" />
                     <ComboBoxItem Content="English" />
