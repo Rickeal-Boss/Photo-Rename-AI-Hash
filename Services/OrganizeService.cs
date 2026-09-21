@@ -1513,8 +1513,9 @@ public sealed class OrganizeService : IOrganizeService
         // 那样一旦未定义值漏进来，日志写「重命名」而 ExecuteAsync 实际在做失效安全的复制
         // → 又是一种谎报（与「模拟口径=实跑口径」同类）。
         OperationMode.Rename => "重命名",
-        // 未定义的枚举值：与 ExecuteAsync 的失效安全落点一致（Copy）。
-        _ => "复制",
+        // 未定义的枚举值：ExecuteAsync 会直接抛错、根本不会走到这里。文案写「未知」
+        // 而不是「复制」——兜底文案必须与实际落点一致，否则日志说一套、实际做另一套。
+        _ => "未知",
     };
 
     /// <summary>当前指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
