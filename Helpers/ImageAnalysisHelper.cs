@@ -726,12 +726,20 @@ public static class ImageAnalysisHelper
         // 上面三条都依赖关键字（bearer / apikey / ?key=）邻接，厂商直接把 Key 拼进错误文案时全部漏网。
         // 下限取 16 而非 8：显式前缀虽强，但 "task-oriented" / "risk-management" 这类正常英文单词也含 "sk-"，
         // 8 字符下限会误伤（误伤虽不致错，却会让错误文案被 *** 打碎到无法阅读）；真实 Key 长度远大于 16。
-        // 前缀用 \b 界定：避免 "task-…" 里的 "sk-" 被当成 OpenAI 前缀。
+        // 前缀用负向后瞻界定：避免 "task-…" 里的 "sk-" 被当成 OpenAI 前缀（前邻是字母 a → 后瞻不成立）。
+        // 不用 \b：.NET 的 \w 含 CJK，而中文文案里 Key 前邻几乎总是汉字
+        // （「无效的密钥sk-…」），\b 在「钥」与「s」之间不成立 → 整条规则不命中 → 完整明文回显。
+        // 负向后瞻只排除 ASCII 字母数字，正是「英文单词词素」与「中文语境里的独立 Key」的分界。
         // P1-4 缺口 2：前缀表补 nvapi —— NVIDIA 是本项目四个内置引擎之一，其 Key 形如 "nvapi-8nQ…"，
         // 原表只有 sk/gsk/xai，一旦任何错误文案回显 nvapi- 开头的 Key 就是完整明文泄露。
-        s = Regex.Replace(s, @"(?i)(\b(?:sk|gsk|xai|nvapi)[-_])[A-Za-z0-9._\-]{16,}", "$1***");
-        // Google / Gemini 的 Key 形如 "AIzaSy…"：AIza 后面直接跟字符、无分隔符，故本条不要求分隔符
-        s = Regex.Replace(s, @"(\bAIza)[A-Za-z0-9._\-]{16,}", "$1***");
+        // 字符集必须含 + / =：部分厂商发的是标准 base64（见 IsHeaderSafeToken 的注释），
+        // 缺了这三个字符会在第一个 + 处截断、剩余长度 < 16 → 整条规则不命中 → 完整明文回显。
+        // 16 字符下限保持不变：降到 8 会误伤 "task-oriented" / "risk-management" 这类正常英文单词。
+        s = Regex.Replace(s, @"(?i)((?<![A-Za-z0-9])(?:sk|gsk|xai|nvapi)[-_])[A-Za-z0-9._\-+/=]{16,}", "$1***");
+        // Google / Gemini 的 Key 形如 "AIzaSy…"：AIza 后面直接跟字符、无分隔符，故本条不要求分隔符。
+        // 同样把 \b 换成负向后瞻（中文语境下 Key 前邻是汉字，\b 不成立 → 漏网）。
+        // 字符集不含 + / =：Google 的 Key 是 [A-Za-z0-9_-]，没有标准 base64 形态，不扩大字符集。
+        s = Regex.Replace(s, @"((?<![A-Za-z0-9])AIza)[A-Za-z0-9._\-]{16,}", "$1***");
         return s;
     }
 
@@ -817,7 +825,11 @@ public static class ImageAnalysisHelper
             // 注意：不再保留 catch (InvalidOperationException) { throw; } 过滤器 —— 它会把
             // 「root 非对象」「choices 存在但非数组」等 System.Text.Json 误用异常一并原样放行（P1-2），
             // 使本该是 AiResultInvalidException 的解析失败拿不到正确类型、分档判据失效。
-            throw new AiResultInvalidException("解析视觉识别响应失败：" + ex.Message, ex);
+            // 文案里的 ex.Message 必须过 Snippet（截断 + 脱敏）：本文件其余 6 处抛点都已过，
+            // 只有这里漏了（元模式 C：只覆盖一半路径）。JsonException 文案通常只回显首个非法字符，
+            // 当前不是可证泄漏通道；但该文案会经 crash.log / rename_log.csv 落盘（D-5），
+            // 口径必须与其它抛点统一——一旦将来底层异常消息形态变化，这里就是现成的绕过口。
+            throw new AiResultInvalidException("解析视觉识别响应失败：" + Snippet(ex.Message ?? ""), ex);
         }
 
         // error 分支：保留既有异常类型 InvalidOperationException（不改变其分档语义），但文案已在上面过 Snippet。
