@@ -99,6 +99,17 @@ public partial class SettingsViewModel : ObservableObject
         {
             _clearingPlaintext = false;
         }
+        // R-3：_model 的四个同名字段必须一起清，否则「不再被本页引用」这句注释是假的。
+        // SaveAsync 里把 UI 值写进了 _model.ZhipuApiKey 等字段，而 SettingsService.SaveAsync 的
+        // finally 会把明文「还原」回这个对象（它只保证不污染落盘内容，不保证不留在内存里）——
+        // _model 就是本页 VM 的字段，不清掉的话密钥明文仍被本页引用，A-12 只兑现一半（P33）。
+        // 不影响正确性：下一次 SaveAsync 会先 _settings.Load() 重新取回，
+        // 且写入有 _zhipuPlain 等守卫，不会把这里的空串误写回磁盘。
+        _model.ZhipuApiKey = "";
+        _model.QwenApiKey = "";
+        _model.NvidiaApiKey = "";
+        _model.CustomApiKey = "";
+
         // 显式复位：属性已是空串时 setter 短路、钩子不会被调用
         _zhipuPlain = false;
         _qwenPlain = false;
