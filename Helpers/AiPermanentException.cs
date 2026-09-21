@@ -18,8 +18,12 @@ public sealed class AiPermanentException : PermanentOperationException
 {
     /// <param name="isBatchLevel">默认 true（账户/模型配置类，对整批成立）；
     /// 传入 false 表示仅逐文件成立（如图片本身无法解码），不参与批次熔断。</param>
-    public AiPermanentException(string message, bool isBatchLevel = true)
-        : base(message, isEnvironmentError: false, isBatchLevel: isBatchLevel)
+    /// <param name="inner">底层原始异常（如解码失败的真实原因：<c>FileNotFoundException</c> /
+    /// 缺编解码器的 <c>NotSupportedException</c> / 尺寸超限的 <c>InvalidOperationException</c>）。
+    /// <b>不得丢弃</b>：归因靠它——「图片已损坏」与实际是「被云盘同步锁住 / HEIC 缺解码器」完全不同（P1-6 / P23），
+    /// 保留 inner 才能让 <c>crash.log</c> 定位真因。默认 null 以保持既有调用点行为不变。</param>
+    public AiPermanentException(string message, bool isBatchLevel = true, Exception? inner = null)
+        : base(message, isEnvironmentError: false, isBatchLevel: isBatchLevel, inner: inner)
     {
     }
 }

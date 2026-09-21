@@ -24,7 +24,14 @@ public static class ImageAnalysisHelper
     // 双闸（见 AiProviderProfile.AiRetryPolicy），单文件最坏等待收敛到分钟级。
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
-    public static async Task<string?> EncodeAsJpegDataUrlAsync(string path, int maxDim, CancellationToken ct)
+    /// <summary>
+    /// 把本地图片压成 JPEG data-URL。
+    /// <para>失败时<b>抛 <see cref="AiPermanentException"/>(isBatchLevel: false)</b>（逐文件确定性失败，
+    /// 不重试、不参与批次熔断），而非返回 null——异常携带原始 inner 与脱敏后的真因，
+    /// 避免四个引擎把它统一翻译成「图片已损坏」而误导排查方向（P1-6 / P23）。</para>
+    /// </summary>
+    /// <exception cref="OperationCanceledException">用户取消（原样上抛，不得吞成解码失败）。</exception>
+    public static async Task<string> EncodeAsJpegDataUrlAsync(string path, int maxDim, CancellationToken ct)
     {
         try
         {
@@ -32,12 +39,26 @@ public static class ImageAnalysisHelper
             var b64 = await ImageDecoder.EncodeResizedJpegAsync(fs, maxDim, ct).ConfigureAwait(false);
             return "data:image/jpeg;base64," + b64;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
         {
             // 取消必须原样上抛：EncodeResizedJpegAsync 内部 ct 感知，取消时抛 OCE。
             // 此前被裸 catch 吞成 null，四个引擎都会报「无法解码图片」，归因完全错误
             // （写法与 Services/HashService.cs 的 TryComputeMd5Async 一致）。
-            return null;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // P1-6：此前这里把 ex 整个丢弃、返回 null，四个引擎统一翻译成「图片已损坏」——
+            // 但这条通道承载的真实原因至少 5 类：文件损坏 / 缺少编解码器（HEIC）/ 被其它进程独占 /
+            // 超 256MB 输入上限（ImageDecoder）/ 像素缓冲尺寸自检失败（ImageDecoder）。
+            // 归因必然错误（P23）：用户拿着「已损坏」的提示去查一张其实被云盘锁住或超大的图。
+            // 改为抛带 inner 的 AiPermanentException：真因以脱敏文案带上（crash.log 可定位），
+            // 并保持「逐文件不重试、不熔断整批」的既有分级（isBatchLevel: false）。
+            throw new AiPermanentException(
+                "无法解码图片（可能不是有效图像 / 已损坏 / 缺少编解码器（如 HEIC）/ 被其它程序占用 / 尺寸超限）：" +
+                $"{System.IO.Path.GetFileName(path)}。（{Snippet(ex.Message ?? "")}）",
+                isBatchLevel: false,
+                inner: ex);
         }
     }
 
@@ -275,10 +296,11 @@ public static class ImageAnalysisHelper
             if (profile.Gate != null)
                 await profile.Gate.WaitAsync(ct).ConfigureAwait(false);
 
-            // HttpRequestMessage 单次使用，每次尝试都必须重新构造
-            using var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-            req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            // HttpRequestMessage 单次使用，每次尝试都必须重新构造。
+            // 构造期的配置类异常（端点 URL 非法 / Key 含非法字符）已由 CreateRequest 归入
+            // AiPermanentException(isBatchLevel: true)：此前这三行在 try 之外，UriFormatException /
+            // ArgumentException（消息可能回显 Key 片段）会以框架异常逃逸，绕过既有的异常分类体系（P1-1）。
+            using var req = CreateRequest(endpoint, apiKey, jsonBody);
 
             HttpResponseMessage resp;
             try
@@ -289,7 +311,7 @@ public static class ImageAnalysisHelper
             {
                 // 用户主动取消：必须原样上抛，绝不能被下面的「网络/连通性」分支包装成
                 // InvalidOperationException——那会让取消看起来像故障、并被编排层重排队。
-                // 写法与同文件 EncodeAsJpegDataUrlAsync（第 33 行）的过滤器保持一致。
+                // 写法与同文件 EncodeAsJpegDataUrlAsync 的 OperationCanceledException 过滤器保持一致。
                 throw;
             }
             catch (Exception ex)
@@ -320,10 +342,13 @@ public static class ImageAnalysisHelper
                     // 两类**瞬时故障**，按用户已裁定的口径应保留「单文件 10 次重排队」；
                     // 而裸 InvalidOperationException 与「配置缺失 / 解析失败」同型，编排层只能靠 inner 链反推
                     // （HttpClient 抛出的原始异常类型不稳定，IOException / SocketException 会被漏判成确定性失败）。
-                    // 文案与 inner 一律保持原样：inner 仍保留原始异常，既有 inner 链判据继续成立（双重保险）。
+                    // inner 保持原样：既有 inner 链判据继续成立（双重保险）。
+                    // P1-5：文案里的 ex.Message 必须过 Snippet（截断 + 脱敏）——底层异常消息在部分场景会携带
+                    // 请求 URI（含 ?key= / ?api_key=，用户把 Key 拼进自定义端点 URL 是现实用法）或代理回显的认证头，
+                    // 而该文案会经 crash.log / rename_log.csv 落盘（D-5）。
                     throw new AiTransientException(
                         $"调用视觉识别接口失败（{kind}，已尝试 {attempt} 次 / 累计 {sw.Elapsed.TotalSeconds:F0}s，" +
-                        $"{netWhy}）：{ex.Message}。{tail}", ex);
+                        $"{netWhy}）：{Snippet(ex.Message ?? "")}。{tail}", ex);
                 }
 
                 await DelayAsync(delayAsync, netDelay, ct).ConfigureAwait(false);
@@ -409,6 +434,34 @@ public static class ImageAnalysisHelper
 
         // 兜底：循环内已保证在最后一次失败后抛出，此处仅满足编译器「所有路径均有返回值」要求
         throw new InvalidOperationException($"视觉识别接口调用超出最大尝试次数（{pol.MaxAttempts}）。");
+    }
+
+    /// <summary>
+    /// 构造单次 HTTP 请求。端点 URL 非法（如用户只填了 <c>https://</c>）或 Key 含不能放进 HTTP 头的
+    /// 字符（换行 / 控制字符 / 非 ASCII / 非 token 字符，常见于从终端整行粘贴）时，
+    /// <see cref="HttpRequestMessage"/> / <see cref="AuthenticationHeaderValue"/> 会抛框架异常
+    /// （<c>UriFormatException</c> / <c>ArgumentException</c>，且后者消息可能回显 Key 片段）。
+    /// 这些是<b>配置类错误</b>（对整批成立、重试无意义），必须归入既有异常体系：
+    /// 统一转 <see cref="AiPermanentException"/>(isBatchLevel: true)，让编排层「连续 3 个文件命中即中止整批
+    /// 并提示去设置页」，而不是让它以框架异常逃逸、被判成确定性失败（重排 2 次）并抛出英文文案（P1-1）。
+    /// </summary>
+    private static HttpRequestMessage CreateRequest(string endpoint, string apiKey, string jsonBody)
+    {
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            return req;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 文案过 Snippet：框架异常消息可能回显 Key 片段，异常会经 crash.log / rename_log.csv 落盘（D-5）。
+            throw new AiPermanentException(
+                "视觉识别请求构造失败：端点 URL 或 API Key 格式不合法（可能含换行 / 非法字符），" +
+                $"请到「设置」检查端点与 Key。（{Snippet(ex.Message ?? "")}）",
+                isBatchLevel: true);
+        }
     }
 
     /// <summary>
@@ -623,7 +676,9 @@ public static class ImageAnalysisHelper
 
         // 顺序不可反：先截断（见上），再对这 500 字符脱敏
         s = Regex.Replace(s, @"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", "$1***");
-        s = Regex.Replace(s, @"(?i)((?:api[_-]?key|apikey|access[_-]?token|secret)\s*[:=]\s*""?)[A-Za-z0-9._\-]{8,}", "$1***");
+        // P1-4 缺口 1：分隔符必须允许「空格」——「API key: xxx」「Access Token: xxx」带空格是英文文案里
+        // 最常见的写法，原 `api[_-]?key` 只认 `_`/`-`/无分隔，导致该规则完全漏网（当时只剩四家前缀兜底）。
+        s = Regex.Replace(s, @"(?i)((?:api[\s_\-]?key|apikey|access[\s_\-]?token|secret)\s*[:=]\s*""?)[A-Za-z0-9._\-]{8,}", "$1***");
         // 「&amp;」是 HTML 转义的「&」：企业代理的错误页模板（Squid 等）会把查询串转义后回显，
         // 只认裸 & 会让 ?key= 的脱敏整条失效（漏一圈等于没脱敏）。
         s = Regex.Replace(s, @"(?i)([?&](?:amp;)?(?:key|api[_-]?key|access_token|token)=)[^&\s""]+", "$1***");
@@ -633,7 +688,9 @@ public static class ImageAnalysisHelper
         // 下限取 16 而非 8：显式前缀虽强，但 "task-oriented" / "risk-management" 这类正常英文单词也含 "sk-"，
         // 8 字符下限会误伤（误伤虽不致错，却会让错误文案被 *** 打碎到无法阅读）；真实 Key 长度远大于 16。
         // 前缀用 \b 界定：避免 "task-…" 里的 "sk-" 被当成 OpenAI 前缀。
-        s = Regex.Replace(s, @"(?i)(\b(?:sk|gsk|xai)[-_])[A-Za-z0-9._\-]{16,}", "$1***");
+        // P1-4 缺口 2：前缀表补 nvapi —— NVIDIA 是本项目四个内置引擎之一，其 Key 形如 "nvapi-8nQ…"，
+        // 原表只有 sk/gsk/xai，一旦任何错误文案回显 nvapi- 开头的 Key 就是完整明文泄露。
+        s = Regex.Replace(s, @"(?i)(\b(?:sk|gsk|xai|nvapi)[-_])[A-Za-z0-9._\-]{16,}", "$1***");
         // Google / Gemini 的 Key 形如 "AIzaSy…"：AIza 后面直接跟字符、无分隔符，故本条不要求分隔符
         s = Regex.Replace(s, @"(\bAIza)[A-Za-z0-9._\-]{16,}", "$1***");
         return s;
@@ -647,49 +704,77 @@ public static class ImageAnalysisHelper
     /// —— 含正文为空与「留下半截 JSON」两种形态 —— 说明输出预算被思维链耗尽，
     /// 抛 <see cref="AiPermanentException"/> 短路（而非让上层误判为「模型不按要求返回 JSON」后重排队 10 次）；
     /// 截断但 JSON 恰好完整时正常返回，不受影响。
-    /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因。
+    /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因（文案已过 <c>Snippet</c> 脱敏）。
+    /// 若正文为空且非截断（模型什么都没产出），抛 <see cref="AiPermanentException"/>(isBatchLevel: false)。
     /// </summary>
-    /// <exception cref="InvalidOperationException">响应体含 error 字段，或不是可解析的 chat/completions 响应。</exception>
-    /// <exception cref="AiPermanentException">输出被 max_tokens 截断且解析不出结果（整批级，不重试）。</exception>
+    /// <exception cref="InvalidOperationException">响应体含 error 字段（该分支保留既有异常类型，文案已脱敏）。</exception>
+    /// <exception cref="AiResultInvalidException">响应体不是合法 JSON、不是 JSON 对象，或结构不符（重试有意义）。</exception>
+    /// <exception cref="AiPermanentException">输出被 max_tokens 截断且解析不出结果（整批级，不重试）；
+    /// 或正文为空且非截断（逐文件级，不重试、不熔断整批）。</exception>
     public static string ExtractContent(string raw)
     {
-        string content;
+        string content = "";
         string finishReason = "";
+        // 服务端 error 分支的脱敏文案：在 try 内收集、try 外抛出——避免 try 内抛异常被下方的
+        // catch (Exception) 再包一层（P1-2：把「放行 error 分支」从过宽的 catch 过滤器里拆出来）。
+        string? serverError = null;
+        // 根元素不是 JSON 对象（网关返回 "OK" / [1,2] / 42 / null / true 等合法但非对象的 JSON）
+        bool notJsonObject = false;
         try
         {
             using var doc = JsonDocument.Parse(raw);
             var root = doc.RootElement;
-            if (root.TryGetProperty("error", out var err))
+
+            // P1-2：根不是对象时 TryGetProperty 会抛 InvalidOperationException —— 必须在此显式判型，
+            // 交给下方统一按「重试有意义」的 AiResultInvalidException 处理；否则它会以框架异常逃逸，
+            // 被编排层判成确定性失败（重排队从 10 次降到 2 次），与既定口径相反。
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                notJsonObject = true;
+            }
+            else if (root.TryGetProperty("error", out var err))
             {
                 var msg = err.ValueKind == JsonValueKind.String
                     ? err.GetString()
-                    : (err.TryGetProperty("message", out var m) ? m.GetString() : null);
-                // GetRawText() 可能是整段错误对象（含回显的 Key），必须走 Snippet 截断 + 脱敏
-                throw new InvalidOperationException("视觉识别接口返回错误：" + (msg ?? Snippet(err.GetRawText())));
+                    // err 不是对象时（如 {"error":42} / {"error":[...]}）不能调 TryGetProperty——那会抛
+                    // InvalidOperationException 并被下方 catch 误判成「响应结构不符」。此处显式判型，
+                    // 非对象一律回落到 Snippet(err.GetRawText())（与 ReadErrorCode / ReadDetailErrorCode 同口径）。
+                    : (err.ValueKind == JsonValueKind.Object && err.TryGetProperty("message", out var m) ? m.GetString() : null);
+                // P0-3：error.message 是服务端原文，聚合层/自建网关会把完整 Key 回显在其中
+                //（如 "Incorrect API key provided: sk-…"），而本异常会经 crash.log / rename_log.csv 落盘。
+                // 两个分支都必须过 Snippet（截断 + 脱敏）——原写法只对 ?? 右侧生效，msg 原样进异常（唯一一条绕过 Snippet 的响应体外泄通道）。
+                serverError = "视觉识别接口返回错误：" +
+                              (msg is { Length: > 0 } ? Snippet(msg) : Snippet(err.GetRawText()));
             }
+            else
+            {
+                var choice = root.GetProperty("choices")[0];
+                var message = choice.GetProperty("message");
 
-            var choice = root.GetProperty("choices")[0];
-            var message = choice.GetProperty("message");
+                content = ReadMessageString(message, "content");
+                if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning_content");
+                if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning");
 
-            content = ReadMessageString(message, "content");
-            if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning_content");
-            if (string.IsNullOrWhiteSpace(content)) content = ReadMessageString(message, "reasoning");
-
-            if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
-                finishReason = fr.GetString() ?? "";
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
+                if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                    finishReason = fr.GetString() ?? "";
+            }
         }
         catch (Exception ex)
         {
-            // 用专用类型而非裸 InvalidOperationException：让编排层能把「响应体不是合法 JSON」
-            // （网关偶发返回 HTML 错误页，重试有意义）与「配置缺失 / 端点错误」分开计重排队次数。
+            // 用专用类型而非裸 InvalidOperationException：让编排层能把「响应体不是合法 JSON / 结构不符」
+            // （网关偶发返回 HTML 错误页或异常结构，重试有意义）与「配置缺失 / 端点错误」分开计重排队次数。
             // 继承 InvalidOperationException，既有 catch 行为完全不变（纯增量）。
             // inner 必须保留：编排层靠 inner 链识别网络 / 超时。
+            // 注意：不再保留 catch (InvalidOperationException) { throw; } 过滤器 —— 它会把
+            // 「root 非对象」「choices 存在但非数组」等 System.Text.Json 误用异常一并原样放行（P1-2），
+            // 使本该是 AiResultInvalidException 的解析失败拿不到正确类型、分档判据失效。
             throw new AiResultInvalidException("解析视觉识别响应失败：" + ex.Message, ex);
         }
+
+        // error 分支：保留既有异常类型 InvalidOperationException（不改变其分档语义），但文案已在上面过 Snippet。
+        if (serverError != null) throw new InvalidOperationException(serverError);
+        if (notJsonObject)
+            throw new AiResultInvalidException("视觉识别响应不是 JSON 对象（网关可能返回了非预期的标量 / 数组）：" + Snippet(raw));
 
         var text = StripThink(content).Trim();
 
@@ -718,6 +803,21 @@ public static class ImageAnalysisHelper
                 // 与模型配置（同一批所有文件同源），故确实应为 true；但默认值有「被将来新增的逐文件
                 // 规则静默纳入」的风险（P26），必须显式声明——与下面 429 永久分支同一口径。
                 isBatchLevel: true);
+        }
+
+        // P1-3：正文为空且不是 max_tokens 截断 → 模型什么都没产出（常见 finish_reason=stop / content_filter / 缺失）。
+        // 这种形态重采样成功率≈0（content_filter 对同一张图更是确定性的），若按「解析不出」判可重试，
+        // 单文件会重排 10 次、每次重发整张图 = 10 倍无效计费（单文件最多 10×8=80 次付费请求换一个必然为空的结果）。
+        // 故判为不可重试的逐文件永久错误：
+        //  - isBatchLevel: false —— 内容审核拒绝是逐图的，不得升级成「连续 3 个文件熔断整批」（P26 三层口径）；
+        //  - 与上面的 finish_reason=="length" 分支对齐（那一支已用更具体的文案短路，故此处只处理非截断形态）；
+        //  - 网络类瞬时故障不走这里（它们在 CallVisionApiRawAsync 内已按 AiTransientException 处理，未改动）。
+        if (text.Length == 0)
+        {
+            throw new AiPermanentException(
+                "视觉识别返回了空内容（模型未产出任何文本，可能因内容审核被拒绝）：" +
+                "请更换识别模型或检查图片。",
+                isBatchLevel: false);
         }
 
         return text;
@@ -752,7 +852,12 @@ public static class ImageAnalysisHelper
     }
 
     /// <summary>从模型原始响应（或模型直接返回的 JSON 文本）中解析结构化结果。
-    /// 兼容模型偶发的格式瑕疵：markdown 代码围栏（```json … ```）、尾随逗号、行内注释。</summary>
+    /// 兼容模型偶发的格式瑕疵：markdown 代码围栏（```json … ```）、尾随逗号、行内注释。
+    /// <para><b>P0-2：六个字段全部为空时返回 null（判为解析失败）</b>，而不是返回一个「字段全空」的
+    /// 对象当成功——后者会让编排层继续走完，把每个空字段替换成 <c>unknown</c>，落地
+    /// <c>unknown_unknown_…</c> 垃圾名并记为成功（付费成功、用户无任何报错）。判据严格限定为
+    /// 「全部为空」：AI 本来就可能只填一部分字段，<b>部分字段为空属正常</b>，不得误伤。</para>
+    /// </summary>
     public static ImageAnalysisResult? Parse(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
@@ -768,7 +873,7 @@ public static class ImageAnalysisHelper
             };
             using var doc = JsonDocument.Parse(obj, options);
             var root = doc.RootElement;
-            return new ImageAnalysisResult
+            var result = new ImageAnalysisResult
             {
                 Category = Str(root, "category"),
                 Scene = Str(root, "scene"),
@@ -777,6 +882,24 @@ public static class ImageAnalysisHelper
                 Subtitle = Str(root, "subtitle"),
                 Source = Str(root, "source"),
             };
+
+            // P0-2：六个字段全空 = 模型返回了合法 JSON 但没有任何可用字段。典型触发形态（全部是合法 JSON，
+            // 故上面不会抛、result 非 null）：包装层 {"result":{…}} / {"data":{…}}、键名本地化 {"分类":…}、
+            // 键名大小写漂移 {"Category":…}、值不是字符串 {"category":1}、空对象 {}。
+            // 若不判失败：BuildName 会把每个空字段替换成 "unknown" → 落地 unknown_… 垃圾名且写入成功日志。
+            // 返回 null 后，四个引擎既有的 `result ?? throw new AiResultInvalidException(...)` 自动接管，
+            // 走「重试有意义」的 10 次档（与已裁定口径一致），无需改编排层。
+            if (string.IsNullOrWhiteSpace(result.Category) &&
+                string.IsNullOrWhiteSpace(result.Scene) &&
+                string.IsNullOrWhiteSpace(result.People) &&
+                string.IsNullOrWhiteSpace(result.Action) &&
+                string.IsNullOrWhiteSpace(result.Subtitle) &&
+                string.IsNullOrWhiteSpace(result.Source))
+            {
+                return null;
+            }
+
+            return result;
         }
         catch
         {

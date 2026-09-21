@@ -52,14 +52,9 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
 
     public async Task<ImageAnalysisResult?> AnalyzeAsync(string imagePath, string language, CancellationToken ct = default)
     {
+        // 解码失败由 EncodeAsJpegDataUrlAsync 直接抛 AiPermanentException（isBatchLevel: false，
+        // 逐文件不重试、不熔断整批），并携带脱敏后的真因与 inner——此处不再做 null 兜底（P1-6）。
         var dataUrl = await ImageAnalysisHelper.EncodeAsJpegDataUrlAsync(imagePath, 1024, ct).ConfigureAwait(false);
-        if (dataUrl == null)
-            // 损坏文件或缺少编解码器（如 HEIC）是逐文件的确定性失败：
-            // 既定口径要求「逐文件报错、不影响其它文件」，但不需要对同一坏文件重试 10 次。
-            // 故 isBatchLevel: false：不重试，但也不参与批次熔断。
-            throw new AiPermanentException(
-                $"无法解码图片（可能不是有效图像或已损坏）：{System.IO.Path.GetFileName(imagePath)}",
-                isBatchLevel: false);
 
         // 用构造函数里建好的策略档（闸门实例进程级共享，跨图片/跨批次累计计数，限速才真的生效）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
