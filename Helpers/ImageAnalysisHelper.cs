@@ -42,14 +42,38 @@ public static class ImageAnalysisHelper
 
     public static string BuildPrompt(string language)
     {
-        var lang = (language ?? "").StartsWith("zh") ? "中文" : "English";
+        bool zh = (language ?? "").StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+
+        // ⚠ 示例必须与目标语言一致。原实现固定给英文示例，而模型会照抄示例的用词与语言——
+        // 即便上面写了 "Values in 中文"，category / action 仍常常回退成英文，
+        // 同一条结果里出现「部分英文、部分中文」的混合命名。故示例随语言切换。
+
+        // 各字段的语言约束：category/scene/people/action 必须统一为所选语言；
+        // subtitle 是画面上「看到」的文字，天然是多语言的，按原样保留、不要翻译；
+        // source 沿用 phone/screenshot/camera 这类通用标识，也不做语言统一。
+        string langRule = zh
+            ? "Language rule: category, scene, people, action MUST be in Simplified Chinese only — " +
+              "no English words (except unavoidable proper nouns like brand or person names); " +
+              "subtitle keeps the original text as seen on screen, do NOT translate it; " +
+              "source uses common tokens like phone/screenshot/camera. " +
+              "Never mix Chinese and English within one result."
+            : "Language rule: category, scene, people, action MUST be in English only; " +
+              "subtitle keeps the original text as seen on screen, do NOT translate it; " +
+              "source uses common tokens like phone/screenshot/camera. " +
+              "Never mix languages within one result.";
+
+        string example = zh
+            ? "{\"category\":\"宠物\",\"scene\":\"客厅\",\"people\":\"无\",\"action\":\"睡觉\",\"subtitle\":\"none\",\"source\":\"phone\"}"
+            : "{\"category\":\"pet\",\"scene\":\"living room\",\"people\":\"none\",\"action\":\"sleeping\",\"subtitle\":\"none\",\"source\":\"phone\"}";
+
         return "Analyze this image. Output ONLY a JSON object (no markdown fences) with exactly these keys: " +
-               "category, scene, people, action, subtitle, source. Values in " + lang + ". " +
-               "category=one short word (e.g. food/pet/people/landscape/document/screenshot). " +
-               "scene=place where the photo was taken. people=person names or 'none'. " +
+               "category, scene, people, action, subtitle, source. " +
+               langRule + " " +
+               "category=one short word or phrase (e.g. " + (zh ? "美食/宠物/人物/风景/文档/截图" : "food/pet/people/landscape/document/screenshot") + "). " +
+               "scene=place where the photo was taken. people=person names, or 'none' if none. " +
                "action=short verb phrase describing what is happening. " +
-               "subtitle=any visible on-screen text or 'none'. source=origin like phone/screenshot/camera. " +
-               "Example: {\"category\":\"pet\",\"scene\":\"living room\",\"people\":\"none\",\"action\":\"sleeping\",\"subtitle\":\"none\",\"source\":\"phone\"}";
+               "subtitle=any visible on-screen text, or 'none' if none. source=origin like phone/screenshot/camera. " +
+               "Example: " + example;
     }
 
     /// <summary>
