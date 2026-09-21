@@ -29,6 +29,15 @@ public class AppSettings
 
     public string OutputFolder { get; set; } = "";
 
+    /// <summary>重命名模式实跑前的备份文件夹（整理页拥有，与 <see cref="DefaultFolder"/> /
+    /// <see cref="OutputFolder"/> 同等待遇持久化）。
+    /// <b>不是密钥</b>：纯路径字符串，不走 DPAPI 加解密清单（那是给 4 个 API Key 的）。
+    /// 老版本 settings.json 没有该字段 → 反序列化缺字段走属性默认值（空串），不会失败；
+    /// 空串表示「还没选过」，运行时会弹文件夹选择框。
+    /// 之所以持久化：此前每次运行前都弹窗、且运行结束后被清空，用户每次都得重选，
+    /// 跑完后也无处可查备份到底去了哪（第九轮 R9-5）。</summary>
+    public string BackupFolder { get; set; } = "";
+
     /// <summary>为 true 时只模拟、不改写文件。P0-2 修复：默认 true（安全默认），
     /// 新装用户首次使用先看到模拟预览，避免在「模拟运行」字样下真实改动文件。</summary>
     public bool DryRun { get; set; } = true;

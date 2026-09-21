@@ -348,11 +348,34 @@ public partial class SettingsViewModel : ObservableObject
             // 不写 AiProvider 就是磁盘最新值，正是想要的行为（那是 SaveAsync 全量保存路径
             // 才需要处理的「重读前先捕获 UI 值」约定，与本函数语义不同）。
             var model = _settings.Load();
+
+            // ⑤（第九轮 F3）：密钥「是密文但本机解不开」时，上面那次 Load 已把这些字段置空，
+            // 照常保存就会把磁盘上的 enc: 密文覆盖成空串（不可逆）。与整理页的自动保存同策：
+            // 本次不写盘，明确告知用户到「设置」页重填密钥后保存（那里会一并保存主题）。
+            // 此前这条路径完全不读该标志——用户只切了个主题，密钥密文就被静默销毁了。
+            if (_settings is SettingsService keyImpl && keyImpl.LastLoadHadUndecryptableKeys)
+            {
+                StatusText = "主题已切换，但为避免覆盖本机无法解密的 API Key 密文，本次未写入配置文件；" +
+                             "请到「设置」页重新填写密钥后点「保存设置」（主题会一并保存）。";
+                StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
+                StatusBarOpen = true;
+                return;
+            }
+
             model.Theme = Theme;
             await _settings.SaveAsync(model);
 
-            StatusText = "主题已切换（已保存，下次启动也会保留）。";
-            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success;
+            // ⑤（第九轮 F3）：DPAPI 加密失败 → 密钥<b>明文</b>落盘且保存仍成功。
+            // 此前只有「保存设置」读这个标志，切主题这条即时落盘路径不读 → 明文静默落盘，
+            // 与设置页底部「若本机 DPAPI 不可用，保存结果会明确提示密钥可能以明文存储」的承诺矛盾。
+            var protectNote = "";
+            if (_settings is SettingsService savedImpl && savedImpl.LastProtectFailed)
+                protectNote = "注意：本机 DPAPI 加密不可用，本次保存的 API Key 可能以明文写入本机配置文件。";
+
+            StatusText = "主题已切换（已保存，下次启动也会保留）。" + protectNote;
+            StatusSeverity = protectNote.Length > 0
+                ? Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning
+                : Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success;
         }
         catch (Exception ex)
         {

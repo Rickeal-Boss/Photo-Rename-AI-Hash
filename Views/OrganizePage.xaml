@@ -18,7 +18,7 @@
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
                     <TextBlock Text="路径设置" Style="{StaticResource CardTitleStyle}" />
-                    <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto">
+                    <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto">
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="源文件夹" VerticalAlignment="Center" Margin="0,0,12,0" />
                         <TextBox Grid.Row="0" Grid.Column="1"
                                  Text="{x:Bind ViewModel.SourceFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
@@ -31,7 +31,20 @@
                                  PlaceholderText="整理后输出位置（重命名模式可留空）" />
                         <Button Grid.Row="1" Grid.Column="2" Content="浏览" Click="PickOutput_Click" Margin="8,0,0,0"
                                 ToolTipService.ToolTip="选择整理后的输出文件夹" />
+                        <!-- ③（第九轮 R9-5）：备份文件夹此前只在「重命名实跑前」弹一次窗、跑完即清空，
+                             用户既看不到它、下次还要重选。现在与源/输出文件夹同等待遇：可显示、可持久化。
+                             「浏览」走 VM 的 PickBackupFolderCommand（复用页面注入的同一个选择器），
+                             故无需页面 code-behind 新增 Click 处理。 -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="备份文件夹" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{x:Bind ViewModel.BackupFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="仅「重命名」实际执行时使用；留空则运行时弹窗选择" />
+                        <Button Grid.Row="2" Grid.Column="2" Content="浏览"
+                                Command="{x:Bind ViewModel.PickBackupFolderCommand}" Margin="8,0,0,0"
+                                ToolTipService.ToolTip="选择重命名前保存原件的备份文件夹" />
                     </Grid>
+                    <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="备份文件夹只在「操作模式 = 重命名」且「实际执行」时使用：重命名前先把原件复制一份进去，供误操作后找回。该位置会随配置一起保存，下次启动沿用；跑完后可在上方输入框看到它。若该文件夹后来被删除或移动，下次运行会提示并重新弹出选择框。「复制 / 移动」模式不产生备份；「按日期归档」也不备份（见下方归档说明）。" />
                 </StackPanel>
             </Border>
 
@@ -92,6 +105,24 @@
                         {yyyy}{MM}{dd}_{name}_{n}）。请确认模式后再开始。
                         注意：模拟运行下 AI 字段取不到真实识别结果，预览出的文件名与实际执行的结果会不同，请以实际执行为准。
                     </TextBlock>
+                    <!-- ①（第九轮 R9-1）：归档行为此前受「操作模式」影响且完全无说明——模式=重命名时点归档，
+                         文件会被移走、状态却写「已重命名」，用户对「模式影响归档」毫无感知。
+                         文案必须与内核实现逐条对齐（内核归档语义归一：Rename→Move；Copy 仍保留源文件）：
+                         不能写成「归档固定移动、不受模式影响」——那在「复制」模式下与事实不符（P33）。 -->
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="关于「按日期归档」" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="它按拍摄日期把照片放入输出文件夹下的 yyyy\yyyy-MM-dd 子目录（无 EXIF 时用文件修改时间）。是否保留源文件取决于「操作模式」：「复制」会把照片复制一份到日期目录、源文件保留在原处；「移动」则把源文件移走；「重命名」在归档下没有意义（归档必然改变目录位置），会被按「移动」处理并在日志中说明。另外，归档不做备份——即使模式选「重命名」，归档也不会像「开始整理」那样先备份原件，请先确认输出位置。" />
+                    </StackPanel>
+                    <!-- ④（第九轮 R9-6）：重命名模式 + 冲突策略「覆盖」会被内核降级为自动加序号，
+                         原因此前只藏在结果行的 ToolTip 里。这里前置说明一次，批次结束时再汇总一次。 -->
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="关于「冲突处理 = 覆盖」" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="模式选「重命名」时覆盖不会生效——原地重命名时目标就在源文件夹里，覆盖会删掉那里的另一个文件，而备份只备份源文件，等于不可恢复地丢数据。此时内核会自动加 _1/_2 序号改名，并在批次结束时汇总告知（结果列表中每一行的提示里也有逐条原因）。" />
+                    </StackPanel>
                     <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
                     <CheckBox Content="使用照片拍摄时间（EXIF）作为日期来源；无 EXIF 时回退文件修改时间"
                               IsChecked="{x:Bind ViewModel.UseExifDate, Mode=TwoWay}" />
@@ -143,7 +174,11 @@
                         <Button Content="开始整理" Command="{x:Bind ViewModel.StartOrganizeCommand}"
                                 Style="{StaticResource AccentButtonStyle}"
                                 ToolTipService.ToolTip="开始处理所选文件夹（模拟运行开启时仅预览）" />
-                        <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}" />
+                        <!-- ①（第九轮 R9-1）：归档入口此前没有任何说明。这里给出准确、具体的 ToolTip：
+                             归档=按日期放入日期子目录；是否保留源文件取决于「操作模式」（复制保留 / 移动移走）；
+                             重命名会被按「移动」处理；且归档一律不备份。 -->
+                        <Button Content="按日期归档" Command="{x:Bind ViewModel.ArchiveByDateCommand}"
+                                ToolTipService.ToolTip="按拍摄日期把照片放入输出文件夹下的 yyyy\yyyy-MM-dd 子目录（无 EXIF 时用文件修改时间）。模式选「复制」会保留源文件，选「移动」会把源文件移走（选「重命名」会被按「移动」处理）。归档不做备份——即使模式选「重命名」也不会先备份原件，请先确认输出位置。" />
                         <Button Content="取消" Command="{x:Bind ViewModel.CancelCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                         <Button Content="{x:Bind ViewModel.PauseButtonText, Mode=OneWay}"

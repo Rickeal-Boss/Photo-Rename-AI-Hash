@@ -33,6 +33,30 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     private bool _loadFailureNotified;
 
+    /// <summary>
+    /// ⑤（第九轮 F3）：整理页是否已就「本机解不开 settings.json 里的 API Key」提示过一次。
+    /// 同 <see cref="_loadFailureNotified"/> 的理由：每次导航进整理页都会重新读盘，
+    /// 不加标志会反复重弹；密钥重新填好保存后（标志复位）将来再发生仍会提示一次。
+    /// </summary>
+    private bool _undecryptableKeysNotified;
+
+    // ── ②（第九轮 R9-4）：本批次失败清单 ──
+    /// <summary>
+    /// 本批次所有失败条目（<b>不设上限</b>）。与界面集合 <see cref="Results"/> 分开维护的原因：
+    /// <see cref="Results"/> 有 <see cref="MaxResults"/> 上限，超出会 <c>RemoveAt(0)</c> 顶掉最早一条，
+    /// 于是「5000 张里失败 300 张」的场景下早期失败会被逐条挤出屏幕，用户拿不到完整清单。
+    /// 这里另存一份，批次结束时整体落盘（见 <see cref="WriteFailureListAsync"/>）。
+    /// 只在 UI 线程访问（Progress&lt;T&gt; 回调与批次 finally 都在 UI 线程），无需加锁。
+    /// </summary>
+    private readonly List<RenameLogEntry> _batchFailures = new();
+
+    // ── ④（第九轮 R9-6）：本批次「覆盖被降级为自动改名」的计数 ──
+    /// <summary>重命名模式下「冲突策略=覆盖」被降级为自动加序号的文件数（内核不允许原地覆盖）。</summary>
+    private int _degradedRenameMode;
+
+    /// <summary>「覆盖」撞上本批次已产出的目标、被降级为自动加序号的文件数。</summary>
+    private int _degradedBatchCollision;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -41,6 +65,7 @@ public partial class OrganizeViewModel : ObservableObject
         _model = _settings.Load();
         SourceFolder = _model.DefaultFolder;
         OutputFolder = _model.OutputFolder;
+        BackupFolder = _model.BackupFolder; // ③：与源/输出文件夹同等待遇，恢复上次选定的备份位置
         NamingTemplate = _model.NamingTemplate;
         DryRun = _model.DryRun;
         UseExifDate = _model.UseExifDate;
@@ -375,6 +400,145 @@ public partial class OrganizeViewModel : ObservableObject
         NoResultsVisibility = has ? Visibility.Collapsed : Visibility.Visible;
     }
 
+    /// <summary>新批次开始时清空本批次的统计（失败清单与降级计数），避免上一批的数字串到这一批。</summary>
+    private void ResetBatchTracking()
+    {
+        _batchFailures.Clear();
+        _degradedRenameMode = 0;
+        _degradedBatchCollision = 0;
+    }
+
+    /// <summary>
+    /// 记录单个结果条目里「用户需要知道、但界面列表未必留得住」的信息：
+    /// <list type="bullet">
+    /// <item>失败条目 → 进 <see cref="_batchFailures"/>（不设上限，供批次结束时落盘完整清单）。</item>
+    /// <item>「覆盖被降级为自动改名」的成功条目 → 计数（供终态横幅汇总，不再只藏在行 ToolTip 里）。</item>
+    /// </list>
+    /// </summary>
+    /// <remarks>
+    /// 判定「降级」的依据：内核只在这两种情况下给<b>成功</b>条目写 <c>Message</c>
+    /// （<c>OrganizeService</c> 的 <c>entry.Message = degradeReason</c> 两处，均在 <c>degraded</c> 为真时）；
+    /// 其余成功条目的 <c>Message</c> 恒为空，错误条目则已被上面的 <see cref="RenameLogEntry.IsError"/> 分流。
+    /// 两类原因按文案区分：重命名模式的说明含「重命名模式」，本批次占用冲突的含「本批次其他文件占用」。
+    /// </remarks>
+    private void TrackBatchIssues(RenameLogEntry entry)
+    {
+        if (entry.IsError)
+        {
+            _batchFailures.Add(entry);
+            return;
+        }
+        if (!entry.IsSuccess || string.IsNullOrWhiteSpace(entry.Message)) return;
+
+        if (entry.Message.Contains("重命名模式", StringComparison.Ordinal)) _degradedRenameMode++;
+        else _degradedBatchCollision++;
+    }
+
+    /// <summary>
+    /// ④（第九轮 R9-6）：把「覆盖被静默降级为自动改名」在本批次结束时<b>汇总说一次</b>。
+    /// 此前只有结果行的 ToolTip 里有原因，用户不逐行悬停就完全看不到——选「覆盖」却得到 <c>_1</c> 后缀，
+    /// 会以为策略没生效或程序有问题。
+    /// </summary>
+    private void ReportDegradedSummary()
+    {
+        if (_degradedRenameMode == 0 && _degradedBatchCollision == 0) return;
+
+        var parts = new List<string>();
+        if (_degradedRenameMode > 0)
+            parts.Add($"{_degradedRenameMode} 个文件因「重命名模式不支持覆盖」而自动加序号改名（未覆盖源文件夹中的其它文件）");
+        if (_degradedBatchCollision > 0)
+            parts.Add($"{_degradedBatchCollision} 个文件因目标已被本批次其它文件占用而自动加序号改名");
+
+        // 模拟运行下没有任何文件被改动，措辞必须是「预估」而不是既成事实（P33：不能把预览说成已发生）
+        var note = (DryRun ? "模拟运行预估：本批次将有 " : "本批次有 ") + string.Join("；", parts) +
+                   "。逐条原因见结果列表中各行的提示（悬停状态列）。";
+        AppendLog(note);
+        // 用 Warning 而非成功色：这不是失败，但用户选择「覆盖」却没被覆盖，必须显眼
+        AppendTerminalNote(note, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+    }
+
+    /// <summary>
+    /// ②（第九轮 R9-4）：把本批次的失败清单落盘，供用户跑完后逐条排查。
+    /// </summary>
+    /// <remarks>
+    /// <b>为什么选「落盘」而不是「界面导出按钮」：</b>
+    /// <list type="number">
+    /// <item>导出要求用户跑完时还坐在电脑前并主动点按钮；几千张的批次常在无人值守时结束，
+    /// 或用户直接关掉应用，导出能力在那时就等于没有。落盘是「跑完即已留存」。</item>
+    /// <item>界面结果列表有 <see cref="MaxResults"/> 上限，早期失败会被顶掉——只有落盘才能给全量。</item>
+    /// <item>导出还得再走一次文件夹选择器与页面 code-behind，而落盘可完全在 VM 内完成。</item>
+    /// </list>
+    /// <b>为什么落在 <c>%USERPROFILE%\.PhotoRenameAIHash\</c> 而不是输出目录（与 rename_log.csv 同处）：</b>
+    /// <list type="number">
+    /// <item>失败原因里最常见的就是「输出盘写满 / 输出目录不可写」——把失败清单写进那个盘等于同样写不进去。</item>
+    /// <item>重命名模式下输出目录 == 源目录，往用户照片目录里丢一个 CSV 属于污染。</item>
+    /// <item>该目录是本项目 settings.json 的既定位置（见 <c>SettingsService.FilePath</c>），
+    /// 也是项目自己判定「卸载 / 重置不会被系统清掉」的位置——沿用既有约定，不新造存储位置。</item>
+    /// </list>
+    /// <b>文件名带时间戳、且只在有失败时写：</b>不带时间戳会与上一批的清单互相覆盖（用户可能正想留着昨天的 300 条）；
+    /// 只在有失败时写，则不会像 <c>rename_log.csv</c> 那样每批都增长（失败批次本身是少数）。
+    /// <b>全方法不抛</b>：写清单是附带能力，绝不能因为它失败而影响批次终态或配置持久化。
+    /// </remarks>
+    private async Task WriteFailureListAsync()
+    {
+        if (_batchFailures.Count == 0) return;
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".PhotoRenameAIHash");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "organize_failures_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".csv");
+
+            var sb = new StringBuilder();
+            // 头部三行注释：让文件脱离界面也能自解释（用户几周后再打开，仍知道这是哪一批、什么参数）
+            sb.AppendLine("# 本批次失败清单：失败 " + _batchFailures.Count.ToString(CultureInfo.InvariantCulture) + " 项" +
+                          (DryRun ? "（模拟运行，未改动任何文件）" : ""));
+            sb.AppendLine("# 批次时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
+                          "　模式：" + SelectedMode + "　" + (DryRun ? "模拟运行" : "实际执行"));
+            sb.AppendLine("# 源文件夹：" + SourceFolder + "　输出文件夹：" + OutputFolder);
+            sb.AppendLine("Timestamp,OriginalName,OriginalPath,Status,Message");
+            foreach (var e in _batchFailures)
+            {
+                sb.AppendLine(string.Join(",", new[]
+                {
+                    Csv(e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                    Csv(e.OriginalName),
+                    Csv(e.OriginalPath),
+                    Csv(e.Status),
+                    Csv(e.Message),
+                }));
+            }
+
+            await File.WriteAllTextAsync(path, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(true);
+
+            var note = "失败清单已保存：" + path;
+            AppendLog(note);
+            AppendTerminalNote(note, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+        }
+        catch (Exception ex)
+        {
+            // 落盘失败不影响批次结果；但要说出来，避免用户以为「没有清单 = 没有失败」
+            AppendLog("失败清单写入失败：" + ex.Message + "（失败详情仍见上方结果列表与日志）。");
+        }
+    }
+
+    /// <summary>CSV 字段转义（与 <c>RenameLogService.Csv</c> 同口径）：引号翻倍、CR/LF 折成空格。</summary>
+    private static string Csv(string? s)
+        => "\"" + (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
+
+    /// <summary>
+    /// 往终态横幅追加一条补充说明（横幅此刻通常已经开着，因此必须显式写 <see cref="StatusBarMessage"/>，
+    /// 不能只置 <c>StatusBarOpen = true</c> —— 同值赋值不触发钩子，追加的文案会在 UI 上不可见）。
+    /// </summary>
+    private void AppendTerminalNote(string note, Microsoft.UI.Xaml.Controls.InfoBarSeverity severity)
+    {
+        if (string.IsNullOrWhiteSpace(note)) return;
+        var baseMsg = string.IsNullOrWhiteSpace(StatusBarMessage) ? StatusText : StatusBarMessage;
+        var msg = string.IsNullOrWhiteSpace(baseMsg) ? note : baseMsg + " " + note;
+        ShowTerminalStatus(msg, severity);
+    }
+
     [RelayCommand]
     private async Task StartOrganizeAsync()
     {
@@ -410,6 +574,15 @@ public partial class OrganizeViewModel : ObservableObject
         // 重命名模式 + 实际执行：必须先选择备份文件夹，未选择则取消（不动任何文件）
         if (SelectedMode == OperationMode.Rename && !DryRun)
         {
+            // ③：备份文件夹现在会被持久化沿用，因此「上次选的那个后来被删掉 / 换了盘符」是可达状态。
+            // 内核的 BackupOriginalAsync 不创建备份目录（失败即环境级 → 整批中止），
+            // 沿用失效路径会让用户在一张照片都没改的情况下被拦下；这里先探测，失效则退回弹窗重选。
+            if (!string.IsNullOrWhiteSpace(BackupFolder) && !Directory.Exists(BackupFolder))
+            {
+                AppendLog("上次使用的备份文件夹已不存在：" + BackupFolder + "，请重新选择。");
+                BackupFolder = "";
+            }
+
             if (string.IsNullOrWhiteSpace(BackupFolder))
             {
                 var picked = BackupFolderPicker != null ? await BackupFolderPicker() : null;
@@ -438,6 +611,7 @@ public partial class OrganizeViewModel : ObservableObject
         IsBusy = true;
         Progress = 0;
         Results.Clear();
+        ResetBatchTracking(); // ②④：清空上一批的失败清单与降级计数
         LogText = "";
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
@@ -479,9 +653,10 @@ public partial class OrganizeViewModel : ObservableObject
             IsPaused = false;
             RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
-            BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
+            // ③（第九轮 R9-5）：备份文件夹<b>不再清空</b>。此前每次跑完都置空，用户既看不到
+            // 「备份到底在哪」，下次还得重选一遍；现在它与源/输出文件夹一样持久化沿用。
 
-            // 配置属于用户输入（源/输出文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
+            // 配置属于用户输入（源 / 输出 / 备份文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
             // 取消 / 失败 / 环境错误中止时同样应落盘，否则用户刚填好的路径与模板会随一次失败一起丢失。
             // 包 try/catch：持久化失败不得掩盖主流程的异常或终态。
             try
@@ -492,6 +667,12 @@ public partial class OrganizeViewModel : ObservableObject
             {
                 AppendLog("配置保存失败：" + pex.Message);
             }
+
+            // ②④（第九轮 R9-4 / R9-6）：落盘完整失败清单 + 汇总「覆盖被降级为自动改名」。
+            // 顺序固定为「先持久化配置、再追加这两条说明」：三者都可能往终态横幅追加文案，
+            // 固定顺序可避免同一批次的横幅句子先后随路径而变（WriteFailureListAsync 内部自吞异常，不抛）。
+            await WriteFailureListAsync();
+            ReportDegradedSummary();
         }
     }
 
@@ -528,6 +709,7 @@ public partial class OrganizeViewModel : ObservableObject
         IsBusy = true;
         Progress = 0;
         Results.Clear();
+        ResetBatchTracking(); // ②④：清空上一批的失败清单与降级计数
         LogText = "";
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
@@ -536,6 +718,16 @@ public partial class OrganizeViewModel : ObservableObject
         // 也不调用识别接口——它把文件原样放进 yyyy/yyyy-MM-dd 子目录（命名取 f.Name）。
         // 把「模板里的 AI 字段会变成占位值 / 模板会被回退」写进归档日志，等于对本次运行做出
         // 一个不会发生的陈述（P33 谎报家族），故只保留在「开始整理」路径上。
+
+        // ①（第九轮 R9-1）：归档语义必须留痕。此前模式=「重命名」时点归档，文件会被 File.Move 搬走
+        // 且不备份、状态还写「已重命名」，而页面对「模式会影响归档」一个字都没说。
+        // 文案逐条对齐内核实现（归档语义归一：Rename → Move；Copy 仍保留源文件），
+        // 不写成「归档固定移动、不受模式影响」——那在「复制」模式下与事实不符（P33）。
+        bool archiveKeepsSource = SelectedMode == OperationMode.Copy;
+        AppendLog($"按日期归档：将按拍摄日期把照片{(archiveKeepsSource ? "复制" : "移动")}到 {OutputFolder} 下的 " +
+                  $"yyyy/yyyy-MM-dd 子目录" +
+                  (archiveKeepsSource ? "（源文件保留在原处）" : "（源文件会从源文件夹移走）") +
+                  "；归档不做备份——即使模式选「重命名」也不会像「开始整理」那样先备份原件。");
 
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -569,9 +761,10 @@ public partial class OrganizeViewModel : ObservableObject
             IsPaused = false;
             RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
-            BackupFolder = ""; // 下次执行重新弹窗让用户确认备份位置
+            // ③（第九轮 R9-5）：备份文件夹<b>不再清空</b>。此前每次跑完都置空，用户既看不到
+            // 「备份到底在哪」，下次还得重选一遍；现在它与源/输出文件夹一样持久化沿用。
 
-            // 配置属于用户输入（源/输出文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
+            // 配置属于用户输入（源 / 输出 / 备份文件夹、命名模板、引擎与模式选择），与本次运行成功与否无关：
             // 取消 / 失败 / 环境错误中止时同样应落盘，否则用户刚填好的路径与模板会随一次失败一起丢失。
             // 包 try/catch：持久化失败不得掩盖主流程的异常或终态。
             try
@@ -582,11 +775,30 @@ public partial class OrganizeViewModel : ObservableObject
             {
                 AppendLog("配置保存失败：" + pex.Message);
             }
+
+            // ②④（第九轮 R9-4 / R9-6）：落盘完整失败清单 + 汇总「覆盖被降级为自动改名」。
+            // 顺序固定为「先持久化配置、再追加这两条说明」：三者都可能往终态横幅追加文案，
+            // 固定顺序可避免同一批次的横幅句子先后随路径而变（WriteFailureListAsync 内部自吞异常，不抛）。
+            await WriteFailureListAsync();
+            ReportDegradedSummary();
         }
     }
 
     [RelayCommand]
     private void Cancel() => _cts?.Cancel();
+
+    /// <summary>
+    /// ③（第九轮 R9-5）：整理页上「浏览」备份文件夹。复用页面构造时注入的 <see cref="BackupFolderPicker"/>
+    /// （与「重命名实跑前自动弹窗」同一个选择器），因此无需页面 code-behind 新增 Click 处理。
+    /// 用户取消选择时保留原值，不清空——清空等于把用户已确认的备份位置丢掉。
+    /// </summary>
+    [RelayCommand]
+    private async Task PickBackupFolderAsync()
+    {
+        if (BackupFolderPicker == null) return;
+        var picked = await BackupFolderPicker();
+        if (!string.IsNullOrWhiteSpace(picked)) BackupFolder = picked!;
+    }
 
     [RelayCommand]
     private void PauseToggle()
@@ -636,14 +848,17 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     public void SyncProviderFromDisk()
     {
-        // A-11：配置读取失败在整理页也要可见 —— 用户可能从不进「设置」页，
-        // 只在下次启动时发现「我填的路径 / 模板 / 引擎全没了」，且原文件已被覆盖、无从察觉。
-        ShowLoadFailureWarningIfNeeded();
-
         // 顺带刷新本页的磁盘配置快照：密钥是否已配置会影响「模拟运行 AI 占位」提示的判定，
         // 用户在「设置」页填好 Key 后回到整理页，提示应当立刻消失。（_model 只在本方法、
         // 构造、BuildRequest、PersistConfigAsync 这几处被赋值，后三处都会先重新 Load，故无覆盖风险。）
         _model = _settings.Load();
+
+        // 两条配置告警都必须放在上面那次 Load <b>之后</b>：这两个标志都由 Load 重算，
+        // 在 Load 之前读到的是上一次的状态（可能已过期，例如用户刚在设置页把配置修好）。
+        // 顺序与「设置」页保持一致：先「密钥解不开」，再「配置读取失败」——后者更严重，
+        // 放后面是为了让它覆盖前者（两条同时成立时，用户看到的应是更严重的那条）。
+        ShowUndecryptableKeysWarningIfNeeded();
+        ShowLoadFailureWarningIfNeeded();
 
         // try/finally：下面两条 return 是正常路径，但模拟运行提示无论走哪条都要重算
         try
@@ -701,6 +916,35 @@ public partial class OrganizeViewModel : ObservableObject
                            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error);
         AppendLog("配置文件读取失败" + where +
                   "，为避免覆盖原文件，整理结果对应的配置本次未自动写入磁盘。");
+    }
+
+    /// <summary>
+    /// ⑤（第九轮 F3）：settings.json 里的 API Key 是 <c>enc:</c> 密文、但本机凭据解不开
+    /// （文件从其它账户 / 其它机器拷来，或凭据已损坏）时，在整理页也明确告知。
+    /// </summary>
+    /// <remarks>
+    /// 此前只有设置页会提示，而整理页「每批结束都自动持久化」——用户可能从不进设置页，
+    /// 于是「密钥解不开 → 被置空 → 整理结束的自动保存把磁盘上的密文覆盖成空串」这条
+    /// <b>不可逆的密文销毁</b>全程无感（第九轮 F3 的后半段）。
+    /// 本方法负责「让用户看见」；真正的「不覆盖」在 <see cref="PersistConfigAsync"/> 里。
+    /// 提示只弹一次（同 <see cref="_loadFailureNotified"/> 的理由：每次导航都会调本方法）；
+    /// 密钥重新填好并保存后标志复位，将来再发生仍会提示一次。
+    /// </remarks>
+    private void ShowUndecryptableKeysWarningIfNeeded()
+    {
+        if (_settings is not SettingsService settings) return;
+        if (!settings.LastLoadHadUndecryptableKeys)
+        {
+            _undecryptableKeysNotified = false; // 已恢复正常 → 复位，下次再发生仍提示
+            return;
+        }
+        if (_undecryptableKeysNotified) return;
+        _undecryptableKeysNotified = true;
+
+        ShowTerminalStatus("本机 Windows 凭据无法解密已保存的 API Key（设置文件可能来自其它账户或机器）。" +
+                           "为避免把解不开的密文覆盖成空值，本页不再自动保存配置；请到「设置」页重新填写密钥并保存。",
+                           Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+        AppendLog("本机无法解密 settings.json 中的 API Key；整理页的自动保存已停用，以免覆盖掉磁盘上的密文。");
     }
 
     private OrganizeRequest BuildRequest()
@@ -763,8 +1007,28 @@ public partial class OrganizeViewModel : ObservableObject
         // P1-A 修复：_model 是 BuildRequest 时（任务开始）加载的快照，长任务期间设置页
         // 可能刚保存过密钥等配置。保存前重读磁盘，只覆盖整理页拥有的字段，避免覆盖其它来源的改动。
         _model = _settings.Load();
+
+        // ⑤（第九轮 F3，后半段）：密钥「是密文但本机解不开」时，上面那次 Load 已把这些字段置空。
+        // 若照常保存，写回的就是空串 → 磁盘上的 enc: 密文被覆盖掉，且不可逆（用户把文件拷回原机器也救不回来）。
+        // 因此这里与「配置读取失败保护闩」同策：<b>本次不自动写入</b>，由用户到设置页重新填密钥后显式保存。
+        // 代价是这一次整理页的路径 / 模板改动也不会自动落盘（用户可在设置页保存时一并落盘），
+        // 但相比「不可逆地销毁密钥」，这个代价可恢复、且已被下面的提示明确告知（P33）。
+        // 自愈：用户重填密钥并保存后，密文被换成可解密的新密文，下一次 Load 该标志即为 false，自动保存恢复。
+        if (_settings is SettingsService keyImpl && keyImpl.LastLoadHadUndecryptableKeys)
+        {
+            var reason = "配置未自动保存：本机无法解密 settings.json 中的 API Key（文件可能来自其它账户或机器），" +
+                         "为避免把解不开的密文覆盖成空值，本次未写入；请到「设置」页重新填写密钥并保存。";
+            AppendLog(reason);
+            ShowTerminalStatus(reason, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+            // 同闩分支：本次未落盘，但仍把当前值视为基线，避免留下永久性的「用户手动改过」误判
+            _syncedProviderIndex = AiProviderIndex;
+            _undecryptableKeysNotified = true; // 已经明确说过一次，避免同一次导航再弹一遍
+            return;
+        }
+
         _model.DefaultFolder = SourceFolder;
         _model.OutputFolder = OutputFolder;
+        _model.BackupFolder = BackupFolder; // ③：备份文件夹与源/输出文件夹同等待遇持久化
         _model.NamingTemplate = NamingTemplate;
         _model.DryRun = DryRun;
         _model.UseExifDate = UseExifDate;
@@ -775,6 +1039,16 @@ public partial class OrganizeViewModel : ObservableObject
         await _settings.SaveAsync(_model);
         // 当次选择已落盘 → 与磁盘重新对齐，之后的「设置页改引擎」才应同步进整理页
         _syncedProviderIndex = AiProviderIndex;
+
+        // ⑤（第九轮 F3，前半段）：SaveAsync 里 DPAPI 加密失败会<b>降级为明文落盘</b>且保存仍然成功。
+        // 此前只有设置页的「保存设置」会读这个标志，而每批结束都跑的这条路径不读 →
+        // 密钥明文静默落盘，与设置页「保存结果会明确提示密钥可能以明文存储」的承诺矛盾。
+        if (_settings is SettingsService savedImpl && savedImpl.LastProtectFailed)
+        {
+            const string note = "注意：本机 DPAPI 加密不可用，本次保存的 API Key 可能以明文写入本机配置文件。";
+            AppendLog(note);
+            AppendTerminalNote(note, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+        }
     }
 
     private void OnProgress(OrganizeProgress p)
@@ -795,10 +1069,14 @@ public partial class OrganizeViewModel : ObservableObject
         // 保留上一次的值而不是清空——本批次仍在跑，旧值仍是「最近一分钟」的真实读数。
         if (p.AiRpm.HasValue) RateText = FormatRateLine(p.AiRpm.Value, p.AiLatencyMs, p.AiGateRpm);
 
-        // 限制界面集合增长：超出上限时滚动丢弃最旧一条，始终保留最近 MaxResults 条；
-        // 完整结果仍在服务端的 report.Results 与输出目录 rename_log.csv 中。
+        // 限制界面集合增长：超出上限时滚动丢弃最旧一条，始终保留最近 MaxResults 条。
+        // <b>但这只是界面层的取舍，不代表失败信息就此丢失</b>：失败条目同时进 _batchFailures
+        // （不设上限）并在批次结束时落盘（见 WriteFailureListAsync）——
+        // 此前失败清单既不在 rename_log.csv 里（内核只把成功/跳过写进 CSV）、又会被这里的上限顶掉，
+        // 几千张里失败几百张时用户拿不到完整清单（第九轮 R9-4）。
         if (p.Result != null)
         {
+            TrackBatchIssues(p.Result);
             if (Results.Count >= MaxResults) Results.RemoveAt(0);
             Results.Add(p.Result);
         }

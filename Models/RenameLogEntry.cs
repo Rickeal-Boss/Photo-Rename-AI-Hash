@@ -48,10 +48,14 @@ public class RenameLogEntry
     /// <summary>MD5 前 8 位：列表列宽有限，完整值另挂 ToolTip（避免 32 字符 Auto 列挤压文件名列）。</summary>
     public string Md5Short => string.IsNullOrEmpty(Md5) ? "" : Md5.Substring(0, Math.Min(8, Md5.Length));
 
-    /// <summary>成功态：已复制 / 已移动 / 已重命名（兼容「成功」字样）。</summary>
+    /// <summary>成功态：已复制 / 已移动 / 已重命名 / 已归档（兼容「成功」字样）。
+    /// <b>「已归档」必须在内</b>：内核的归档路径（<c>ExecuteAsync(isArchive: true)</c>）产出的状态是
+    /// 「已归档」，不是「已移动」。漏掉它会让归档结果在列表里落到 <see cref="IsNeutral"/>
+    /// （灰色中性图标）而不是成功图标——用户看到「已归档」配一个「不好不坏」的图标，与整理成功不一致。</summary>
     public bool IsSuccess =>
         Status.Contains("成功") || Status.Contains("已复制") ||
-        Status.Contains("已移动") || Status.Contains("已重命名");
+        Status.Contains("已移动") || Status.Contains("已重命名") ||
+        Status.Contains("已归档");
 
     /// <summary>失败态：错误 / 失败。</summary>
     public bool IsError => Status.Contains("错误") || Status.Contains("失败");
