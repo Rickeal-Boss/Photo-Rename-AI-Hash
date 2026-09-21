@@ -466,6 +466,10 @@ public partial class OrganizeViewModel : ObservableObject
         // 与 OverwriteNoBackupNotice「已覆盖输出目录中已存在的同名文件（该文件没有备份）」。
         //
         // 【匹配顺序即优先级，不要调整】「已覆盖」必须排在最前：
+        // 内核已确认（r10-dev-kernel，b426346 契约 / 16b930d 注释）：同一 entry 只会写一条 Message——
+        // OverwriteNoBackupNotice 与 degradeReason 出自互斥分支（degraded = 覆盖未生效、
+        // overwroteExisting = 覆盖已生效，见 OrganizeService.cs:840-859 与 :1216-1232），
+        // 故当前实现下三桶判定无歧义；下面的顺序属纵深防御，防的是将来措辞被改出歧义。
         // ① 语义上它与另外两类互斥且相反（覆盖已生效 vs 覆盖被降级），一旦被别的规则先吃掉，
         //    汇总就会把「内容被替换、不可恢复」说成「只改了名、内容还在」——P33 谎报；
         // ② 现有文案恰好互不包含（降级文案写的是「不会覆盖…」，无「已覆盖」子串），
