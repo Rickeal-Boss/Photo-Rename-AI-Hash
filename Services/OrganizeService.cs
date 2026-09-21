@@ -1030,11 +1030,18 @@ public sealed class OrganizeService : IOrganizeService
             // OperationMode 是 { Copy=0, Move=1, Rename=2 }，上面三个合法值已显式判完，
             // 故这里的语义是「兜底」而不是「Move」——此前它靠 else 承载合法的 Move，
             // 直接把 else 改成 Copy 会让正常选「移动」的用户变成复制（文件留在源目录），那是功能回归。
-            // 失效安全：按破坏面最小的 Copy 处理，绝不让它落到 Move（搬走源文件）或 Rename（就地改写），
-            // 两者在参数来源不可信时都可能造成用户没有预期的、应用内不可撤销的后果。
-            // 与 OpName 的兜底文案一致（同为「复制」），避免日志说一套、实际做另一套。
-            File.Copy(source, target, overwrite);
-            return "已复制";
+            //
+            // 兜底【不做任何文件操作】，直接抛错。理由：上面 :1006 的
+            //   overwrite = Conflict == Overwrite && Mode != Rename
+            // 对未定义值同样成立（未定义 != Rename），所以「未定义 Mode + 合法的 Overwrite」
+            // 这个组合下 overwrite 会被算成 true —— 此时即便按破坏面最小的 Copy 兜底，
+            // 也会 File.Copy(..., overwrite: true) 静默覆盖掉目标位置那个已存在的文件，
+            // 而备份只备份 source 不备份 target → 被覆盖者没有任何副本、不可恢复。
+            // 也就是说「落 Copy」并没有真正兜住，只是把「搬走源文件」换成了「覆盖目标文件」。
+            // 未定义输入应当「炸出来」而不是「猜一个」；且该路径在上游两层归一后不可达，不会误伤。
+            throw new PermanentOperationException(
+                $"未知的操作模式（{(int)req.Mode}）：配置可能已损坏，请到「设置」重新选择操作模式后再运行。",
+                isEnvironmentError: false);
         }
         catch (IOException ex) when (IsDiskFull(ex))
         {
