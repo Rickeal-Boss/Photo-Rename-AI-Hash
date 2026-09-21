@@ -120,6 +120,7 @@ public sealed class RenameLogService
                     int iNewName = Array.IndexOf(header, "NewName");
                     int iStatus = Array.IndexOf(header, "Status");
                     int iOriginalPath = Array.IndexOf(header, "OriginalPath");
+                    int iNewPath = Array.IndexOf(header, "NewPath");
                     int iFingerprint = Array.IndexOf(header, "Fingerprint");
 
                     // 兼容「旧表头 + 新记录」混合的日志：表头只在文件首次创建时写一次，
@@ -158,6 +159,13 @@ public sealed class RenameLogService
                             log.DoneByName.Add(cols[iNewName]);
                         if (iOriginalPath >= 0 && iOriginalPath < cols.Length && !string.IsNullOrEmpty(cols[iOriginalPath]))
                             log.DoneBySource.Add(cols[iOriginalPath]);
+                        // P1-2：目标路径索引（绝对路径）。续传的「重命名模式目标匹配」改用它，
+                        // 因为 DoneByName 只有文件名、不含目录，递归扫描下会把「另一个子目录里
+                        // 恰好同名的新文件」误判成已处理并永久跳过。
+                        // 空值不入索引：老日志 / 失败 / 「跳过(已存在)」记录可能没有 NewPath，
+                        // 把空串塞进集合会让路径为空的文件被无条件跳过。
+                        if (iNewPath >= 0 && iNewPath < cols.Length && !string.IsNullOrEmpty(cols[iNewPath]))
+                            log.DoneByNewPath.Add(cols[iNewPath]);
                     }
                 }
                 catch
@@ -283,11 +291,25 @@ public sealed class RenameLogService
 /// <summary>已完成文件索引：用于启动时断点续传跳过。键忽略大小写。</summary>
 public sealed class CompletedLog
 {
-    /// <summary>已成功生成的目标文件名（NewName）集合——覆盖「已正确命名」被重复处理的场景。</summary>
+    /// <summary>
+    /// 已成功生成的目标文件名（NewName）集合——覆盖「已正确命名」被重复处理的场景。
+    /// <b>注意：不再用于续传匹配</b>（P1-2）：它只有文件名、不含目录，递归扫描下会把
+    /// 「另一个子目录里恰好同名的新文件」误判成已处理并永久跳过。续传匹配改用
+    /// <see cref="DoneByNewPath"/>。此处仍照旧填充，供排查与将来可能的其它用途使用。
+    /// </summary>
     public HashSet<string> DoneByName { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>已成功处理的源文件路径（OriginalPath）集合——覆盖「复制/移动模式源文件仍在，重跑应跳过」的场景。</summary>
     public HashSet<string> DoneBySource { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 已成功生成的目标文件<b>绝对路径</b>（NewPath）集合——续传「重命名模式目标匹配」的判据。
+    /// 用绝对路径而非纯文件名：「当前路径 == 某条历史记录的目标路径」才是精确的
+    /// 「本文件已被本规则处理过」，既保住「重命名后重跑不重复处理」，
+    /// 又不会误伤同名的其它文件（详见调用处 OrganizeService.RunAsync 的注释）。
+    /// 空值不入集合（见 LoadRenameLogAsync）。
+    /// </summary>
+    public HashSet<string> DoneByNewPath { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 因「运行指纹」与本次参数不一致而未被计入索引的记录条数。

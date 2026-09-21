@@ -164,11 +164,17 @@ public sealed class OrganizeService : IOrganizeService
             order++;
             string curName = f.Name; // 当前文件名（含扩展名）
             // 续传跳过：源路径已成功处理（精确匹配，任意模式都安全）优先；
-            // 目标文件名匹配仅在「重命名」模式下作为辅助（重命名后文件名即新名，避免重复处理）。
-            // Copy/Move 模式不依赖 DoneByName，避免新加入且恰与旧目标同名的文件被误跳。
+            // 目标匹配仅在「重命名」模式下作为辅助（重命名后文件的当前路径即历史记录里的 NewPath，
+            // 避免重跑时把已改好名的文件再改一遍）。
+            // Copy/Move 模式不依赖目标匹配，避免新加入且恰与旧目标同名的文件被误跳。
+            //
+            // P1-2：<b>必须用绝对路径（NewPath）而不是纯文件名（NewName）比对</b>。
+            // 扫描是递归的，用纯文件名时「另一个子目录里恰好同名的新文件」会被误判成已处理
+            // → 永久静默跳过（每批都写「已完成」记录，于是它永远跳不过来）。
+            // 「当前路径 == 某条历史记录的目标路径」才是精确的「本文件已被本规则处理过」判据。
             bool doneBySource = completed.DoneBySource.Contains(f.Path);
-            bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(curName);
-            if (doneBySource || doneByName)
+            bool doneByTarget = req.Mode == OperationMode.Rename && completed.DoneByNewPath.Contains(f.Path);
+            if (doneBySource || doneByTarget)
             {
                 skippedAtStart++;
                 report.Skipped++;
@@ -386,7 +392,14 @@ public sealed class OrganizeService : IOrganizeService
                 }
                 catch (Exception ex)
                 {
-                    if (ex is OperationCanceledException) throw; // 取消立即向上传播，不进入重试逻辑
+                    // 取消立即向上传播，不进入重试逻辑。
+                    // P1-4：必须带 ct.IsCancellationRequested 过滤——与 PhotoService.ScanAsync /
+                    // ImageAnalysisHelper 的同仓写法一致。不加过滤时，任何<b>非用户取消</b>来源的
+                    // OCE（未走 AI 层包装的 HttpClient 超时、Task.Run(…, ct) 的取消态、第三方库超时）
+                    // 也会被直接抛出：末尾两条汇总报告被跳过，上层还显示「已取消。」
+                    // ——用户从未点过取消，界面却谎报，且剩余文件一行错误都没有。
+                    // 加了过滤后，这类 OCE 走正常的分档 + 重排队/记错误路径，与其它确定性失败一致。
+                    if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
                     attempts.TryGetValue(f.Path, out int n);
                     n++;
 
@@ -558,10 +571,11 @@ public sealed class OrganizeService : IOrganizeService
             {
                 ct.ThrowIfCancellationRequested();
                 await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
-                // 续传跳过：源路径精确匹配优先；目标文件名匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
+                // 续传跳过：源路径精确匹配优先；目标匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
+                // 同 RunAsync：用绝对路径（NewPath）而非纯文件名比对，理由见 RunAsync 内注释（P1-2）。
                 bool doneBySource = completed.DoneBySource.Contains(f.Path);
-                bool doneByName = req.Mode == OperationMode.Rename && completed.DoneByName.Contains(f.Name);
-                if (doneBySource || doneByName)
+                bool doneByTarget = req.Mode == OperationMode.Rename && completed.DoneByNewPath.Contains(f.Path);
+                if (doneBySource || doneByTarget)
                 {
                     report.Skipped++;
                     done++;
@@ -602,7 +616,38 @@ public sealed class OrganizeService : IOrganizeService
                     }
 
                     string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
-                    if (!req.DryRun) Directory.CreateDirectory(destDir);
+                    if (!req.DryRun)
+                    {
+                        // P2-5：建目录失败要包装成「环境级」永久错误，让归档也能早停。
+                        // 此前它走下方的通用 catch：目标盘写满 / 无权限时，1000 张的目录会刷 1000 行
+                        // 同因错误，还要把每张图的 MD5 都白读一遍。整理模式的对等场景
+                        // （ExecuteAsync 的 IOException when IsDiskFull）已是环境级中止口径，
+                        // 归档这里对齐它——建目录失败对整批都成立，继续处理没有意义。
+                        try
+                        {
+                            Directory.CreateDirectory(destDir);
+                        }
+                        // 异常变量刻意不叫 ex：外层 try 块里已有 `var ex = _photo.GetDateTaken(...)`，
+                        // 同名会在嵌套作用域触发 CS0136。
+                        catch (IOException ioEx) when (IsDiskFull(ioEx))
+                        {
+                            uint hr = unchecked((uint)ioEx.HResult);
+                            throw new PermanentOperationException(
+                                $"归档失败：创建目标目录时磁盘空间不足（0x{hr:X8}）：{destDir}。" +
+                                "请清理磁盘或更换输出文件夹后再试。",
+                                isEnvironmentError: true, inner: ioEx);
+                        }
+                        catch (UnauthorizedAccessException authEx)
+                        {
+                            // 权限不足（只读属性 / ACL / 受保护目录 / 被策略拒绝）。
+                            // 与整理模式 ExecuteAsync 的同类处理不同：那里是逐文件失败（不熔断），
+                            // 而归档的目标目录由「输出目录 + 日期」算出，同一个根因对整批都成立，
+                            // 故这里按环境级中止，避免刷满 N 行同因错误。
+                            throw new PermanentOperationException(
+                                $"没有权限创建归档目录：{destDir}。请检查输出文件夹的权限或以管理员身份运行。",
+                                isEnvironmentError: true, inner: authEx);
+                        }
+                    }
 
                     var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
                     if (resolved == null)
@@ -670,7 +715,10 @@ public sealed class OrganizeService : IOrganizeService
                 }
                 catch (Exception ex)
                 {
-                    if (ex is OperationCanceledException) throw; // 与 RunAsync 对齐：取消立即向上传播，不记成「错误」
+                    // 与 RunAsync 对齐：用户取消立即向上传播，不记成「错误」。
+                    // 同样必须带 ct.IsCancellationRequested 过滤（理由见 RunAsync 内注释，P1-4）：
+                    // 否则非取消来源的 OCE 会让归档在 N 个文件处戛然而止且谎报「已取消」。
+                    if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
                     report.Failed++;
                     entry = new RenameLogEntry
                     {
@@ -783,8 +831,17 @@ public sealed class OrganizeService : IOrganizeService
         // _pts 可能为 null（归档循环等未创建令牌的路径），故判空。
         if (_pts != null) await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
 
+        // P1-3 / P1-3b：只有「本批次真的会用到 AI 结果」时才发起识别。
+        // needsAi = 已创建引擎 && 模板含 AI 占位符 && 非模拟运行（判据见 TemplateWillUseAi）。
+        // 此前只要 ai != null 就无条件调用：模板不含 AI 占位符时逐图付费却完全不影响文件名；
+        // 模拟运行同样照调不误，而 UI 写的是「仅预览结果」——用户理解为不花钱的预览，实际每张都计费。
+        // 不调 AI 时 f.Category / Scene / … 保持原值（空），由 BuildName 的 Ai() 落成既有约定的
+        // 「unknown」占位，模拟结果里这些字段是可辨识的空值，不会伪装成真实识别结果。
+        bool needsAi = ai != null && TemplateWillUseAi(req);
+
         // AI 识别（结果缓存：重试复用，避免重复计费）
-        if (ai != null)
+        // 条件里保留 ai != null（needsAi 已蕴含它，但可空流分析只认显式的空值判断，省掉会报 CS8602）
+        if (ai != null && needsAi)
         {
             if (!aiCache.TryGetValue(f.Path, out var res))
             {
@@ -819,14 +876,42 @@ public sealed class OrganizeService : IOrganizeService
         // 生成新名：未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
         // 模板为空（用户清空「命名规则」输入框，或 settings.json 中该字段为 null）时回退到默认模板：
         // 否则 BuildName 返回空串，最终文件名只剩扩展名（如 ".jpg"），批量文件还会互相撞名。
-        string template = ai != null && !string.IsNullOrWhiteSpace(req.NamingTemplate)
-            ? req.NamingTemplate
-            : "{yyyy}{MM}{dd}_{name}_{n}";
+        //
+        // P1-3 配套：回退判据由「ai != null」改为「本批次是否真会产出 AI 值」。
+        // ai 现在在「模板不含 AI 占位符」「模拟运行」两种情况下也为 null（见 TemplateWillUseAi），
+        // 沿用 ai != null 会把用户自己写的、根本不需要 AI 的模板（如 {yyyy}_{name}_{n}）
+        // 强行换成默认模板 —— 那等于抹掉用户填的命名规则，是比原问题更严重的回归。
+        // 只有「模板确实用到 AI 占位符、而本批次拿不到 AI 值」才回退（即引擎未启用）。
+        // 模拟运行刻意<b>不</b>回退：按 P1-3b 用既有约定的 unknown 占位填 AI 字段（见 BuildName 的 Ai()），
+        // 让用户看清「哪些字段在模拟下没有真实值」，而不是整个模板被悄悄换掉——
+        // 后者会让模拟结果与实际运行的命名规则完全不同，预览也就失去意义。
+        bool templateNeedsAi = TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders);
+        bool aiValueUnavailable = templateNeedsAi && !needsAi && !req.DryRun;
+        string template = string.IsNullOrWhiteSpace(req.NamingTemplate) || aiValueUnavailable
+            ? "{yyyy}{MM}{dd}_{name}_{n}"
+            : req.NamingTemplate;
         string baseName = BuildName(f, template, when, index);
         string candidate = baseName + Path.GetExtension(f.Name);
 
+        // P0-1：重命名模式按「文件自身所在目录」定输出目录，而不是一律用源根目录。
+        // 扫描是递归的（PhotoService.EnumerateImages），源根目录下的子目录照片也会被枚举进来；
+        // 若把它们的 target 一律拼到源根目录，File.Move 会把子目录里的照片搬到根上
+        // ——目录树被静默扁平化，而应用内没有撤销功能、rename_log.csv 也不记录目录回退所需的信息。
+        // 「重命名」的语义是原地改名，不是「集中到源根目录」，故就地改名。
+        // Copy / Move 模式仍是「送到输出目录」，沿用整批唯一的 output。
+        //
+        // 注意两个<b>不能跟着改</b>的点（改动前务必先读）：
+        //  1. 运行指纹（ComputeFingerprint 的 Field(output)）必须继续用整批唯一的根目录值：
+        //     若把每个文件各自的目录传进去，同一批会算出 N 个指纹，历史记录与下次运行永远对不上
+        //     → 续传永久失效（那是比本缺陷更严重的回归）。
+        //  2. 重命名日志仍写源根目录 output（单一索引文件）：LoadRenameLogAsync 本就递归收集，
+        //     写根目录更省事，也让「同一批次的所有记录集中可查」。
+        string outDir = req.Mode == OperationMode.Rename
+            ? (Path.GetDirectoryName(f.Path) ?? output)
+            : output;
+
         // 目标冲突检测（P2-7：一并取回目标 MD5，ExecuteAsync 直接复用，避免重复计算）
-        var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(output, candidate, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
+        var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(outDir, candidate, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
         if (resolved == null)
         {
             var skip = new RenameLogEntry
@@ -981,7 +1066,7 @@ public sealed class OrganizeService : IOrganizeService
     private const int ErrorSharingViolation = unchecked((int)0x80070020);
     private const int ErrorLockViolation = unchecked((int)0x80070021);
 
-    /// <summary>备份文件名去重的最大尝试次数（原名 + _1…_9998），与 <see cref="SuffixUntilFreeAsync"/> 的 9999 上限一致。</summary>
+    /// <summary>备份文件名去重的最大尝试次数（原名 + _1…_9999），与 <see cref="SuffixUntilFreeAsync"/> 的 9999 上限一致。</summary>
     private const int MaxBackupNameAttempts = 9999;
 
     /// <summary>
@@ -1056,7 +1141,12 @@ public sealed class OrganizeService : IOrganizeService
         string ext = Path.GetExtension(source);
         string dest = Path.Combine(backupDir, Path.GetFileName(source));
 
-        for (int i = 1; i <= MaxBackupNameAttempts; i++)
+        // P2-1：上界是 MaxBackupNameAttempts + 1。
+        // 循环内第 i 次「先拷 dest、失败后再赋 stem_i」，故循环跑满 N 次时实际尝试的是
+        // 原名 + _1…_{N-1}；写成 i <= MaxBackupNameAttempts 的话最后一次赋值出的
+        // _9999 从未被 File.Copy 尝试过 —— 平白少一个候选，且与 SuffixUntilFreeAsync
+        // （循环结束后补查 _9999）的口径不一致。+1 后尝试集合为 原名 + _1…_9999，与文案自洽。
+        for (int i = 1; i <= MaxBackupNameAttempts + 1; i++)
         {
             ct.ThrowIfCancellationRequested(); // 只能在两次尝试之间检查：拷贝过程本身不可中断
             try
@@ -1072,7 +1162,7 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         throw new IOException(
-            $"备份目录中没有可用文件名（{Path.GetFileName(source)} 及其 _1…_{MaxBackupNameAttempts - 1} 后缀均已被占用）。");
+            $"备份目录中没有可用文件名（{Path.GetFileName(source)} 及其 _1…_{MaxBackupNameAttempts} 后缀均已被占用）。");
     }
 
     /// <summary>
@@ -1086,6 +1176,16 @@ public sealed class OrganizeService : IOrganizeService
         // 首选：Win32 错误码（ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS）——与既有 IsDiskFull 同一套机制
         if (ex.HResult == ErrorFileExists || ex.HResult == ErrorAlreadyExists)
             return true;
+
+        // P1-1：兜底之前必须先排除「磁盘 / 内存不足」。
+        // 备份目录在 UNC 共享或配额受限卷上时，EnsureEnoughFreeSpace 会按设计降级跳过
+        // （见该方法注释：UNC / 无盘符 / DriveInfo 不可用一律放行），于是 File.Copy 可能
+        // 已创建目标文件、写入一部分之后才失败（0x80070070）并留下一个不完整文件。
+        // 此时若直接 File.Exists 兜底：partial 文件存在 → 误判成「目标已存在」→ 换 _1…_9999
+        // 反复往一张满盘上拷，既把备份盘彻底写满、留下上千个垃圾文件，
+        // 又把真因「磁盘空间不足」谎报成「没有可用文件名」（用户会去删备份而不是去清空间）。
+        // 判序：HResult（精确）→ IsDiskFull（真写失败）→ File.Exists（兜底）。
+        if (IsDiskFull(ex)) return false;
 
         // 兜底：.NET 也可能抛不带 Win32 HResult 的通用 IOException（HResult = COR_E_IO 0x80131620），
         // 此时上面的判定恒不命中 → 循环第一次就抛出 → 落到「备份失败」永久错误 → 重名备份功能回归。
@@ -1302,6 +1402,15 @@ public sealed class OrganizeService : IOrganizeService
         if (built.Length > MaxBaseNameLength)
             built = built.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.');
 
+        // P1-5：截断之后再对<b>结果整体</b>做一次「路径级」净化。
+        // 上面只对每个占位符的<b>值</b>做了 San()，模板自身的字面量（"../"、"..\..\"、"C:\Windows\"）
+        // 是原样保留的：Path.Combine 会把 ".." 解析到输出目录之外，遇到绝对路径甚至按 .NET 语义
+        // 直接返回该绝对路径 —— 用户照片被静默写到预期之外的位置（叠加重命名模式的 File.Move 更严重）。
+        // 这里统一剥离目录分隔符与盘符，保证 Path.Combine(output, candidate) 的结果永远落在 output 之内。
+        // 选中「剥离」而不是「报错拒绝整批」，是为了与既有 Sanitize 口径一致：
+        // 非法字符一律替换而非中止（中止会让用户为一个字符重填整个模板并重启批次）。
+        built = string.Concat(built.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, ':'));
+
         return built;
     }
 
@@ -1364,6 +1473,24 @@ public sealed class OrganizeService : IOrganizeService
             if (template.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0) return true;
         return false;
     }
+
+    /// <summary>
+    /// 本批次是否「真的会用到 AI 结果」：命名模板含至少一个 AI 占位符，且不是模拟运行。
+    /// </summary>
+    /// <remarks>
+    /// 三个用途共用这一个判据，避免三处各写一份导致漂移：
+    /// <list type="bullet">
+    /// <item><description><see cref="CreateAi"/>：为 false 时不构造引擎、<b>也不做 Key / 端点 / 模型名校验</b>
+    /// （P1-3：模板不用 AI 占位符时，缺 Key 不该把整批拦下）。</description></item>
+    /// <item><description><see cref="ProcessOneAsync"/>：为 false 时不发起 AnalyzeAsync
+    /// （P1-3 / P1-3b：既不付费空转，也不在模拟运行下真实计费）。</description></item>
+    /// <item><description>运行指纹（<see cref="ComputeFingerprint"/> 的 usesAiPlaceholders）
+    /// 用的是同一个「模板是否含 AI 占位符」判定，只是<b>不含</b> DryRun 条件
+    /// ——模拟运行与实际运行的输出文件名必须一致，否则续传索引会失配。</description></item>
+    /// </list>
+    /// </remarks>
+    private static bool TemplateWillUseAi(OrganizeRequest req)
+        => !req.DryRun && TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders);
 
     /// <summary>
     /// 计算本次运行的「参数指纹」：把所有<b>影响输出文件名或目标路径</b>的参数拼成一个字符串。
@@ -1432,6 +1559,14 @@ public sealed class OrganizeService : IOrganizeService
     private IImageAnalysisService? CreateAi(OrganizeRequest req)
     {
         if (req.AiProvider == AiProvider.None) return null;
+
+        // P1-3 / P1-3b：本批次根本用不到 AI 结果时不创建引擎，也<b>不做</b>下面的 Key / 端点 / 模型名校验。
+        // 判断口径见 <see cref="TemplateWillUseAi"/>。
+        // ① 命名模板不含任何 AI 占位符时，BuildName 不会把 AI 字段写进文件名（见 AiPlaceholders），
+        //    调用纯属付费空转；此前还会因为 Key 未配置而把「根本不需要 AI」的整批直接拦下。
+        //    这与「条件性指纹」是同一条不变量：模板不用 AI 占位符 ⇒ 引擎 / 模型 / 语言都不影响输出。
+        // ② 模拟运行（DryRun）承诺「不改动任何文件，仅预览结果」，不应产生真实计费请求。
+        if (!TemplateWillUseAi(req)) return null;
 
         // 以下三处「配置缺失」与 AI 层（ImageAnalysisHelper 的端点 / Key / 模型名 / https 校验）
         // 同口径：空配置对每个文件都会以完全相同的方式失败，重试没有任何成功可能，
