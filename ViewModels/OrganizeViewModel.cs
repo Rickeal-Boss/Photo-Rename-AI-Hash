@@ -178,9 +178,10 @@ public partial class OrganizeViewModel : ObservableObject
     // ── AI 字段可用性提示（「开始整理」按钮上方的 Warning InfoBar + 日志框） ──
     // 模板里写了 AI 占位符、而本次运行拿不到真实识别值时，必须在<b>开始之前</b>说清会发生什么，
     // 否则用户只能在结果列表里发现「文件名不是我写的模板」（P33 谎报）。两种后果完全不同，故文案分两支：
-    //   ① 模拟运行：内核完全不调用 AI，AI 占位符落成「unknown + 该文件在批次中的序号(4 位)」，
-    //      形如 unknown0007（带序号是必要的：默认模板六个占位符全是 AI 字段、不含 {name}/{n}，
-    //      若一律填同一个 unknown，同一批每个文件的候选名一字不差 → 预览全变 _1/_2/_3 楼梯）。
+    //   ① 模拟运行：内核完全不调用 AI，AI 占位符落成「unknown + 批次序号(4 位) + 字母后缀 a/b/c…」，
+    //      形如 unknown0007a / unknown0007b（每文件内 6 个 AI 字段各占一位）。
+    //      历史版本曾填同一字符串 → 复读机「unknown0018unknown0018…×6」；再之前是「_1/_2/_3 楼梯」，
+    //      都被这一条规则修掉了。
     //   ② 实际执行：内核会把整条模板换成默认模板 {yyyy}{MM}{dd}_{name}_{n}
     //      （见 ProcessOneAsync 的 aiValueUnavailable 回退），用户填的命名规则<b>完全不生效</b>——
     //      比模拟运行更彻底，此前却一个字都没提示（第八轮 P1-2 / 元模式 E）。
@@ -257,7 +258,8 @@ public partial class OrganizeViewModel : ObservableObject
         {
             // ① 模拟运行 + 缺 Key：不调 AI、AI 字段落占位值；且切到实跑会整批中止
             hint = "模拟运行不会调用识别接口：模板里的 AI 字段（category / scene / people / action / subtitle / source）"
-                   + "将以 unknown0007 这类「unknown + 批次序号」占位值显示，不是真实识别结果；"
+                   + "将以 unknown0007a / unknown0007b / … 这类「unknown + 批次序号 + 占位符位置 (a/b/c…)」"
+                   + "占位值显示，同一文件 6 个 AI 字段各占一位、互不相同，不是真实识别结果；"
                    + "且当前引擎尚未配置 API Key，切到「实际执行」时会因缺少密钥整批中止。";
         }
         else if (usesAi && !DryRun && provider == AiProvider.None)
