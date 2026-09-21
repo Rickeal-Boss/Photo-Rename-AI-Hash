@@ -44,7 +44,14 @@ public partial class OrganizeViewModel : ObservableObject
         NamingTemplate = _model.NamingTemplate;
         DryRun = _model.DryRun;
         UseExifDate = _model.UseExifDate;
-        AiProviderIndex = System.Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
+        // 与下方 OperationMode / ConflictStrategy 同一口径：越界值落到失效安全档，而【不】钳到枚举上界。
+        // AiProvider 的上界 Nvidia 会把一次「配置损坏」变成「调用付费引擎」（没配 Key 时还会把整批拦下）；
+        // 落到 None（不启用识别）最坏只是不调 AI，且实跑会命中 AI 字段回退提示，用户可见。
+        // 归一规则必须与 <see cref="SelectedProvider"/>、<see cref="SyncProviderFromDisk"/> 完全一致，
+        // 否则同一份状态在两处含义不同（第八轮 P3-1）。
+        AiProviderIndex = System.Enum.IsDefined(typeof(AiProvider), _model.AiProvider)
+            ? (int)_model.AiProvider
+            : (int)AiProvider.None;
         _syncedProviderIndex = AiProviderIndex; // 构造即视为已与磁盘对齐
         // P1-1：与 AiProvider 同一套路 —— System.Text.Json 数字→枚举不校验定义域，
         // settings.json 里手工编辑出的 "OperationMode": 7 会被原样读成越界枚举：
@@ -643,9 +650,13 @@ public partial class OrganizeViewModel : ObservableObject
         {
             // P2-4：System.Text.Json 数字→枚举不校验定义域（settings.json 写 "AiProvider": 99 不报错）。
             // 越界值会让下方 ComboBox 无匹配项而空白，也会让 CreateAi 抛「已选择识别引擎「99」但未配置 API Key」。
-            // 在读取处就钳到枚举实际范围：既覆盖下面的比较，也覆盖赋值给 AiProviderIndex 的那一支
-            // （只钳赋值处不够——disk=99 与钳后的当前值不等，会被误判成「磁盘值有变」而把越界值再写进 VM）。
-            int disk = System.Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
+            // 在读取处就归一：既覆盖下面的比较，也覆盖赋值给 AiProviderIndex 的那一支
+            // （只归一赋值处不够——disk=99 与归一后的当前值不等，会被误判成「磁盘值有变」而把越界值再写进 VM）。
+            // 归一规则与构造 / <see cref="SelectedProvider"/> 完全一致：越界值落到 AiProvider.None，
+            // 不钳到枚举上界 Nvidia —— 同一份状态在全文件只有一种含义。
+            int disk = System.Enum.IsDefined(typeof(AiProvider), _model.AiProvider)
+                ? (int)_model.AiProvider
+                : (int)AiProvider.None;
             if (disk == AiProviderIndex)
             {
                 _syncedProviderIndex = disk; // 已一致（含「手动值刚被持久化」的情况）：重新对齐基线
