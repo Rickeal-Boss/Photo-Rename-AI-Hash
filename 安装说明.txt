@@ -24,7 +24,8 @@ Install.bat 是分两步找安装包的，两步都不写死版本号，所以�
   1. 在 Install.bat 上点击鼠标「右键」
   2. 选择「以管理员身份运行」
      —— 证书需要写入系统级存储，必须管理员权限
-  3. 看到 "Done!" 即安装完成
+  3. 看到「安装完成！请从开始菜单启动 "PhotoRenameAIHash"」即安装成功
+     （脚本还会打印一行「已安装: PhotoRenameAIHash <版本号>」，可用它确认版本）
      之后可在开始菜单找到 PhotoRenameAIHash
 
 

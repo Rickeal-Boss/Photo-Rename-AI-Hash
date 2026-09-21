@@ -3,3 +3,6 @@
 # 故统一为 LF。目的不是"记事本能不能显示"，而是防不同开发者 core.autocrlf
 # 设置不同（Windows 默认 true、跨平台可能 false）导致整文件被重写、diff 变噪音。
 安装说明.txt text eol=lf
+# 批处理必须 CRLF：cmd.exe 对纯 LF 下的 goto / 标签 / 括号块解析不可靠，
+# 且此处不锁会被各开发者的 core.autocrlf 差异改写成 LF，装包脚本静默失效。
+Install.bat text eol=crlf
