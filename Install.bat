@@ -15,11 +15,22 @@ echo.
 echo [1/3] 检查运行环境与安装文件 ...
 REM --- 管理员权限自检：写 Cert:\LocalMachine\* 必须提权。
 REM     没有自检时，非管理员双击会在第 2 步静默失败，一路走到安装才抛看不懂的错。
-REM     net session 在少数机器上因 Server 服务被禁用而误判，故用 fltmc 做或运算兜底。
+REM     判据 1（主）：进程完整性级别必须是 High Mandatory Level（SID S-1-16-12288）。
+REM       whoami /groups 的输出里带这个 SID，当且仅当进程【已提权】——UAC 拆分令牌下
+REM       非提权的管理员进程只会拿到 Medium（S-1-16-8192）。这是业界公认的判据：
+REM       SID 不随系统语言变化，且它读的是令牌本身，不依赖某个服务是否可用。
+REM     判据 2（兜底）：net session。它在管理员下可能因 Server 服务被禁用而返回非零
+REM       （把管理员漏判成非管理员），但非管理员下几乎不可能返回 0（不会把非管理员
+REM       误判成管理员），所以放在 OR 的兜底位是安全的。
+REM     ⚠ 原实现用 fltmc 做 OR 兜底：fltmc 无参调用（仅列出已加载的过滤器）在部分
+REM       Windows 上对【非提权】进程同样返回 0，OR 逻辑下 ISADMIN 恒为 1 —— 自检
+REM       退化成装饰（恒真断言）。后果是非管理员一路走到第 2 步证书导入才报
+REM       Access is denied / 证书导入失败，而下面这段「请右键以管理员身份运行」
+REM       永远显示不出来。故移除 fltmc 判据，改用上面的完整性级别判据。
 set "ISADMIN=0"
-net session >nul 2>&1
+whoami /groups | findstr /c:"S-1-16-12288" >nul 2>&1
 if not errorlevel 1 set "ISADMIN=1"
-fltmc >nul 2>&1
+net session >nul 2>&1
 if not errorlevel 1 set "ISADMIN=1"
 if "%ISADMIN%"=="0" (
   echo.
@@ -103,12 +114,15 @@ echo   OK.
 echo [3/3] 安装 PhotoRenameAIHash ...
 echo   （Windows App SDK 与 .NET 8 运行时已打进 .msix，无需另行安装任何运行时。）
 REM 不直接抛 Windows 的英文原文：先抽取 0x 错误码，再给出中文含义，原文附在最后备查。
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { Add-AppxPackage -Path '%APPMSIX%'; exit 0 } catch { $s=$_.Exception.Message; $c=([regex]::Match($s,'0x[0-9A-Fa-f]{8}')).Value; if(-not $c){$c='(未识别)'}; $map=@{'0x800B0109'='证书未受信任：请确认 .cer 与 .msix 来自同一次构建，且已导入 TrustedPeople';'0x80073D02'='应用正在运行：请完全退出 PhotoRenameAIHash 后重试';'0x80073CF3'='依赖校验或包冲突失败（常见于已装更高版本）：请先卸载旧版本';'0x80073CFB'='包已存在（常见于重复安装同一版本）：请先卸载旧版本，或换更高版本号的包'}; $h=$map[$c]; if(-not $h){$h='未收录的错误码，请结合下方原文排查'}; Write-Host ('  [失败] 错误码: ' + $c); Write-Host ('  [含义] ' + $h); Write-Host ('  [原文] ' + $s); exit 3 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { Add-AppxPackage -Path '%APPMSIX%'; exit 0 } catch { $s=$_.Exception.Message; $c=([regex]::Match($s,'0x[0-9A-Fa-f]{8}')).Value; if(-not $c){$c='(未识别)'}; $map=@{'0x800B0109'='发布者不被信任，三种成因：① 证书未导入 TrustedPeople；② .cer 与 .msix 不是同一次构建（指纹不一致）；③ MSIX 清单里的 Identity Publisher 与签名证书 Subject 不一致 —— 注意③不是证书不受信任而是发布者不匹配，CI 已加断言拦截，遇到请换用同一次构建的完整三件套';'0x80073D02'='应用正在运行：请完全退出 PhotoRenameAIHash 后重试';'0x80073CF3'='依赖校验或包冲突失败（常见于已装更高版本）：请先卸载旧版本';'0x80073CFB'='包已存在（常见于重复安装同一版本）：请先卸载旧版本，或换更高版本号的包'}; $h=$map[$c]; if(-not $h){$h='未收录的错误码，请结合下方原文排查'}; Write-Host ('  [失败] 错误码: ' + $c); Write-Host ('  [含义] ' + $h); Write-Host ('  [原文] ' + $s); exit 3 }"
 if errorlevel 1 (
   echo.
   echo   安装未完成。
-  echo   若错误码为 0x800B0109，请核对上面「已信任证书指纹」与 .msix
-  echo   实际签名的证书指纹是否一致（两者不一致说明 .cer 与 .msix 不是同一次构建）。
+  echo   若错误码为 0x800B0109：先核对上面「已信任证书指纹」与 .msix 实际签名的
+  echo   证书指纹是否一致（不一致 = .cer 与 .msix 不是同一次构建，请重新下载完整
+  echo   三件套）；若两者一致仍然报错，则是包内清单的 Identity Publisher 与签名证书
+  echo   Subject 不一致 —— 这属于【发布者不匹配】，不是「证书不受信任」，换信任存储
+  echo   或重复导入证书都修不好，只能换用 Publisher 与证书 Subject 一致的包。
   echo.
   pause
   exit /b 1

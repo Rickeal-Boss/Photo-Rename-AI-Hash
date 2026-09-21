@@ -1,0 +1,12 @@
+# 上一次【已发布】的 MSIX 版本号（四段）。
+# CI（.github/workflows/build.yml 的版本断言步）以此为基线做单调性护栏：
+# Package.appxmanifest 的 Identity Version 必须【严格大于】本值，否则阻断构建。
+# 原因：同版本 / 更低版本的 MSIX 覆盖安装必然报 0x80073CFB（包已存在），
+# 而「manifest 版本 == AppSettings 版本」这种一致性断言对此完全无感。
+#
+# ⚠ 本常量【人工维护】，无外部发布记录可查。维护规则：
+#   1) 发版成功后，把下面的数字改成当次发布的版本号；
+#   2) 忘记更新 → 护栏滞后一轮，不会误红（下一轮抬版本时会被发现）；
+#   3) 忘记抬 Package.appxmanifest 的版本号 → CI 红灯，报错信息会直接指名本文件。
+# 抬版本时另需同步 Models/AppSettings.cs 的 AppVersion（前三段），否则先红在一致性断言上。
+3.1.4.0

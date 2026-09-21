@@ -112,6 +112,47 @@ jobs:
 
           if ($m3 -ne $av) { Write-Error ("版本不一致：Package.appxmanifest Version=" + $mv + "（前三段 " + $m3 + "）!= Models/AppSettings.cs AppVersion=" + $av + "。发版时需同步修改两处。"); exit 1 }
 
+          # ------------------------------------------------------------------
+          # 单调性护栏（阻断式）：上面只校验「manifest 前三段 == AppSettings」这一种
+          # 【内部一致性】，完全不校验版本是否比上一次已发布的【更高】。而 MSIX 的
+          # 升级语义恰恰只认单调性：同版本（或更低版本）覆盖安装一律被平台拒绝，
+          # 报 0x80073CFB（包已存在）—— 用户侧表现是「装不上」，而 CI 侧全绿。
+          # 基线放在仓库根 LAST_RELEASE_VERSION（纯文本四段号）。
+          #
+          # ⚠ 该常量【必须人工维护】：没有可查询的发布记录（走 Release 之前没有），
+          #   引入外部查询只会换来一个新的失败面与额外权限。维护规则：
+          #     - 发版成功后，把 LAST_RELEASE_VERSION 更新为当次发布的版本号；
+          #     - 忘记更新 → 护栏滞后一轮，不会误红（可接受，下一次抬版本时被发现）；
+          #     - 忘记抬版本号 → 本步红灯，报错信息直接指名 —— 这正是它存在的意义。
+          #   「CI 因版本未递增而红」不是噪声，是交付前唯一能拦住 0x80073CFB 的地方。
+          #
+          # 文件缺失 / 内容里取不到四段号 → 一并阻断：护栏失去基线时静默通过，
+          # 等于把「版本必须递增」这条不变量重新变回「靠人记得」。
+          # ------------------------------------------------------------------
+          $lastFile = Join-Path $env:GITHUB_WORKSPACE "LAST_RELEASE_VERSION"
+          if (-not (Test-Path $lastFile)) { Write-Error ("缺少 " + $lastFile + "：版本单调性护栏没有基线。请创建该文件并写入上一次【已发布】的四段版本号（如 3.1.4.0）。"); exit 1 }
+          $lastRaw = [System.IO.File]::ReadAllText($lastFile)
+          $lastM = [regex]::Match($lastRaw, '[0-9]+(\.[0-9]+){3}')
+          if (-not $lastM.Success) { Write-Error ($lastFile + " 内容中找不到四段版本号（实际内容：" + $lastRaw.Trim() + "）：请写入形如 3.1.4.0 的上次发布版本号。"); exit 1 }
+          $last = $lastM.Value
+          $mvParts = @($mv -split '\.')
+          $lastParts = @($last -split '\.')
+          $cmp = 0
+          for ($vi = 0; $vi -lt 4; $vi++) {
+            $d = [int64]$mvParts[$vi] - [int64]$lastParts[$vi]
+            if ($d -ne 0) { $cmp = $d; break }
+          }
+          $cmpName = if ($cmp -gt 0) { "newer" } elseif ($cmp -lt 0) { "older" } else { "equal" }
+          ("VERSION last_release=" + $last + " compare=" + $cmpName) >> ci-diagnostics.log
+          if ($cmp -le 0) {
+            Write-Error ("版本号未递增：Package.appxmanifest Version=" + $mv + " 必须严格大于 LAST_RELEASE_VERSION=" + $last + "（当前判定：" + $cmpName + "）。同版本/更低版本的 MSIX 覆盖安装必然被平台拒绝（0x80073CFB，包已存在），CI 放行即等于交付即失败。请同步抬高 Package.appxmanifest 的 Identity Version 与 Models/AppSettings.cs 的 AppVersion；发版成功后再把 LAST_RELEASE_VERSION 更新为本轮发布版本。")
+            exit 1
+          }
+
+          # 把源码侧确认过的版本写进环境，供后面「包内生成的 AppxManifest.xml」断言步
+          # 直接读取 —— 避免在那里再写死一份，随每次发版漂移。
+          Add-Content -Path $env:GITHUB_ENV -Value ("EXPECTED_MSIX_VERSION=" + $mv)
+
           "CHECKPOINT:version-assert-done" >> ci-diagnostics.log
 
 
@@ -149,21 +190,39 @@ jobs:
                         Where-Object { $_.Line -notmatch '^\s*(//|///|\*)' })
           $hasPath = ($pathHits.Count -gt 0)
 
-          # 3b) 弱信号（非阻断）：只有 using Windows.Storage; 而调用点还没出现上述 API。
+          # 3b) 弱信号（非阻断）：using Windows.Storage（含子命名空间）但调用点还没出现
+          #     上述路径式 API 时，提示确认是否需要 broadFileSystemAccess。
           #     它不进 #3 的阻断判定，因为 FolderPicker 返回的 StorageFolder 自带 Broker 令牌、
           #     不受 bFSA 门控（Views/OrganizePage.xaml.cs 就是这么用的）——判成红灯会误伤合法用法。
           #     所以这里只发 ::warning:: 让人看见，不拦发布。
+          #
+          #     ⚠ 原正则 'using\s+Windows\.Storage\s*;' 要求 Windows.Storage 之后紧跟分号，
+          #        而仓库实际用的是【子命名空间】：Helpers/ImageDecoder.cs 的
+          #        Windows.Storage.Streams、Views/OrganizePage.xaml.cs 的
+          #        Windows.Storage.Pickers —— 命中数恒为 0，这条 warning 从未发出过
+          #        （真·恒绿空转：判据永远不成立，绿勾不代表检查过）。
+          #        现改为允许子命名空间，并对已确认不受 bFSA 门控的两个子命名空间
+          #        （Streams = IBuffer/流类型；Pickers = FolderPicker，其返回值自带令牌）
+          #        设白名单过滤，其余子命名空间与裸 using Windows.Storage; 一律告警。
+          #        两个计数都进 CAPGUARD 日志：usingStorage 证明扫描真的命中了文件，
+          #        usingStorageWarn 才是最终告警面 —— 只记后者会重演「恒 0 看不出空转」。
+          $usingWhitelist = @('Streams', 'Pickers')
           $usingHits = @(Get-ChildItem -Path . -Recurse -Filter *.cs |
                          Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
-                         Select-String -Pattern 'using\s+Windows\.Storage\s*;' |
+                         Select-String -Pattern 'using\s+Windows\.Storage(\.[\w.]+)?\s*;' |
                          Where-Object { $_.Line -notmatch '^\s*(//|///|\*)' })
-          if ($usingHits.Count -gt 0) {
-            Write-Host ("::warning::检测到 using Windows.Storage;（" +
-              (($usingHits | ForEach-Object { $_.Filename + ':' + $_.LineNumber }) -join ', ') +
-              "）：若用于 GetXxxFromPathAsync 这类路径式访问，必须先恢复 broadFileSystemAccess 声明并引导用户授权（该能力默认 Off 且授权后需重启）；若只用来接 FolderPicker 的返回值则无需处理")
+          $usingWarn = @($usingHits | Where-Object {
+            $um = [regex]::Match($_.Line, 'using\s+Windows\.Storage(?:\.([\w.]+))?\s*;')
+            $usub = $um.Groups[1].Value
+            -not ($usub -and ($usingWhitelist -contains $usub))
+          })
+          if ($usingWarn.Count -gt 0) {
+            Write-Host ("::warning::检测到 using Windows.Storage 且不在白名单（Streams/Pickers）内（" +
+              (($usingWarn | ForEach-Object { $_.Filename + ':' + $_.LineNumber }) -join ', ') +
+              "）：若用于 GetXxxFromPathAsync 这类路径式访问，必须先恢复 broadFileSystemAccess 声明并引导用户授权（该能力默认 Off 且授权后需重启）；若只用来接 FolderPicker 的返回值则无需处理，并把对应子命名空间加入本步白名单")
           }
 
-          $line = "CAPGUARD forbidden=" + $fhits.Count + " runFullTrust=" + $hasRunFullTrust + " rescap=" + $hasRescapNs + " pathWinRT=" + $hasPath + " pathHits=" + $pathHits.Count + " usingStorage=" + $usingHits.Count
+          $line = "CAPGUARD forbidden=" + $fhits.Count + " runFullTrust=" + $hasRunFullTrust + " rescap=" + $hasRescapNs + " pathWinRT=" + $hasPath + " pathHits=" + $pathHits.Count + " usingStorage=" + $usingHits.Count + " usingStorageWarn=" + $usingWarn.Count
           $line >> ci-diagnostics.log
           Write-Host $line
 
@@ -231,8 +290,15 @@ jobs:
       #   ① chcp 65001 必须存在且位于任何中文 echo 之前：
       #      没有它，cmd 按 936 解析 UTF-8 字节 → 用户看到满屏乱码，
       #      而脚本功能完全正常、CI 全绿。
-      #   ② 管理员自检（net session / fltmc）必须存在：
+      #   ② 管理员自检必须存在：
       #      没有它，非管理员双击会在证书导入处失败，一路走到安装才抛看不懂的错。
+      #      ⚠ 本护栏【只校验判据字符串存在，不校验判据有效性】—— 这正是它自身的
+      #        局限（半空转）：Install.bat 原实现是 'net session OR fltmc'，而 fltmc
+      #        无参调用在部分 Windows 上对非提权进程同样返回 0，OR 逻辑下自检恒通过，
+      #        字符串却一直在本护栏眼里，判绿照旧。
+      #        现已把主判据换成 whoami /groups 的 High Mandatory Level SID
+      #        （S-1-16-12288），net session 降为兜底；本护栏仍按字符串存在判定，
+      #        判据有效性靠这处注释 + 人工复核守住。
       #   ③ Install.bat 里每个 dir /b 查找模式必须在文档里出现过：
       #      这条防的是"三处各自演化"（Install.bat / README / 安装说明.txt）。
       #      只做正向（脚本模式 → 文档），不做反向：文档里用的是
@@ -862,6 +928,17 @@ jobs:
       # =====================================================================
 
       # 可移植增强（最佳努力，不阻断构建）：补 _APP CRT 转发器 + 常规 VC++ CRT
+      #
+      # ⚠ 本步【不影响交付物】，仅作用于 bin 下的 loose exe 输出目录：MSIX 在 Publish
+      #    的同一次 msbuild 进程内已封包完成，这里复制的 DLL 永远进不了 .msix；而
+      #    staging 步只拷 .msix / .cer / Install.bat / 安装说明.txt 四件。包内转发器
+      #    由 csproj 的 Microsoft.VCRTForwarders.140 PackageReference 保证。
+      #    第七轮审查（P2-3）据此判定本步对交付物零影响、建议删除；本轮【保留】，
+      #    理由：① 唯一收益是少几十秒构建与少一段日志，而删除要改动 110 行 YAML，
+      #    本机跑不了 CI，收益不抵风险；② 它带 continue-on-error，永远不会把构建刷红；
+      #    ③ 若将来改用非 MSIX 的 loose 产物分发，本步会重新变成必需。
+      #    保留的同时把「它不进包」写明，避免排障者把日志里的 [OK]/[缺失] 误读成
+      #    交付物状态（这与 P2-12 是同一类误读）。
 
       # WinAppSDK 原生 DLL 按 _APP 后缀 CRT 链接；Microsoft.VCRTForwarders.140 提供
 
@@ -1119,6 +1196,29 @@ jobs:
           }
           if (-not $cert) { Write-Error ("无法从 pfx 读取签名证书（无密码读失败：" + $noPwdErr.Exception.Message + "；PFX_PASSWORD " + $(if ($env:PFX_PASSWORD) { "已配置但带密码读取仍失败" } else { "未配置" }) + "）"); exit 1 }
           ("VERIFY signer_thumbprint=" + $cert.Thumbprint) >> ci-diagnostics.log
+
+          # ① 签名证书 Subject ↔ manifest Identity Publisher 比对（阻断式）。
+          #    signtool verify /pa 只证明「签名有效且能在本机建链」，【完全不看】签名
+          #    发布者与清单发布者是否一致。两者不一致时：签名有效、verify 通过、
+          #    产物齐全、CI 全绿，而用户 Add-AppxPackage 被平台以发布者不匹配拒绝
+          #    （0x800B0109）；Install.bat 的错误码表还会把该码导向「证书未受信任」，
+          #    排障方向被带偏。这是典型的「CI 绿灯 ≠ 用户装得上」。
+          #    比对取双方的 CN= 段而非整串相等：X.509 Subject 常带 O= / C= 等后缀
+          #    （"CN=PhotoRenameAIHash, O=..."），整串比对会在证书合法轮换时误红。
+          $mRaw = Get-Content (Join-Path $env:GITHUB_WORKSPACE "Package.appxmanifest") -Raw
+          $pub  = [regex]::Match($mRaw, '<Identity\b[^>]*\bPublisher="([^"]+)"').Groups[1].Value
+          function Get-CnValue([string]$s) {
+            $mm = [regex]::Match($s, 'CN\s*=\s*([^,]+)')
+            if ($mm.Success) { return $mm.Groups[1].Value.Trim() }
+            return $s.Trim()
+          }
+          $pubCn = Get-CnValue $pub
+          $subCn = Get-CnValue $cert.Subject
+          ("VERIFY publisher_cn=" + $pubCn + " signer_cn=" + $subCn) >> ci-diagnostics.log
+          if (-not $pubCn -or -not $subCn -or ($pubCn -ne $subCn)) {
+            Write-Error ("签名证书 Subject（CN=" + $subCn + "）与 Package.appxmanifest 的 Identity Publisher（CN=" + $pubCn + "）不匹配：MSIX 安装时会被平台以发布者不一致拒绝（0x800B0109），而 signtool verify 不会发现。请轮换证书使其 Subject 与 Publisher 一致，或同步修改 Publisher —— 改 Publisher 意味着必须重新签发证书，并更新仓库内 PhotoRenameAIHash.cer。")
+            exit 1
+          }
           # ②（P1）最小信任原则：只导入 TrustedPeople —— MSIX 旁加载的信任链只需要它。
           # 自签名证书本身无 CA 基本约束，放进 Root 等价于宣布「该私钥签的任何东西都被本机
           # 信任」，是机器级的安全放大；能不导入就不导入。（用户侧 Install.bat 同样只导入
@@ -1140,7 +1240,14 @@ jobs:
             $ErrorActionPreference = 'Stop'
             if ($LASTEXITCODE -eq 0) { $verified = $true; $trustStore = "TrustedPeople" }
           } else {
-            Write-Warning "未找到 signtool.exe，跳过 verify（结构性校验已通过）"
+            # 原实现是 Write-Warning + 跳过：此时 $st 为 $null，下面两个阻断分支的条件
+            # 都不成立 → 步骤退出 0、界面显示绿勾，而实际只做了「p7x 条目存在」这一项
+            # 结构性检查（p7x 存在 ≠ 签名有效）。名为 (blocking) 的步骤存在退出 0 的
+            # 软失败出口，全靠前一阻断步 Re-sign 在 signtool 缺失时先 exit 1 兜底 ——
+            # 那是靠邻居救场，一旦 Re-sign 被重构或加了 continue-on-error，这里立刻
+            # 变成真实的静默失败。改为硬失败：签名校验不可被降级。
+            Write-Error "未找到 signtool.exe：无法完成签名校验（结构性 p7x 条目存在 ≠ 签名有效），签名链路不得降级放行"
+            exit 1
           }
 
           # 不再有 Root 回落（证据见步首注释：真实运行 VERIFY truststore=TrustedPeople）。
@@ -1148,8 +1255,10 @@ jobs:
           # 而不是换一条用户机器上不存在的信任链把自己救绿 —— 假绿灯比红灯更贵。
           ("VERIFY truststore=" + $trustStore) >> ci-diagnostics.log
 
-          if ($st -and -not $verified) { Write-Error "signtool verify 失败：包签名无效，或 TrustedPeople 不足以建立信任链（无 Root 回落）"; exit 1 }
-          if ($st) { "VERIFY signtool=PASS" >> ci-diagnostics.log }
+          # 去掉 `-and $st`：signtool 缺失已在上一个 else 分支 exit 1，此处无条件判定
+          # 才能真正做到「不通过就红」，而不是依赖某个变量恰好非空。
+          if (-not $verified) { Write-Error "signtool verify 失败：包签名无效，或 TrustedPeople 不足以建立信任链（无 Root 回落）"; exit 1 }
+          "VERIFY signtool=PASS" >> ci-diagnostics.log
           "CHECKPOINT:verify-done" >> ci-diagnostics.log
 
       # =====================================================================
@@ -1183,6 +1292,73 @@ jobs:
           }
           Write-Host "OK: .NET 运行时已随包自包含 (coreclr/hostfxr/hostpolicy/CoreLib 就位)"
           "CHECKPOINT:selfcontained-verify-done" >> ci-diagnostics.log
+
+      # =====================================================================
+      # P1-2 断言（阻断式，只读）：校验【包内实际生成的 AppxManifest.xml】。
+      # 源码里的 Package.appxmanifest 干净 ≠ 构建产物干净：封进 .msix 的清单是
+      # WASDK 构建目标在打包期【重新生成】的（会合并依赖、重写 Identity 等），
+      # 而 SCGUARD / 版本断言 / 能力护栏读的全是仓库里那份源码清单 —— 真正生效的
+      # 那一份此前无人读过。
+      # 两条判据各自对应一种「CI 全绿、用户装不上」：
+      #   ① <PackageDependency> 计数必须为 0：自包含模型下运行时已打进包，残留
+      #      框架依赖会让离线安装时依赖校验失败（0x80073CF3）。源码清单早已不声明它
+      #      （SCGUARD 注释里明示过），所以只可能由构建链在打包期重新注入 ——
+      #      不读包内清单就永远发现不了。
+      #   ② Identity Version 必须与源码 Package.appxmanifest 完全一致：不一致意味着
+      #      升级/覆盖安装的判定基准被构建期改写（0x80073CFB 类问题）。
+      #      期望值取自版本断言步写入 GITHUB_ENV 的 EXPECTED_MSIX_VERSION，
+      #      不在此处写死，避免随每次发版漂移。
+      # ⚠ 解包/读取失败一律显式报错：读不到 AppxManifest.xml 就断言无意义，
+      #    静默通过等于又造一条恒绿断言（本项目已被这类断言坑过两轮）。
+      # =====================================================================
+      - name: Assert generated AppxManifest inside MSIX (blocking)
+        shell: pwsh
+        run: |
+          "CHECKPOINT:gen-manifest-assert-start" >> ci-diagnostics.log
+          $ErrorActionPreference = 'Stop'
+          $expected = $env:EXPECTED_MSIX_VERSION
+          if (-not $expected) { Write-Error "环境变量 EXPECTED_MSIX_VERSION 为空：版本断言步未写入（GITHUB_ENV 未生效？），无法校验包内清单版本，拒绝静默放行"; exit 1 }
+
+          $msix = Get-ChildItem -Path "bin" -Recurse -Filter "*.msix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { "GENMANIFEST=NO_MSIX" >> ci-diagnostics.log; Write-Error "未找到 .msix"; exit 1 }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+          # 条目数先取出来：Dispose 之后再访问 $zip.Entries 会抛异常，报错信息就没了。
+          $entriesCount = $zip.Entries.Count
+          $e = $zip.Entries | Where-Object { $_.Name -eq 'AppxManifest.xml' } | Select-Object -First 1
+          if (-not $e) {
+            $zip.Dispose()
+            "GENMANIFEST=NO_MANIFEST_ENTRY" >> ci-diagnostics.log
+            Write-Error ("MSIX 内未找到 AppxManifest.xml（包: " + $msix.Name + "，条目数: " + $entriesCount + "）：无法校验包内实际清单，断言不能静默通过")
+            exit 1
+          }
+          $xml = $null
+          try {
+            $sr = New-Object System.IO.StreamReader($e.Open())
+            $xml = $sr.ReadToEnd()
+            $sr.Dispose()
+          } catch {
+            $zip.Dispose()
+            "GENMANIFEST=READ_FAILED" >> ci-diagnostics.log
+            Write-Error ("读取包内 AppxManifest.xml 失败: " + $_.Exception.Message)
+            exit 1
+          }
+          $zip.Dispose()
+          if (-not $xml -or $xml.Length -lt 32) { "GENMANIFEST=EMPTY" >> ci-diagnostics.log; Write-Error ("包内 AppxManifest.xml 内容异常（长度 " + $xml.Length + " 字节）：解包读取不可信，不能作为通过依据"); exit 1 }
+
+          # 先剥 XML 注释再统计：SCGUARD 已在同一类问题上踩过 —— 注释里提到的
+          # PackageDependency 不是真声明，不剥会把绿构建刷红。
+          $xmlNoComment = [regex]::Replace($xml, '<!--[\s\S]*?-->', '')
+          $dep = ([regex]::Matches($xmlNoComment, '<PackageDependency')).Count
+          $ver = [regex]::Match($xmlNoComment, '<Identity\b[^>]*\bVersion="([^"]+)"').Groups[1].Value
+          $pub = [regex]::Match($xmlNoComment, '<Identity\b[^>]*\bPublisher="([^"]+)"').Groups[1].Value
+          ("GENMANIFEST dep=" + $dep + " version=" + $ver + " publisher=" + $pub + " expected_version=" + $expected) >> ci-diagnostics.log
+          Write-Host ("GENMANIFEST dep=" + $dep + " version=" + $ver + " publisher=" + $pub + " expected=" + $expected)
+          if ($dep -gt 0) { Write-Error ("包内生成的 AppxManifest.xml 仍含 <PackageDependency> x" + $dep + "：自包含模型下 WindowsAppSDK 运行时已打进包，再声明框架依赖会让离线安装时依赖校验失败（0x80073CF3）。源码 Package.appxmanifest 并无此声明，说明是构建链在打包期重新注入的。"); exit 1 }
+          if (-not $ver) { Write-Error "包内 AppxManifest.xml 未取到 Identity Version：无法确认升级语义，拒绝静默放行"; exit 1 }
+          if ($ver -ne $expected) { Write-Error ("包内 AppxManifest.xml 的 Version=" + $ver + " 与源码 Package.appxmanifest 的 " + $expected + " 不一致：构建期重写了版本号，覆盖安装/升级的判定基准被改（0x80073CFB 类问题）。请核对 Package.appxmanifest 与打包目标对 Identity 的处理。"); exit 1 }
+          Write-Host "OK: 包内生成的 AppxManifest.xml 已校验（无框架依赖、版本与源码一致）"
+          "CHECKPOINT:gen-manifest-assert-done" >> ci-diagnostics.log
 
       # =====================================================================
 
@@ -1474,8 +1650,13 @@ jobs:
           # 届时「配额不足」会让阻断式上传把 CI 变红，而根因根本不在代码里。
 
           # 限保留期是这个取舍的另一半；长期分发应走 GitHub Release（TODO）。
+          #
+          # 30 → 7：artifact 只是【中间交付物】（正式分发另有渠道），而本项目一轮
+          # 迭代约 10 次提交 × 66.8MB/包，30 天稳态常驻轻易上 GB。撞配额时的表现
+          # 是「代码没问题、上传步红灯」，且因为是阻断式还无法自愈 —— 非代码原因的
+          # 红灯最贵，它会训练人忽略红灯。7 天足以覆盖交付窗口内的下载需求。
 
-          retention-days: 30
+          retention-days: 7
 
 
 
