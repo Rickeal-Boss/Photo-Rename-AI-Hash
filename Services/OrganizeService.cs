@@ -487,20 +487,24 @@ public sealed class OrganizeService : IOrganizeService
         {
             _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
             _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
-        }
 
-        // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
-        int logFailed = _log.FailedWrites - logFailBefore;
-        if (logFailed > 0)
-        {
-            progress.Report(new OrganizeProgress
+            // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
+            // <b>必须放在 finally</b>：熔断中止（consecutivePermanent / sameCauseCount / IsEnvironmentError）
+            // 都是从 catch 里 throw 的，异常会穿过 finally 直接离开方法——告警若留在 finally 之后会被整段跳过，
+            // 而 logFailBefore 基线每批重置，那部分增量此后永远不会被任何批次报出（用户永远不知道有日志写失败）。
+            int logFailed = _log.FailedWrites - logFailBefore;
+            if (logFailed > 0)
             {
-                // 必须带 Percent：OnProgress 是 Progress = p.Percent 无条件赋值，
-                // 不带则会把已完成到 100% 的进度条打回 0（本方法末尾的完成汇总才会再设回 100）。
-                Percent = 100,
-                LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
-                          "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
-            });
+                progress.Report(new OrganizeProgress
+                {
+                    // 必须带 Percent：OnProgress 是 Progress = p.Percent 无条件赋值，不带会把进度条打回 0。
+                    // 用真实完成数算：正常收尾时 done == files.Count → 100；熔断中止时如实反映已处理比例，
+                    // 不硬写 100——那会在中止时把进度条谎报成跑满。
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
+                              "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
+                });
+            }
         }
 
         progress.Report(new OrganizeProgress
@@ -591,9 +595,11 @@ public sealed class OrganizeService : IOrganizeService
             });
         }
 
+        // done 提到 try 之外：熔断中止时 finally 里的「日志写失败告警」要按真实完成比例报进度，
+        // 声明在 try 内会让 finally 取不到它（CS0103）。
+        int done = 0;
         try
         {
-            int done = 0;
             foreach (var f in files)
             {
                 ct.ThrowIfCancellationRequested();
@@ -769,19 +775,24 @@ public sealed class OrganizeService : IOrganizeService
         {
             _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
             _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
-        }
 
-        // 归档模式同样写 rename_log.csv（分散在各日期子目录），写盘失败的静默风险与 RunAsync 相同。
-        int logFailed = _log.FailedWrites - logFailBefore;
-        if (logFailed > 0)
-        {
-            progress.Report(new OrganizeProgress
+            // 归档模式同样写 rename_log.csv（分散在各日期子目录），写盘失败的静默风险与 RunAsync 相同。
+            // <b>必须放在 finally</b>：环境级熔断中止是从 catch 里 throw 的，异常会穿过 finally 直接离开方法
+            // ——告警若留在 finally 之后会被整段跳过，而 logFailBefore 基线每批重置，那部分增量此后
+            // 永远不会被任何批次报出（用户永远不知道有日志写失败）。
+            int logFailed = _log.FailedWrites - logFailBefore;
+            if (logFailed > 0)
             {
-                // 同 RunAsync：此处进度已达 100%，不带 Percent 会被 VM 的无条件赋值打回 0。
-                Percent = 100,
-                LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
-                          "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
-            });
+                progress.Report(new OrganizeProgress
+                {
+                    // 必须带 Percent：OnProgress 是 Progress = p.Percent 无条件赋值，不带会把进度条打回 0。
+                    // 用真实完成数算：正常收尾时 done == files.Count → 100；熔断中止时如实反映已处理比例，
+                    // 不硬写 100——那会在中止时把进度条谎报成跑满。
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    LogLine = $"警告：本批次有 {logFailed} 条重命名日志写入失败（常见原因为磁盘空间不足或目录不可写），" +
+                              "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
+                });
+            }
         }
 
         progress.Report(new OrganizeProgress
@@ -1150,6 +1161,19 @@ public sealed class OrganizeService : IOrganizeService
         {
             throw; // 取消语义不得被包装，否则 TaskCanceledException 会被当成失败吞掉
         }
+        // P2-1：源文件被其它程序独占（看图软件 / 编辑器 / 云盘同步 / 杀软）→ 逐文件失败，<b>不熔断整批</b>。
+        // 此前这类失败落进下面的兜底 catch，被一律判成环境级（isEnvironmentError: true）→
+        // 一张照片恰好被开着就中止整批；而同一根因在执行阶段（ExecuteAsync 的同款过滤器）是按逐文件处理的，
+        // 两处口径相反。这里补齐同款过滤器，让备份阶段与执行阶段对齐（沿用同两个 HResult 常量）。
+        // 判序必须在兜底之前、且不能吞掉磁盘满：磁盘满的 HResult（0x80070070）不匹配本过滤器，
+        // 仍会落到下面的 IsDiskFull 分支并保持环境级 + 熔断。
+        catch (IOException ex) when (ex.HResult == ErrorSharingViolation || ex.HResult == ErrorLockViolation)
+        {
+            throw new PermanentOperationException(
+                $"备份失败：文件被其它程序占用，无法读取或写入：{Path.GetFileName(source)}。" +
+                "请关闭可能占用它的看图软件/编辑器/云盘同步后重试。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
         catch (Exception ex)
         {
             // 磁盘空间不足：与「权限未授予 / 路径不可访问」区分开，给出可定位的真因
@@ -1162,7 +1186,7 @@ public sealed class OrganizeService : IOrganizeService
                     isEnvironmentError: true, inner: ex);
             }
 
-            // 其余失败（备份文件夹不存在 / 路径不可访问 / 文件被占用等）：
+            // 其余失败（备份文件夹不存在 / 路径不可访问等对整批成立的原因）：
             // 改走 System.IO 后本路径已不受 broadFileSystemAccess 门控，故不再引导用户去授予
             // 「文件系统」访问权限——那会让他去找一个与本次失败无关的开关。
             throw new PermanentOperationException(
