@@ -131,10 +131,20 @@ jobs:
           # ------------------------------------------------------------------
           $lastFile = Join-Path $env:GITHUB_WORKSPACE "LAST_RELEASE_VERSION"
           if (-not (Test-Path $lastFile)) { Write-Error ("缺少 " + $lastFile + "：版本单调性护栏没有基线。请创建该文件并写入上一次【已发布】的四段版本号（如 3.1.4.0）。"); exit 1 }
+          # 逐行解析并【跳过注释行】：本文件顶部有十余行说明注释，其中引用了形如
+          # 3.1.4.0 的示例版本号。若沿用「取全文第一个四段号」的写法，一旦注释里出现
+          # 比数字行更低（或更高）的版本，护栏就会拿它当基线 —— 前者是假绿（静默架空
+          # 本步，交付即 0x80073CFB），后者是假红。故必须跳过 # 开头行并整行锚定。
           $lastRaw = [System.IO.File]::ReadAllText($lastFile)
-          $lastM = [regex]::Match($lastRaw, '[0-9]+(\.[0-9]+){3}')
-          if (-not $lastM.Success) { Write-Error ($lastFile + " 内容中找不到四段版本号（实际内容：" + $lastRaw.Trim() + "）：请写入形如 3.1.4.0 的上次发布版本号。"); exit 1 }
-          $last = $lastM.Value
+          $last = $null
+          foreach ($line in [System.IO.File]::ReadAllLines($lastFile)) {
+            $t = $line.Trim()
+            if ($t.Length -eq 0) { continue }
+            if ($t.StartsWith('#')) { continue }
+            $lastM = [regex]::Match($t, '^[0-9]+(\.[0-9]+){3}$')
+            if ($lastM.Success) { $last = $lastM.Value; break }
+          }
+          if (-not $last) { Write-Error ($lastFile + " 中找不到独占一行且非注释的四段版本号（实际内容：" + $lastRaw.Trim() + "）：请在该文件写入形如 3.1.4.0 的上次发布版本号，且该数字行不得带注释后缀。"); exit 1 }
           $mvParts = @($mv -split '\.')
           $lastParts = @($last -split '\.')
           $cmp = 0
