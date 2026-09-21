@@ -1020,8 +1020,21 @@ public sealed class OrganizeService : IOrganizeService
                 return "已复制";
             }
 
-            File.Move(source, target, overwrite);
-            return "已移动";
+            if (req.Mode == OperationMode.Move)
+            {
+                File.Move(source, target, overwrite);
+                return "已移动";
+            }
+
+            // 走到这里只可能是「未定义的枚举值」（settings.json 被写坏、或抢救路径拿到越界整数）。
+            // OperationMode 是 { Copy=0, Move=1, Rename=2 }，上面三个合法值已显式判完，
+            // 故这里的语义是「兜底」而不是「Move」——此前它靠 else 承载合法的 Move，
+            // 直接把 else 改成 Copy 会让正常选「移动」的用户变成复制（文件留在源目录），那是功能回归。
+            // 失效安全：按破坏面最小的 Copy 处理，绝不让它落到 Move（搬走源文件）或 Rename（就地改写），
+            // 两者在参数来源不可信时都可能造成用户没有预期的、应用内不可撤销的后果。
+            // 与 OpName 的兜底文案一致（同为「复制」），避免日志说一套、实际做另一套。
+            File.Copy(source, target, overwrite);
+            return "已复制";
         }
         catch (IOException ex) when (IsDiskFull(ex))
         {
@@ -1489,7 +1502,12 @@ public sealed class OrganizeService : IOrganizeService
     {
         OperationMode.Copy => "复制",
         OperationMode.Move => "移动",
-        _ => "重命名",
+        // 三个合法值必须显式列完，不能让兜底顺带承载 Rename：
+        // 那样一旦未定义值漏进来，日志写「重命名」而 ExecuteAsync 实际在做失效安全的复制
+        // → 又是一种谎报（与「模拟口径=实跑口径」同类）。
+        OperationMode.Rename => "重命名",
+        // 未定义的枚举值：与 ExecuteAsync 的失效安全落点一致（Copy）。
+        _ => "复制",
     };
 
     /// <summary>当前指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
