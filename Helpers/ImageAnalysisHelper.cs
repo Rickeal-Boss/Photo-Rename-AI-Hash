@@ -201,7 +201,8 @@ public static class ImageAnalysisHelper
     /// 退避期间点暂停原本要等约 4 分钟才生效，期间还在发请求计费）。
     /// <b>契约必须与 Task.Delay 一致</b>：等满传入的时长后返回，且 <c>ct</c> 取消时抛
     /// <see cref="OperationCanceledException"/>，否则本方法的取消/暂停语义会错乱。</param>
-    /// <exception cref="AiPermanentException">端点 / 模型 / 密钥为空，或端点不是 https（<b>配置类</b>，
+    /// <exception cref="AiPermanentException">端点 / 模型 / 密钥为空、端点不是 https、端点不是合法地址、
+    /// 或 Key 含不能用于 HTTP 头的字符（<b>配置类</b>，
     /// 对整批成立、重试无意义：不进文件级重排队，连续 3 个文件命中即中止整批并提示用户去设置页补全）。</exception>
     /// <exception cref="InvalidOperationException">循环兜底：调用超出最大尝试次数（理论不可达）。</exception>
     /// <exception cref="AiTransientException">网络 / 连通性异常，或服务端 60 秒未响应（超时），且重试次数或退避预算已耗尽
@@ -277,6 +278,23 @@ public static class ImageAnalysisHelper
         if (!endpoint.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             throw new AiPermanentException(
                 "视觉识别端点必须使用 https（自定义引擎请在「设置」中填写以 https:// 开头的端点，避免 API Key 与照片以明文出站）。",
+                isBatchLevel: true);
+
+        // P1-1 防御性预校验：端点 URL 与 Key 的合法性在进入重试循环之前就拦掉。
+        // 只靠 CreateRequest 的 try/catch 是不够的：框架对 Authorization 头的 token 校验时机
+        // 在不同 .NET 版本并不一致（有的版本在构造 AuthenticationHeaderValue 时就抛，
+        // 有的版本要等 SendAsync 才抛），后者会被下面的 catch 当成「网络 / 连通性」瞬时故障去重试。
+        // 这两条判据很宽松（不可能误伤合法 Key），但足以拦住最常见的「整行粘贴」类配置错误，
+        // 且不消耗限流名额——配置错误不该占用闸门。
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+            throw new AiPermanentException(
+                "视觉识别端点 URL 不是合法地址（例如只填了 https:// 而缺少主机名）。" +
+                "请到「设置」检查端点，需形如 https://host/path。",
+                isBatchLevel: true);
+        if (!IsHeaderSafeToken(apiKey))
+            throw new AiPermanentException(
+                "API Key 含有不能用于 HTTP 头的字符（换行 / 空格 / 制表符 / 控制字符 / 非 ASCII）。" +
+                "请到「设置」重新粘贴 Key，去掉首尾与中间的换行和空格。",
                 isBatchLevel: true);
 
         // 429 限流 / 5xx 服务端错误：按供应商策略档退避重试（次数上限 + 总耗时预算双闸），
@@ -462,6 +480,24 @@ public static class ImageAnalysisHelper
                 $"请到「设置」检查端点与 Key。（{Snippet(ex.Message ?? "")}）",
                 isBatchLevel: true);
         }
+    }
+
+    /// <summary>
+    /// API Key 能否安全放进 <c>Authorization: Bearer …</c> 头：只接受可打印 ASCII（0x21~0x7E，
+    /// 即不含空格、制表符、换行、其它控制字符与非 ASCII）。
+    /// <para>这些字符几乎只来自「从终端 / 聊天窗口整行粘贴」，而它们放进 HTTP 头必然失败；
+    /// 提前拦下还能避免框架异常消息里回显 Key 片段（会经 crash.log / rename_log.csv 落盘，D-5）。</para>
+    /// <para><b>故意不做</b> RFC 7230 tchar 级别的严格校验：那会把含 <c>/</c> <c>=</c> 的合法 Key
+    /// （部分厂商发的是标准 base64 而非 URL-safe 变体）误判为非法，代价远大于收益。
+    /// 严格性交给框架——真不合法时由 <see cref="CreateRequest"/> 统一转成配置类永久错误。</para>
+    /// </summary>
+    private static bool IsHeaderSafeToken(string key)
+    {
+        foreach (var c in key)
+        {
+            if (c < 0x21 || c > 0x7E) return false;
+        }
+        return true;
     }
 
     /// <summary>
