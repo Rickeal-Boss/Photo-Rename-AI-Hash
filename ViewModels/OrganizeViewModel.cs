@@ -25,6 +25,14 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     private int _syncedProviderIndex;
 
+    /// <summary>
+    /// A-11：整理页的「配置读取失败」横幅是否已就本次损坏提示过。
+    /// 本 VM 是单例、<see cref="SyncProviderFromDisk"/> 每次导航进整理页都会被
+    /// <c>OrganizePage.OnNavigatedTo</c> 调用一次，若不加标志，用户关掉横幅后再进整理页会反复重弹、
+    /// 日志也被反复追加（同一次损坏提示 N 次）。配置恢复正常后复位，下次再损坏时仍会提示一次。
+    /// </summary>
+    private bool _loadFailureNotified;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -36,7 +44,7 @@ public partial class OrganizeViewModel : ObservableObject
         NamingTemplate = _model.NamingTemplate;
         DryRun = _model.DryRun;
         UseExifDate = _model.UseExifDate;
-        AiProviderIndex = (int)_model.AiProvider;
+        AiProviderIndex = System.Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
         _syncedProviderIndex = AiProviderIndex; // 构造即视为已与磁盘对齐
         OperationModeIndex = (int)_model.OperationMode;
         ConflictIndex = (int)_model.ConflictStrategy;
@@ -421,7 +429,11 @@ public partial class OrganizeViewModel : ObservableObject
         // 只在下次启动时发现「我填的路径 / 模板 / 引擎全没了」，且原文件已被覆盖、无从察觉。
         ShowLoadFailureWarningIfNeeded();
 
-        int disk = (int)_settings.Load().AiProvider;
+        // P2-4：System.Text.Json 数字→枚举不校验定义域（settings.json 写 "AiProvider": 99 不报错）。
+        // 越界值会让下方 ComboBox 无匹配项而空白，也会让 CreateAi 抛「已选择识别引擎「99」但未配置 API Key」。
+        // 在读取处就钳到枚举实际范围：既覆盖下面的比较，也覆盖赋值给 AiProviderIndex 的那一支
+        // （只钳赋值处不够——disk=99 与钳后的当前值不等，会被误判成「磁盘值有变」而把越界值再写进 VM）。
+        int disk = System.Math.Clamp((int)_settings.Load().AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
         if (disk == AiProviderIndex)
         {
             _syncedProviderIndex = disk; // 已一致（含「手动值刚被持久化」的情况）：重新对齐基线
@@ -441,7 +453,17 @@ public partial class OrganizeViewModel : ObservableObject
     private void ShowLoadFailureWarningIfNeeded()
     {
         if (_settings is not SettingsService settings) return;
-        if (!settings.LoadFailedFromDisk) return;
+        if (!settings.LoadFailedFromDisk)
+        {
+            // P2-1：配置已恢复正常（例如用户在「设置」页成功保存、或文件被修好）→ 复位提示标志，
+            // 这样将来再损坏一次时仍会提示，而不是被上一次的「已提示」永久吞掉。
+            _loadFailureNotified = false;
+            return;
+        }
+        // P2-1：同一次损坏只提示一次。本方法每次导航进整理页都会被调用，用户关掉横幅后再进来
+        // 不该重弹，日志也不该被反复追加（此前每导航一次就多一条一模一样的「配置文件读取失败」）。
+        if (_loadFailureNotified) return;
+        _loadFailureNotified = true;
 
         var backup = settings.LastCorruptedBackupPath;
         var where = string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）";
@@ -493,9 +515,20 @@ public partial class OrganizeViewModel : ObservableObject
         if (_settings is SettingsService settingsImpl && settingsImpl.HasUnacknowledgedLoadFailure)
         {
             var backup = settingsImpl.LastCorruptedBackupPath;
-            AppendLog("配置未保存：配置文件读取失败" +
-                      (string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）") +
-                      "，为避免覆盖原文件本次未自动写入；请在「设置」页确认后保存。");
+            var where = string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）";
+            var reason = "配置未保存：配置文件读取失败" + where +
+                         "，为避免覆盖原文件本次未自动写入；请在「设置」页确认后保存。";
+            AppendLog(reason);
+            // P2-2：拦截生效时只写日志不够 —— 用户此刻就在整理页，而横幅多半还停在「任务结束」的
+            // 终态文案上，很容易漏看「配置其实没保存」。同步把状态栏切到 Warning 并打开（先设文案、
+            // 再开 StatusBarOpen：OnStatusBarOpenChanged 会快照文案到横幅）。
+            StatusText = reason;
+            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
+            StatusBarOpen = true;
+            // P2-2：基线对齐原先写在 return 之后，被闩拦截时会被整段跳过 —— 下一次导航进整理页时
+            // SyncProviderFromDisk 会把「当前值 != 陈旧基线」误判成「用户手动改过」而拒绝同步磁盘值。
+            // 挪到 return 之前：本次未落盘，但仍把当前值视为基线，避免留下永久性误判。
+            _syncedProviderIndex = AiProviderIndex;
             return;
         }
 

@@ -36,7 +36,10 @@ public partial class SettingsViewModel : ObservableObject
         Theme = _model.Theme;
         DefaultFolder = _model.DefaultFolder;
         Language = _model.Language;
-        AiProviderIndex = (int)_model.AiProvider;
+        // P2-4：System.Text.Json 把数字反序列化成枚举时<b>不校验定义域</b>（settings.json 里写
+        // "AiProvider": 99 不会报错），越界值会让 ComboBox 因无匹配项而显示空白。钳到枚举实际范围，
+        // 同时 setter 会把钳后的值写回 _model.AiProvider，getter 之后读到的也是合法值。
+        AiProviderIndex = Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
         ZhipuApiKey = _model.ZhipuApiKey;
         QwenApiKey = _model.QwenApiKey;
         NvidiaApiKey = _model.NvidiaApiKey;
@@ -319,6 +322,13 @@ public partial class SettingsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            // A-11：写盘失败必须把上面那次「确认」收回去（重新上闩）。
+            // 确认只能发生在写盘之前（见上方注释：放在写盘后会导致 SaveAsync 的闩先抛异常、
+            // 用户永远保存不了），所以「确认」只有在真正写盘成功时才算数。此前失败分支只改 StatusText、
+            // 不复位 → 一次失败的保存就永久消费掉用户的确认，保护闩此后恒为释放状态，
+            // 整理结束的自动持久化会把归零的默认配置写回磁盘，顶掉那份已备份的损坏文件。
+            if (_settings is SettingsService saveFailedImpl) saveFailedImpl.ReArmLoadFailure();
+
             // A-11：保存失败必须出声。此前没有 catch，一旦写盘失败（权限/磁盘满/保护闩）
             // 命令内的异常会被 AsyncRelayCommand 收进 ExecutionTask，界面上什么都不会发生——
             // 用户以为配置已存，下次启动却是旧值（P33 谎报）。
@@ -418,7 +428,9 @@ public partial class SettingsViewModel : ObservableObject
             _suppressAiDirty = true; // 同步引起的属性变化不算「用户手动改过」
             try
             {
-                AiProviderIndex = (int)disk.AiProvider;
+                // P2-4：磁盘值同样可能越界（见构造函数处注释），同步时一并钳制，
+                // 否则导航回设置页会把空白下拉框再带回来。
+                AiProviderIndex = Math.Clamp((int)disk.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
                 CustomApiUrl = disk.CustomApiUrl;
                 CustomApiModel = disk.CustomApiModel;
                 CustomApiRpmLimit = disk.CustomApiRpmLimit;

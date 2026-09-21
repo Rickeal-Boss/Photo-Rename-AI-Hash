@@ -80,6 +80,15 @@ public sealed class SettingsService : ISettingsService
     /// </summary>
     public void AcknowledgeLoadFailure() => _loadFailureAcknowledged = true;
 
+    /// <summary>
+    /// A-11：重新上闩 —— 仅在「写盘失败」时调用。
+    /// 确认动作发生在写盘<b>之前</b>（否则 <see cref="SaveAsync"/> 的闩会先抛异常，用户永远无法从设置页保存），
+    /// 所以写盘失败必须把确认收回去：否则一次失败的保存就永久消费掉用户的确认，此后
+    /// <see cref="HasUnacknowledgedLoadFailure"/> 恒为 false，保护闩彻底失效，
+    /// 整理结束的自动持久化会把「整份归零的默认配置（4 个密钥全空）」写回磁盘，顶掉已备份的损坏文件。
+    /// </summary>
+    public void ReArmLoadFailure() => _loadFailureAcknowledged = false;
+
     public AppSettings Load()
     {
         LastLoadHadUndecryptableKeys = false; // 标志只反映最近一次 Load，每次加载前先重置
