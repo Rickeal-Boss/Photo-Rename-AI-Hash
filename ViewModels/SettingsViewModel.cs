@@ -136,9 +136,14 @@ public partial class SettingsViewModel : ObservableObject
         DefaultFolder = _model.DefaultFolder;
         Language = _model.Language;
         // P2-4：System.Text.Json 把数字反序列化成枚举时<b>不校验定义域</b>（settings.json 里写
-        // "AiProvider": 99 不会报错），越界值会让 ComboBox 因无匹配项而显示空白。钳到枚举实际范围，
-        // 同时 setter 会把钳后的值写回 _model.AiProvider，getter 之后读到的也是合法值。
-        AiProviderIndex = Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
+        // "AiProvider": 99 不会报错），越界值会让 ComboBox 因无匹配项而显示空白。
+        // setter 会把归一后的值写回 _model.AiProvider，getter 之后读到的也是合法值。
+        // 归一规则与 OrganizeViewModel.SelectedProvider 完全一致：越界值落到 None，<b>不</b>钳到
+        // 枚举上界 Nvidia——上界是<b>付费引擎</b>，把「配置损坏」钳到它等于让异常状态去调付费接口
+        // （缺 Key 时还会把整批拦下）；落到 None 最坏只是不调 AI。两个 ViewModel 只保留一套越界含义。
+        AiProviderIndex = Enum.IsDefined(typeof(AiProvider), _model.AiProvider)
+            ? (int)_model.AiProvider
+            : (int)AiProvider.None;
         ZhipuApiKey = _model.ZhipuApiKey;
         QwenApiKey = _model.QwenApiKey;
         NvidiaApiKey = _model.NvidiaApiKey;
@@ -562,9 +567,14 @@ public partial class SettingsViewModel : ObservableObject
             _suppressAiDirty = true; // 同步引起的属性变化不算「用户手动改过」
             try
             {
-                // P2-4：磁盘值同样可能越界（见构造函数处注释），同步时一并钳制，
+                // P2-4：磁盘值同样可能越界（见构造函数处注释），同步时一并归一，
                 // 否则导航回设置页会把空白下拉框再带回来。
-                AiProviderIndex = Math.Clamp((int)disk.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
+                // 归一规则同构造函数：越界落 None，不钳到付费引擎 Nvidia。
+                // 时序不变：仍是在 _suppressAiDirty 保护下「读 disk 快照 → 赋回 UI 值」，
+                // 赋值只写本 VM 的 _model，不会污染上面那份 disk 快照。
+                AiProviderIndex = Enum.IsDefined(typeof(AiProvider), disk.AiProvider)
+                    ? (int)disk.AiProvider
+                    : (int)AiProvider.None;
                 CustomApiUrl = disk.CustomApiUrl;
                 CustomApiModel = disk.CustomApiModel;
                 CustomApiRpmLimit = disk.CustomApiRpmLimit;
