@@ -31,7 +31,13 @@ public sealed class RenameLogService
         try
         {
             var path = Path.Combine(outputFolder, "rename_log.csv");
-            var isNew = !File.Exists(path);
+            // K-P2-2：isNew <b>不能只判「文件是否存在」</b>。一旦 rename_log.csv 以 0 字节状态存在
+            //（可达链：首次写入时磁盘满 → File.AppendAllText 已创建文件、写入才抛异常 → 文件留成 0 字节；
+            //  或云盘 / 杀软留下占位空文件），此后每次追加都<b>不写表头</b>，文件变成「无表头数据行」；
+            // 读侧 Array.IndexOf(header, "Status") 取到的是第一条数据行的字段 → iStatus = -1
+            // → 所有行被 continue 丢弃且不增加任何计数 → 续传索引恒为空、审计日志也不可读（Excel 打开即错列）。
+            // 故零字节同样按「新文件」处理，补回表头（读侧的 HeaderUnreadable 告警负责让用户知道发生过）。
+            var isNew = !File.Exists(path) || IsEmptyFile(path);
             var sb = new StringBuilder();
             if (isNew)
             {
@@ -68,6 +74,17 @@ public sealed class RenameLogService
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 判断<b>已存在</b>的文件是否为零字节（K-P2-2 配套）。
+    /// 任何异常（路径不可访问 / 竞态删除 / 权限）一律按「非空」处理：读不到长度时宁可不补表头
+    /// （保持既有行为、绝不重写一个可能非空的日志），也不要冒险。
+    /// </summary>
+    private static bool IsEmptyFile(string path)
+    {
+        try { return new FileInfo(path).Length == 0; }
+        catch { return false; }
     }
 
     /// <summary>
@@ -117,7 +134,15 @@ public sealed class RenameLogService
                 {
                     if (!File.Exists(csv)) continue;
                     var lines = File.ReadAllLines(csv);
-                    if (lines.Length < 2) continue;
+
+                    // K-P2-2：文件<b>存在</b>但零行（0 字节 / 只有 BOM）⇒ 无表头可用。
+                    // 此前直接 continue（静默），用户拿不到任何提示、续传索引恒为空、每次全量重做。
+                    // 置 HeaderUnreadable 由编排层走既有 progress.Report 通道告警。
+                    if (lines.Length == 0)
+                    {
+                        log.HeaderUnreadable = true;
+                        continue;
+                    }
 
                     var header = SplitCsvLine(lines[0]);
                     int iNewName = Array.IndexOf(header, "NewName");
@@ -129,6 +154,15 @@ public sealed class RenameLogService
                     // 故按列名找即可；真取不到时 RecordIgnoredRow 会保守地不入集合（见其说明）。
                     int iOperation = Array.IndexOf(header, "Operation");
                     int iFingerprint = Array.IndexOf(header, "Fingerprint");
+
+                    // K-P2-2：表头缺必需列（Status / NewName）⇒ 这份日志的表头不可识别。
+                    // 最典型的形态是「上次写入被中断，只留下数据行、没有表头」：此时 lines[0] 就是数据行，
+                    // 两个必需列都取不到 → 下面 iStatus < 0 会让<b>所有</b>行被 continue 丢弃。
+                    // 必须置标志让编排层明说「已按无历史记录处理」，而不是静默当成空索引
+                    //（跳过本身是中性态，但「静默全量重做」是用户完全无感的重复劳动）。
+                    if (iStatus < 0 || iNewName < 0) log.HeaderUnreadable = true;
+
+                    if (lines.Length < 2) continue;
 
                     // 兼容「旧表头 + 新记录」混合的日志：表头只在文件首次创建时写一次，
                     // 老用户升级后其 rename_log.csv 的表头仍是 9 列（无 Fingerprint），
@@ -408,4 +442,18 @@ public sealed class CompletedLog
     /// true 表示续传索引可能漏记录 → 部分已完成文件会被重新处理（重做安全：内容相同则跳过，不丢数据）。
     /// </summary>
     public bool EnumerationIncomplete { get; set; }
+
+    /// <summary>
+    /// 检测到 <b>存在但表头不可识别</b>的 rename_log.csv（K-P2-2）：文件零字节 / 零行，
+    /// 或首行不含必需列（<c>Status</c> / <c>NewName</c>）——后者最典型的成因是「上次写入被中断，
+    /// 只留下数据行、没有表头」。此时该文件里的行<b>全部</b>不可用（读侧靠列名定位，定位不到就整行丢弃），
+    /// 续传索引会静默变空、每次全量重做，而 <see cref="IgnoredByFingerprint"/> /
+    /// <see cref="IgnoredByMissingFingerprintColumn"/> / <see cref="EnumerationIncomplete"/> 都<b>不</b>增加。
+    /// <para>与 <see cref="EnumerationIncomplete"/> 并列，由编排层走既有 <c>progress.Report</c> 通道
+    /// 告知用户「该目录的 rename_log.csv 表头不可识别，已按无历史记录处理」——
+    /// 绝不能直接当成空索引静默继续（那是用户完全无感的重复劳动）。</para>
+    /// <para>写入侧已同步修好「零字节文件不补表头」（见 <see cref="AppendRenameLogAsync"/> 的 isNew 判定），
+    /// 故此后成功写入一次即自愈；本标志只负责把「曾经发生过」这件事说出来。</para>
+    /// </summary>
+    public bool HeaderUnreadable { get; set; }
 }

@@ -159,9 +159,11 @@ public sealed class OrganizeService : IOrganizeService
         }
         catch
         {
-            // 与 :87-89「源文件夹无效」早退同源：构造 AI 失败是 throw 而非 return，发生在
-            // _pts 创建之前、try/finally 不会执行，若不在此清掉待应用标记，它会残留到下一批次
+            // 与 RunAsync 开头「源文件夹无效」早退（req.SourceFolder 校验那一处）同源：
+            // 构造 AI 失败是 throw 而非 return，发生在 _pts 创建之前、try/finally 不会执行，
+            // 若不在此清掉待应用标记，它会残留到下一批次
             // → 用户没点过暂停，下一批一创建令牌却被应用 → 一启动即暂停。
+            // （符号锚点：RunAsync 的 `req.SourceFolder` 校验；本项目注释不写行号——行号必漂。）
             EndBatch();
             throw;
         }
@@ -268,7 +270,7 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
                 LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
-                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
+                          "（模式 / 冲突策略 / 命名模板 / 输出目录，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
                           "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
                           "若希望继续沿用旧记录续传，请保持这些参数不变。" +
                           RenameNestingCaution(req),
@@ -280,6 +282,21 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
                 LogLine = "警告：续传索引可能不完整（部分子目录无法访问），已按可读取的部分处理。",
+            });
+        }
+        // K-P2-2：rename_log.csv <b>存在</b>但表头不可识别（零字节 / 无表头 / 缺必需列）时，
+        // 读侧会把所有行判为不可用 → 续传索引恒为空 → 每次全量重做，而此前<b>没有任何提示</b>
+        //（既不增加 IgnoredByFingerprint 也不增加 EnumerationIncomplete），用户以为续传生效了。
+        // 这里用既有日志通道（与上面三条同约定）说清「已按无历史记录处理」。
+        // 写入侧（RenameLogService.AppendRenameLogAsync）已同步修好「零字节文件不补表头」，
+        // 故此后成功写入一次即自愈。
+        if (completed.HeaderUnreadable)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                LogLine = "警告：输出目录中的 rename_log.csv 表头不可识别（文件为空、缺少必需列，或上次写入被中断），" +
+                          "已按「无历史记录」处理：本批次会重新处理所有文件。下次成功写入时会自动补回表头。",
             });
         }
 
@@ -339,6 +356,10 @@ public sealed class OrganizeService : IOrganizeService
         // 局部实例而非字段：本类是进程级单例，字段会把上一批的样本带进下一批（跨批次污染 → 谎报）。
         var aiStats = new AiRunStats();
 
+        // 本批次的「模拟下同口径统计」与「判据二跳过」计数（K-P1-1 / K-P1-2）。
+        // 同 AiRunStats：局部实例，避免跨批次污染。两者都在批次收尾走既有汇总通道上报。
+        var counters = new BatchCounters();
+
         int done = skippedAtStart; // 已跳过的也算进度推进
 
         try
@@ -350,7 +371,7 @@ public sealed class OrganizeService : IOrganizeService
                 var (f, index) = queue.Dequeue();
                 try
                 {
-                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun, completed.DoneByNewPathAnyFingerprint).ConfigureAwait(false);
+                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, counters, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun, completed.DoneByNewPathAnyFingerprint).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                     // 同因计数一并清零：中止文案写的是「连续 3 个文件出现相同原因的错误」，
@@ -565,6 +586,35 @@ public sealed class OrganizeService : IOrganizeService
                               "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
                 });
             }
+
+            // K-P1-1：模拟运行下「将无备份覆盖」的批次级预估。
+            // <b>必须放在 finally</b>：熔断中止也是从 catch 里 throw 的，异常会穿过 finally 直接离开方法，
+            // 告警若留在 finally 之后会被整段跳过。
+            // 措辞是「预估」而非过去时——实跑那条过去时文案由 UI 的 _overwroteNoBackup 桶负责
+            //（见 ProcessOneAsync 内 willOverwriteExisting 处的跨域契约说明）。
+            if (counters.DryRunOverwriteNoBackup > 0)
+            {
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    LogLine = $"模拟运行预估：本批次将有 {counters.DryRunOverwriteNoBackup} 个目标位置的原有文件被「覆盖」策略直接替换，" +
+                              "而这些文件不会进入备份、届时原内容将无法恢复。若不想覆盖，请改用「跳过」或「自动加序号」冲突策略后重跑。" +
+                              "（本条为模拟预估，本次未改动任何文件。）",
+                });
+            }
+
+            // K-P1-2：叠加保护·判据二的跳过在批次级说一次（判据本身未改动，见 ProcessOneAsync 内注释）。
+            // 同 K-P1-1：放 finally，熔断中止时也能报出已累计的部分。
+            if (counters.NestedFormSkipped > 0)
+            {
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    LogLine = $"提示：本批次有 {counters.NestedFormSkipped} 个文件因「名称形态疑似已命名」被跳过（文件名未改动）。" +
+                              "该判据只看名称形态、可能误判：若这些文件并非本工具命名，" +
+                              "请改用「复制 / 移动」模式输出到新目录后再处理；确需原地重命名时请先备份源文件夹。",
+                });
+            }
         }
 
         progress.Report(new OrganizeProgress
@@ -678,7 +728,7 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = 0,
                 LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
-                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
+                          "（模式 / 冲突策略 / 命名模板 / 输出目录，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
                           "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
                           "若希望继续沿用旧记录续传，请保持这些参数不变。",
             });
@@ -691,10 +741,24 @@ public sealed class OrganizeService : IOrganizeService
                 LogLine = "警告：续传索引可能不完整（部分子目录无法访问），已按可读取的部分处理。",
             });
         }
+        // K-P2-2：同 RunAsync —— rename_log.csv 存在但表头不可识别时，续传索引恒为空且此前无任何提示。
+        if (completed.HeaderUnreadable)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = 0,
+                LogLine = "警告：输出目录中的 rename_log.csv 表头不可识别（文件为空、缺少必需列，或上次写入被中断），" +
+                          "已按「无历史记录」处理：本批次会重新处理所有文件。下次成功写入时会自动补回表头。",
+            });
+        }
 
         // done 提到 try 之外：熔断中止时 finally 里的「日志写失败告警」要按真实完成比例报进度，
         // 声明在 try 内会让 finally 取不到它（CS0103）。
         int done = 0;
+
+        // K-P1-1：模拟运行下「将无备份覆盖」的计数（同 RunAsync 的 BatchCounters.DryRunOverwriteNoBackup，
+        // 只是归档路径没有 ProcessOneAsync，故用局部变量）。同样在 finally 里上报。
+        int dryRunOverwriteNoBackup = 0;
 
         // 工作队列 + 单文件尝试次数：与整理模式（RunAsync）同档的「确定性失败给 2 次」。
         // 此前归档用 foreach 一次即弃——同一张图、同一个瞬时抖动（例如云盘同步恰好锁住一秒），
@@ -864,8 +928,24 @@ public sealed class OrganizeService : IOrganizeService
                             // UI 侧已同步新增「已覆盖」桶，两侧共用 OverwriteNoBackupNotice 的「已覆盖」关键字。
                             entry.Message = OverwriteNoBackupNotice;
                         }
-                        if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
+                        // K-P1-1：模拟运行下「同样统计」（判据与上面同源，仅把 !req.DryRun 换成 req.DryRun）。
+                        // 上面 overwroteExisting 的 !req.DryRun 与过去时 Message 完全不动；这里只累计计数，
+                        // 由本方法 finally 走既有汇总通道以「预估」口径报一次。
+                        // 跨域契约同 ProcessOneAsync：时态措辞由 UI 侧 ReportDegradedSummary 的
+                        // DryRun 前缀分支负责（该 VM 的 DryRun 由 FIX-D 改为批次快照字段，本文件不感知）。
+                        bool willOverwriteExisting = req.Conflict == ConflictStrategy.Overwrite && req.DryRun &&
+                                                     req.Mode != OperationMode.Rename &&
+                                                     !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
+                        if (willOverwriteExisting) dryRunOverwriteNoBackup++;
                     }
+
+                    // P2-6：日志写入提到 if/else <b>之外</b>，让「跳过(已存在)」也写 rename_log.csv，
+                    // 与整理路径（ProcessOneAsync 的 resolved == null 分支会写）口径一致。
+                    // 读侧按 status.Contains("跳过") 排除，故补写不会污染续传索引（DoneBySource /
+                    // DoneByNewPath 都不收跳过态）；Operation="归档" 也不在 RecordIgnoredRow 的
+                    // 「叠加保护」集合内（该集合只收 RenameOperation）→ 不会引入任何重复或误跳。
+                    // 成功分支原本就写，位置不变（只是挪到 if/else 之外），不会重复写两行。
+                    if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
 
                     Categorize(report, entry);
                 }
@@ -992,6 +1072,19 @@ public sealed class OrganizeService : IOrganizeService
                               "请检查输出目录与磁盘剩余空间——rename_log.csv 是撤销与续传的唯一索引。",
                 });
             }
+
+            // K-P1-1：模拟运行下「将无备份覆盖」的批次级预估（与 RunAsync 同口径、同文案骨架）。
+            // 放 finally：环境级熔断也是 throw 离开方法，留到 finally 之后会被整段跳过。
+            if (dryRunOverwriteNoBackup > 0)
+            {
+                progress.Report(new OrganizeProgress
+                {
+                    Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                    LogLine = $"模拟运行预估：本批次将有 {dryRunOverwriteNoBackup} 个目标位置的原有文件被「覆盖」策略直接替换，" +
+                              "届时这些文件不会有备份、原内容将无法恢复（本条为预估，不是已发生的事实）。若不想覆盖，请改用「跳过」或「自动加序号」冲突策略后重跑。" +
+                              "（本条为模拟预估，本次未改动任何文件。）",
+                });
+            }
         }
 
         progress.Report(new OrganizeProgress
@@ -1033,8 +1126,35 @@ public sealed class OrganizeService : IOrganizeService
         public int LastLatencyMs;
     }
 
+    /// <summary>
+    /// 单批次的「只能在 <see cref="ProcessOneAsync"/> 内部判定、需在批次收尾统一上报」的计数器。
+    /// <para>做成类而非实例字段：本类是进程级单例，实例字段会把上一批的计数带进下一批
+    /// （跨批次污染 → 谎报），与 <see cref="AiRunStats"/> 同一理由。</para>
+    /// <para>为什么必须借对象回传：<see cref="ProcessOneAsync"/> 是 async 方法，
+    /// C# 不允许 async 方法声明 ref/out 参数（CS1988）。</para>
+    /// </summary>
+    private sealed class BatchCounters
+    {
+        /// <summary>
+        /// K-P1-1：<b>模拟运行</b>下「将无备份覆盖目标位置原有同名文件」的文件数。
+        /// 与实跑的 <c>overwroteExisting</c> 是<b>并列</b>的两条口径（后者带 <c>!req.DryRun</c> 与
+        /// 过去时语义，保持完全不动）：项目自设不变量是「模拟口径 = 实跑口径」，
+        /// 实跑会告警「N 个被无备份覆盖且不可恢复」，模拟也必须报——否则用户靠模拟评估风险时
+        /// 被系统性误导（模拟比实跑乐观，正是最不该偏的一侧）。
+        /// </summary>
+        public int DryRunOverwriteNoBackup;
+
+        /// <summary>
+        /// K-P1-2：因叠加保护·<b>判据二</b>（名称形态疑似已命名，<see cref="NestedRenameSkipReasonByForm"/>）
+        /// 被跳过的文件数。判据一（按历史日志精确判定）<b>不计入</b>——它是有确凿证据的精确跳过，
+        /// 而判据二是形态兜底、存在已知误跳形态（如 <c>20240101_holiday_1234</c>），
+        /// 必须在批次级说一次，避免 N 行分散在结果列表里等于换一种方式的静默。
+        /// </summary>
+        public int NestedFormSkipped;
+    }
+
     private async Task<RenameLogEntry> ProcessOneAsync(
-        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, AiRunStats aiStats, int index, CancellationToken ct,
+        PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, AiRunStats aiStats, BatchCounters counters, int index, CancellationToken ct,
         Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache,
         HashSet<string> claimedThisRun, HashSet<string> backedUpThisRun,
         HashSet<string> previouslyRenamedAnyFingerprint)
@@ -1173,7 +1293,16 @@ public sealed class OrganizeService : IOrganizeService
         {
             string? byForm = NestedRenameSkipReasonByForm(f, template, when, baseName);
             if (byForm != null)
+            {
+                // K-P1-2：判据二的跳过本身是<b>可见</b>的中性态（结果行 + 常驻日志各一行），
+                // 但 N 行分散在结果列表里等于换一种方式的静默——用户多半把「看起来已符合当前命名规则」
+                // 当成结论、不再复核。这里只累计计数，由 RunAsync 收尾用既有汇总通道
+                //（与 IgnoredByFingerprint 同一条 progress.Report）说一次。
+                // <b>判据本身一个字都不改</b>：R10 已用对抗样本裁定「放宽（4 位→≥4 位）会新增 6 例误跳，
+                // 方向是宁可漏判、不可误跳」，改判据会翻转该裁定，不被授权。
+                counters.NestedFormSkipped++;
                 return await BuildNestedRenameSkipAsync(f, req, md5, output, byForm).ConfigureAwait(false);
+            }
         }
 
         // P0-1：重命名模式按「文件自身所在目录」定输出目录，而不是一律用源根目录。
@@ -1268,6 +1397,20 @@ public sealed class OrganizeService : IOrganizeService
             // UI 侧靠「已覆盖」关键字分桶，两侧共用 OverwriteNoBackupNotice，不要各写一套。
             entry.Message = OverwriteNoBackupNotice;
         }
+        // K-P1-1：模拟运行下「同样统计」这条破坏性后果，但**不**沿用上面的过去时语义——
+        // 上面 overwroteExisting 的 <b>!req.DryRun 与过去时 Message 完全不动</b>（模拟下写出「已覆盖…」
+        // 会把预览说成既成事实，P33）。这里只累计计数，由 RunAsync 收尾走既有汇总通道
+        //（与 IgnoredByFingerprint 同一条 progress.Report）以「预估」口径报一次。
+        // 判据与 overwroteExisting 同源、仅把 !req.DryRun 换成 req.DryRun，
+        // 故与 degraded 的互斥不变式同样成立（degraded 为真时 targetMd5 必为 null 或 == md5）。
+        // <b>跨域契约</b>：读侧 OrganizeViewModel.ReportDegradedSummary 的
+        // `DryRun ? "模拟运行预估：本批次将有 " : "本批次有 "` 前缀分支负责时态措辞；
+        // 该 VM 的 DryRun 由 FIX-D 并行改为批次快照字段（_runDryRun），本文件不感知、也不得依赖它。
+        // 内核只输出「计数 + 会发生覆盖」这个事实，不生成任何时态措辞。
+        bool willOverwriteExisting = req.Conflict == ConflictStrategy.Overwrite && req.DryRun &&
+                                     req.Mode != OperationMode.Rename &&
+                                     !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
+        if (willOverwriteExisting) counters.DryRunOverwriteNoBackup++;
         if (!req.DryRun) await _log.AppendRenameLogAsync(output, entry).ConfigureAwait(false);
         return entry;
     }
@@ -1332,8 +1475,8 @@ public sealed class OrganizeService : IOrganizeService
             // 故这里的语义是「兜底」而不是「Move」——此前它靠 else 承载合法的 Move，
             // 直接把 else 改成 Copy 会让正常选「移动」的用户变成复制（文件留在源目录），那是功能回归。
             //
-            // 兜底【不做任何文件操作】，直接抛错。理由：上面 :1006 的
-            //   overwrite = Conflict == Overwrite && Mode != Rename
+            // 兜底【不做任何文件操作】，直接抛错。理由：本方法开头算出的局部变量 overwrite
+            //   （overwrite = Conflict == Overwrite && Mode != Rename，符号锚点即 ExecuteAsync.overwrite）
             // 对未定义值同样成立（未定义 != Rename），所以「未定义 Mode + 合法的 Overwrite」
             // 这个组合下 overwrite 会被算成 true —— 此时即便按破坏面最小的 Copy 兜底，
             // 也会 File.Copy(..., overwrite: true) 静默覆盖掉目标位置那个已存在的文件，
@@ -1365,17 +1508,32 @@ public sealed class OrganizeService : IOrganizeService
                 $"文件被其它程序占用，无法处理：{Path.GetFileName(source)}。请关闭可能占用它的看图软件/编辑器/云盘同步后重试。",
                 isEnvironmentError: false, isBatchLevel: false, inner: ex);
         }
-        catch (IOException ex) when (ex.HResult == ErrorPathTooLong || ex.HResult == ErrorInvalidName)
+        catch (IOException ex) when (ex.HResult == ErrorPathTooLong)
         {
-            // 路径过长 / 文件名非法：确定性失败，重试必然复现（此前会空转 2 次），
+            // 路径过长：确定性失败，重试必然复现（此前会空转 2 次），
             // 且框架原文是英文、排障方向也不对。给出可执行的整改方向。
             // 逐文件级（非环境级）：不同文件的目录深度 / 名字长度不同，不该熔断整批。
             // 说明：MaxBaseNameLength(180) 只约束基名，不约束输出目录深度，
-            // 而 app.manifest 已按既定取舍移除 longPathAware，故深目录 + 长基名仍可超 MAX_PATH；
-            // ERROR_INVALID_NAME 则多来自模板字面量里的保留设备名（CON 等）——Sanitize 只净化占位符的「值」。
+            // 而 app.manifest 已按既定取舍移除 longPathAware，故深目录 + 长基名仍可超 MAX_PATH。
             throw new PermanentOperationException(
-                $"路径过长或文件名非法，无法处理：{Path.GetFileName(source)}。" +
-                "请改用更短的输出路径或更短的命名模板（避免过深的输出目录与保留设备名）。",
+                $"路径过长，无法处理：{Path.GetFileName(source)}。" +
+                "请改用更短的输出路径或更短的命名模板（避免过深的输出目录）。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
+        catch (IOException ex) when (ex.HResult == ErrorInvalidName)
+        {
+            // 文件名非法：确定性失败，重试必然复现，且框架原文是英文、排障方向也不对。
+            // <b>文案刻意不内嵌文件名</b>（与上一分支的区别就在此）：非法文件名的成因是
+            // 「模板字面量含 Windows 保留字符」或「保留了 CON / NUL / COM1 等设备名」，
+            // 对整批文件都成立（占位符的值都过了 Sanitize，不会带非法字符）。
+            // 而 RunAsync 的同因闸门靠 `cause` 是否稳定来判定「连续 3 个文件同因」：
+            // 文案一旦内嵌文件名，cause 会被补上 `@" + f.Path` → 每个文件都不同
+            // → sameCauseCount 永远凑不满 3 → 1000 张照片 = 1000 行同因错误、整批不早停。
+            // 保留 isEnvironmentError / isBatchLevel 均为 false：<b>不改闸门语义</b>
+            //（不参与 consecutivePermanent），只让「同因计数」这条闸也能覆盖这类整批根因。
+            throw new PermanentOperationException(
+                "文件名非法，无法处理（常见原因：命名模板含 Windows 保留字符，或保留了 CON / NUL 等设备名）。" +
+                "请改用不含这些字符的命名模板后重试。",
                 isEnvironmentError: false, isBatchLevel: false, inner: ex);
         }
         catch (UnauthorizedAccessException ex)
@@ -1851,19 +2009,23 @@ public sealed class OrganizeService : IOrganizeService
         // 第七轮改成 "unknown{index:D4}"（按文件批次序号），只解决了"批内多文件撞名"（_1/_2/_3 楼梯），
         // 但同一文件的 6 个占位符仍复读为 "unknown0018unknown0018…unknown0018"（真机验证发现）。
         //
-        // 修法：按<b>占位符在模板中出现的次序</b>再叠加一个字母后缀（a/b/c/d/e/f…），保证同一文件
-        // 内 6 个占位符的占位值也都不同：unknown0018a_unknown0018b_…_unknown0018f。仍然批内唯一
-        // （后缀与文件序号组合），且对默认模板无破坏（默认模板用 _ 分隔、加后缀后仍是合法文件名）。
+        // 修法：给 AI 占位值再叠加一个字母后缀（a/b/c/d/e/f…），让同一文件内 6 个占位符的占位值
+        // 互不相同：unknown0018a_unknown0018b_…_unknown0018f。仍然批内唯一（后缀与文件序号组合），
+        // 且对默认模板无破坏（默认模板用 _ 分隔、加后缀后仍是合法文件名）。
         // 字母后缀<b>只在 DryRun 下</b>追加；非模拟路径完全不动，仍是既有 "unknown" 兜底（实跑时
         // 各文件真实结果不同，撞名概率极低；沿用此前口径，不引入新行为）。用户一眼能看出
         // 「a/b/c…/f」是同一文件内的 6 个不同位置，而非真实识别结果。
         //
-        // 占位符后缀按模板中真实出现次序递增：先匹配 category 再 scene 再 people 再 action
-        // 再 subtitle 再 source，与 AiPlaceholders 的定义顺序一致（Helpers/ImageAnalysisHelper.cs:67）。
-        // 不查模板里到底写了几个（用户可能删掉某些字段），改用「每次 Ai() 被调用时 aiPlaceIdx++」，
-        // 保证每个 AI 占位符位置都拿到不同后缀，即便模板只写 `{category}{category}` 这种重复用法
-        // 也会产出 unknown0018a_unknown0018b 而非复读。最大支持 26 个位置（a..z），超出罕见可走
-        // double-letter 兜底；单文件超 26 个 AI 字段几乎不可能（占位符就 6 个，模板去重后至多 6）。
+        // <b>后缀的分配口径（与实现严格一致，勿按旧注释理解）</b>：字母反映的是
+        // <see cref="AiPlaceholders"/> 的<b>固定字段顺序</b>（category→scene→people→action→subtitle→source），
+        // <b>不是</b>「占位符在模板中出现的次序」。原因有两条，都由下方 Build() 的实现决定：
+        //   ① 六个 `Ai(...)` 实参在 `string.Replace` 链里<b>被无条件求值</b>（与模板是否含该占位符无关），
+        //      所以后缀字母只取决于 AiPlaceholders 的字段次序；
+        //   ② `string.Replace` 是<b>全量替换</b>——同一个占位符出现两次必然得到同一个值。
+        // 因此模板写 `{category}{category}` 的产出是 `unknown0018aunknown0018a`（两个 a），
+        // 而<b>不是</b> a/b；只写 `{scene}` 时后缀才是 b（category 的 Ai() 先被求值占用了 a）。
+        // 功能上无危害：后缀只用于保证「同一文件内不同字段」可区分，不承担「位置序号」语义。
+        // 单文件至多 6 个 AI 字段（模板去重后），26 个字母足够；超出走 double-letter 兜底。
         var aiPlaceIdx = 0;
         var aiPlaceSuffixes = new char[] { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
                                            'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z' };
@@ -1910,9 +2072,10 @@ public sealed class OrganizeService : IOrganizeService
         // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException。
         // 抽成局部函数复用：下方「净化后为空 → 回退默认模板」这条分支也必须过同一截断，
         // 否则 MaxBaseNameLength 的 MAX_PATH 收口会在新旁路上失效（模板写成 "../" 且源文件名主干较长时）。
+        // P2-3：截断走 TruncateSafe（不在 UTF-16 代理对中间切断），TrimEnd 保留以防截出非法结尾字符。
         string Truncate(string s)
             => s.Length > MaxBaseNameLength
-                ? s.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.')
+                ? TruncateSafe(s, MaxBaseNameLength).TrimEnd('_', ' ', '.')
                 : s;
 
         var built = Truncate(Build(template));
@@ -1925,6 +2088,18 @@ public sealed class OrganizeService : IOrganizeService
         // 选中「剥离」而不是「报错拒绝整批」，是为了与既有 Sanitize 口径一致：
         // 非法字符一律替换而非中止（中止会让用户为一个字符重填整个模板并重启批次）。
         built = string.Concat(built.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, ':'));
+
+        // P2-1：上面只剥离了 <c>\ / :</c>，模板字面量里的<b>其余</b> Windows 非法文件名字符
+        // （`* ? " &lt; &gt; |` 与控制字符）仍会原样进入最终基名 → 每个文件的目标名都非法
+        // → ERROR_INVALID_NAME 对整批成立，N 个文件各失败一次并刷 N 行同因错误。
+        // 这里补一道：把 <see cref="Invalid"/>（= Path.GetInvalidFileNameChars()）里<b>剩下</b>的字符
+        // 统一替换为 '_'（<c>\ / :</c> 已在上一步被剥离，不会走到这里，故既有行为不变）。
+        // <b>刻意不复用 Sanitize</b>：Sanitize 作用于占位符的「值」，它还会把空格折成 '_' 并把结果截到
+        // 40 字符——套到「结果整体」上会改变「模板字面量含空格」用户的既有命名，属行为回归。
+        var cleaned = new StringBuilder(built.Length);
+        foreach (var c in built)
+            cleaned.Append(Array.IndexOf(Invalid, c) >= 0 ? '_' : c);
+        built = cleaned.ToString();
 
         // P1-5 兜底：模板字面量<b>全是</b>分隔符 / 空白（"../"、"\"、"/"、"   "…）时净化结果为空，
         // 直接返回会让文件名只剩扩展名（".jpg"），同批文件还会互相撞名并被一路加 _1/_2/_3。
@@ -2171,6 +2346,24 @@ public sealed class OrganizeService : IOrganizeService
 
     private static readonly char[] Invalid = Path.GetInvalidFileNameChars();
 
+    /// <summary>
+    /// 按 UTF-16 码元上限截断，且<b>不切断代理对</b>（P2-3）。
+    /// <see cref="string.Length"/> 是 UTF-16 码元数、<c>Substring</c> 按码元切：截断点若落在 BMP 外字符
+    /// （emoji / 部分生僻字）的代理对中间，会产出含<b>孤立代理项</b>的字符串（非法 Unicode），
+    /// 随后进入 <c>Path.Combine</c> / <c>File.Move</c>（文件名非法或显示乱码）。
+    /// 供 <see cref="Sanitize"/> 与 <see cref="BuildName"/> 内的局部函数 <c>Truncate</c> 共用，
+    /// 避免两处各写一份再次漂移。
+    /// </summary>
+    private static string TruncateSafe(string s, int maxLength)
+    {
+        if (maxLength <= 0) return "";
+        if (s.Length <= maxLength) return s;
+        int len = maxLength;
+        // 截断点的最后一个码元是「高位代理」⇒ 它后面的低位代理已被切掉，回退一位保住整个代理对。
+        if (char.IsHighSurrogate(s[len - 1])) len--;
+        return s.Substring(0, len);
+    }
+
     private static string Sanitize(string s)
     {
         if (string.IsNullOrWhiteSpace(s)) return "";
@@ -2183,7 +2376,8 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         var t = sb.ToString();
-        return t.Length > 40 ? t.Substring(0, 40) : t;
+        // P2-3：截断改走 TruncateSafe（原为 t.Substring(0, 40)），避免切出孤立代理项。
+        return TruncateSafe(t, 40);
     }
 
     private static void Categorize(OrganizeReport report, RenameLogEntry e)
