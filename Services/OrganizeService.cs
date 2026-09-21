@@ -848,6 +848,8 @@ public sealed class OrganizeService : IOrganizeService
                         // ResolveTargetAsync / ExecuteAsync 里提前判「未改动」返回）。
                         // 与 degraded 互斥：degraded 表示「Overwrite 未生效、退化为加序号」，
                         // 本判据表示「Overwrite 已生效、真的覆盖了」，二者不可能同时为真。
+                        // <b>!req.DryRun 这个守卫不要去掉</b>：UI 的汇总文案是「模拟运行预估：本批次将有 …」，
+                        // 而本条文案是过去时「已被替换」。模拟下真的写出它，就会把预览说成既成事实（P33）。
                         overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
                                             req.Mode != OperationMode.Rename &&
                                             !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
@@ -1222,6 +1224,8 @@ public sealed class OrganizeService : IOrganizeService
         // BackupOriginalAsync）。此前这条路径没有任何提示，与归档侧口径不一致，故一并写 Message。
         // 判据与 ExecuteAsync 的 overwrite 取值同源（targetMd5 非空 ⇒ 目标曾存在；!= md5 ⇒ 内容不同）。
         // 与 degraded 互斥：degraded 是「Overwrite 未生效」，本判据是「Overwrite 已生效」。
+        // <b>!req.DryRun 守卫不要去掉</b>：UI 汇总前缀是「模拟运行预估：本批次将有 …」，
+        // 本条文案却是过去时「已被替换」；模拟下写出它会重演 P33（把预览说成已发生）。
         bool overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
                                  req.Mode != OperationMode.Rename &&
                                  !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
