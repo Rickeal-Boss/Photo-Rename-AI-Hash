@@ -947,10 +947,17 @@ public sealed class OrganizeService : IOrganizeService
                 {
                     Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                     Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
+                    // 日志行必须与结果行的 Status 一致（P33：日志说「已归档」而结果行是「错误」，
+                    // 两处互相矛盾，用户不知道信哪个）。失败条目在上面两个 catch（非环境级永久错误 /
+                    // 通用重试终态）里都把 entry 置成 Status="错误"，此前它们会落到同一条「已归档」
+                    // 文案上——谎报成功。（环境级那个 catch 是 `throw` 离开方法的，到不了这里。）
+                    // 用 IsError 而非列举文案：将来新增失败态时不会漏（与 RenameLogEntry 的既有判据同源）。
                     // 覆盖了原有同名文件时必须在常驻日志里点名（归档没有备份，被覆盖者没有副本）。
-                    LogLine = overwroteExisting
-                        ? $"{f.Name} 已归档（覆盖了输出目录中已存在的同名文件，该文件没有备份）进度 {done}/{files.Count}"
-                        : $"{f.Name} 已归档进度 {done}/{files.Count}",
+                    LogLine = entry != null && entry.IsError
+                        ? $"{f.Name} [错误] {entry.Message} 进度 {done}/{files.Count}"
+                        : overwroteExisting
+                            ? $"{f.Name} 已归档（覆盖了输出目录中已存在的同名文件，该文件没有备份）进度 {done}/{files.Count}"
+                            : $"{f.Name} 已归档进度 {done}/{files.Count}",
                 });
             }
         }
@@ -1064,6 +1071,46 @@ public sealed class OrganizeService : IOrganizeService
         // 算出同一个候选名、被一路加 _1/_2/_3，预览的冲突数与实跑完全对不上（详见 BuildName）。
         bool needsAi = ai != null && TemplateWillUseAi(req);
 
+        // 生成新名用的<b>生效模板</b>。刻意在 AI 调用之前求值（原位置在 AI 之后）：
+        // 它只依赖 needsAi 与用户填的模板，与 AI 返回结果无关；提前算出来才能把「不花钱的判据」
+        // （叠加保护·判据一）放到付费调用之前执行，见下方。
+        // 未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
+        // 模板为空（用户清空「命名规则」输入框，或 settings.json 中该字段为 null）时回退到默认模板：
+        // 否则 BuildName 返回空串，最终文件名只剩扩展名（如 ".jpg"），批量文件还会互相撞名。
+        //
+        // P1-3 配套：回退判据由「ai != null」改为「本批次是否真会产出 AI 值」。
+        // ai 现在在「模板不含 AI 占位符」「模拟运行」两种情况下也为 null（见 TemplateWillUseAi），
+        // 沿用 ai != null 会把用户自己写的、根本不需要 AI 的模板（如 {yyyy}_{name}_{n}）
+        // 强行换成默认模板 —— 那等于抹掉用户填的命名规则，是比原问题更严重的回归。
+        // 只有「模板确实用到 AI 占位符、而本批次拿不到 AI 值」才回退（即引擎未启用）。
+        // 模拟运行刻意<b>不</b>回退：按 P1-3b 用带 unknown 前缀的占位填 AI 字段（见 BuildName 的 Ai()，
+        // 并带批次序号以保证批内唯一），让用户看清「哪些字段在模拟下没有真实值」，
+        // 而不是整个模板被悄悄换掉——后者会让模拟结果与实际运行的命名规则完全不同，预览也就失去意义。
+        bool templateNeedsAi = TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders);
+        bool aiValueUnavailable = templateNeedsAi && !needsAi && !req.DryRun;
+        string template = string.IsNullOrWhiteSpace(req.NamingTemplate) || aiValueUnavailable
+            ? DefaultNamingTemplate
+            : req.NamingTemplate;
+
+        // ── 重命名模式的「文件名叠加」保护 · 判据一（精确）——必须在付费 AI 调用之前 ──────────
+        // 重命名的输入名本身就是输出的一部分：模板含 {name} 时，输出会把「当前文件名」再嵌一次。
+        // 一旦该文件的续传索引失效（日志写失败 / 用户删日志 / 指纹变化 / 升级后旧日志无指纹列），
+        // 它会被再次加工：IMG_0001 → 20240101_IMG_0001_0001 → 下一轮再变长…… 文件名不可逆污染，
+        // 而结果列表里每一行都是绿色的「已重命名」。
+        // 为「宁可重做」辩护的理由（重做时内容相同会被判「未改动」、不产生副本）**只对 Copy/Move 成立**
+        // ——那两种模式下输入名不变、重做幂等；重命名模式下输入名会变，该理由不成立。
+        //
+        // <b>位置</b>：判据一只查「当前路径是否曾是历史记录的目标路径」，与 AI 结果无关，
+        // 故必须放在 AnalyzeAsync 之前——否则「索引失效 → 整批重做」这个本保护要覆盖的主要场景里，
+        // 每个本应被保护性跳过的文件都会先真实调用一次 AI（付费）再被丢弃，保护要省的钱一分没省。
+        // 判据二（形态兜底）无法同样上移，原因见它自己那一段。
+        if (req.Mode == OperationMode.Rename && template.Contains("{name}", StringComparison.Ordinal))
+        {
+            string? byHistory = NestedRenameSkipReasonByHistory(f, template, previouslyRenamedAnyFingerprint);
+            if (byHistory != null)
+                return await BuildNestedRenameSkipAsync(f, req, md5, output, byHistory).ConfigureAwait(false);
+        }
+
         // AI 识别（结果缓存：重试复用，避免重复计费）
         // 条件里保留 ai != null（needsAi 已蕴含它，但可空流分析只认显式的空值判断，省掉会报 CS8602）
         if (ai != null && needsAi)
@@ -1098,56 +1145,27 @@ public sealed class OrganizeService : IOrganizeService
         // 这是有意的取舍：把暂停改成取消会丢弃已扫描的工作队列，违背暂停语义。
         if (_pts != null) await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false);
 
-        // 生成新名：未配置 AI 引擎时回退到「日期+原名+序号」，避免 unknown_…_unknown 垃圾名
-        // 模板为空（用户清空「命名规则」输入框，或 settings.json 中该字段为 null）时回退到默认模板：
-        // 否则 BuildName 返回空串，最终文件名只剩扩展名（如 ".jpg"），批量文件还会互相撞名。
-        //
-        // P1-3 配套：回退判据由「ai != null」改为「本批次是否真会产出 AI 值」。
-        // ai 现在在「模板不含 AI 占位符」「模拟运行」两种情况下也为 null（见 TemplateWillUseAi），
-        // 沿用 ai != null 会把用户自己写的、根本不需要 AI 的模板（如 {yyyy}_{name}_{n}）
-        // 强行换成默认模板 —— 那等于抹掉用户填的命名规则，是比原问题更严重的回归。
-        // 只有「模板确实用到 AI 占位符、而本批次拿不到 AI 值」才回退（即引擎未启用）。
-        // 模拟运行刻意<b>不</b>回退：按 P1-3b 用带 unknown 前缀的占位填 AI 字段（见 BuildName 的 Ai()，
-        // 并带批次序号以保证批内唯一），让用户看清「哪些字段在模拟下没有真实值」，
-        // 而不是整个模板被悄悄换掉——后者会让模拟结果与实际运行的命名规则完全不同，预览也就失去意义。
-        bool templateNeedsAi = TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders);
-        bool aiValueUnavailable = templateNeedsAi && !needsAi && !req.DryRun;
-        string template = string.IsNullOrWhiteSpace(req.NamingTemplate) || aiValueUnavailable
-            ? DefaultNamingTemplate
-            : req.NamingTemplate;
+        // 生成候选名（需要 AI 结果，故只能在 AI 调用之后求值）
         string baseName = BuildName(f, template, when, index, req.DryRun);
         string candidate = baseName + Path.GetExtension(f.Name);
 
-        // ── 重命名模式的「文件名叠加」保护（不可逆操作绝不能静默发生）──────────────────
-        // 重命名的输入名本身就是输出的一部分：模板含 {name} 时，输出会把「当前文件名」再嵌一次。
-        // 一旦该文件的续传索引失效（日志写失败 / 用户删日志 / 指纹变化 / 升级后旧日志无指纹列），
-        // 它会被再次加工：IMG_0001 → 20240101_IMG_0001_0001 → 下一轮再变长…… 文件名不可逆污染，
-        // 而结果列表里每一行都是绿色的「已重命名」。
-        // 为「宁可重做」辩护的理由（重做时内容相同会被判「未改动」、不产生副本）**只对 Copy/Move 成立**
-        // ——那两种模式下输入名不变、重做幂等；重命名模式下输入名会变，该理由不成立。
-        // 故这里在真正改名之前先判定「这个文件看起来是不是已经被本规则命名过」，命中则保护性跳过并
-        // 明确提示。判据见 NestedRenameSkipReason（两条：历史目标路径精确命中 / 名称形态命中），
-        // 两者都只在「输出确实会把当前名再嵌一次」的前提下才生效，且**只作用于重命名模式**——
-        // Copy/Move 的「宁可重做」既有口径原样保留（判据里显式排除了重命名模式之外的分支）。
+        // ── 叠加保护 · 判据二（形态兜底）────────────────────────────────────────────────
+        // 与判据一的分工：判据一靠历史日志（精确，已在 AI 之前跑过），本条只在
+        // 「日志整体丢失、没有任何历史可查」时兜底。
+        // <b>为什么它留在 AI 之后</b>：它需要一个「输出确实会把当前名再嵌一次」的门，
+        // 而该门只能由候选名给出——模板含 {name} 只是必要条件，最终基名还可能被 Truncate 截断、
+        // 或在「净化后为空」时整体回退默认模板，只有真算出 baseName 才确凿。
+        // 代价是：命中判据二的文件会先产生一次 AI 费用。这是<b>有意的取舍</b>——
+        // 判据二的触发前提是「历史日志整体丢失」（此时通常没有任何历史可查，也就谈不上
+        // 「索引失效重跑」），比判据一覆盖的常见场景（改参数 / 升级）罕见得多；
+        // 若为它把候选名也搬到 AI 之前，就得先算一个不含真实 AI 值的候选名，
+        // 与「候选名必须反映真实 AI 结果」直接冲突（会让判据本身失真）。
+        // Copy/Move 的「宁可重做」既有口径原样保留（本条显式只作用于重命名模式）。
         if (req.Mode == OperationMode.Rename && template.Contains("{name}", StringComparison.Ordinal))
         {
-            string? nestedReason = NestedRenameSkipReason(f, template, when, baseName, previouslyRenamedAnyFingerprint);
-            if (nestedReason != null)
-            {
-                var nested = new RenameLogEntry
-                {
-                    OriginalPath = f.Path,
-                    OriginalName = f.Name,
-                    Md5 = md5,
-                    Operation = OpName(req.Mode),
-                    Status = "跳过(疑似已命名)",
-                    Message = nestedReason,
-                    Fingerprint = req.Fingerprint,
-                };
-                // 跳过态写日志仅作审计（读侧按 Contains("跳过") 排除，不会污染续传索引）。
-                if (!req.DryRun) await _log.AppendRenameLogAsync(output, nested).ConfigureAwait(false);
-                return nested;
-            }
+            string? byForm = NestedRenameSkipReasonByForm(f, template, when, baseName);
+            if (byForm != null)
+                return await BuildNestedRenameSkipAsync(f, req, md5, output, byForm).ConfigureAwait(false);
         }
 
         // P0-1：重命名模式按「文件自身所在目录」定输出目录，而不是一律用源根目录。
@@ -1886,25 +1904,68 @@ public sealed class OrganizeService : IOrganizeService
     }
 
     /// <summary>
-    /// 重命名模式下判断「当前文件是否看起来已被本规则命名过」，命中则返回给用户看的跳过原因（否则返回 null）。
-    /// <b>为什么需要</b>：重命名的输入名本身就是输出的一部分（模板含 <c>{name}</c>），
-    /// 续传索引一旦失效就会把同一文件逐轮再加工 → 文件名不可逆叠加变长。
+    /// 构造「跳过(疑似已命名)」结果条目并写审计日志（两条判据共用，避免两份重复构造而漂移）。
     /// <b>前置条件（由调用方保证）</b>：模式为重命名，且模板含 <c>{name}</c>。
-    /// <para>两条判据，任一命中即跳过（均为「保守」判定：命中时改名确实会造成叠加）：</para>
-    /// <list type="number">
-    /// <item><description><b>精确</b>：当前路径曾是历史记录的「目标路径」（<b>不限指纹</b>，
+    /// 跳过态写日志仅作审计（读侧按 <c>Contains("跳过")</c> 排除，不会污染续传索引）。
+    /// </summary>
+    private async Task<RenameLogEntry> BuildNestedRenameSkipAsync(
+        PhotoFile f, OrganizeRequest req, string md5, string output, string reason)
+    {
+        var nested = new RenameLogEntry
+        {
+            OriginalPath = f.Path,
+            OriginalName = f.Name,
+            Md5 = md5,
+            Operation = OpName(req.Mode),
+            Status = "跳过(疑似已命名)",
+            Message = reason,
+            Fingerprint = req.Fingerprint,
+        };
+        if (!req.DryRun) await _log.AppendRenameLogAsync(output, nested).ConfigureAwait(false);
+        return nested;
+    }
+
+    /// <summary>
+    /// 叠加保护 · <b>判据一（精确）</b>：当前路径曾是历史记录的「目标路径」（<b>不限指纹</b>，
     /// 见 <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/>）——说明这个文件确实被本工具改过名。
-    /// 覆盖「升级后旧日志无指纹列」「指纹变化」两类失效（旧记录的目标路径仍然可读）。</description></item>
-    /// <item><description><b>形态</b>：模板在 <c>{name}</c> 之前有确定性的日期前缀，且当前名已以该前缀开头
-    /// （并按 <c>{n}</c> 后缀形态校验末尾 4 位数字）。用于兜住「日志整体丢失」的场景——此时没有任何
-    /// 历史记录可查，只能从名称形态推断。该判据只在「名字已符合本模板产出形态」时命中，
-    /// 此时改名必然叠加，故跳过是安全方向。</description></item>
-    /// </list>
-    /// <b>不在此拦截「本次不改名」的情形</b>：候选名与当前名相同（如模板为 <c>{name}</c>）时直接返回 null，
+    /// 覆盖「升级后旧日志无指纹列」「指纹变化」两类续传索引失效（旧记录的目标路径仍然可读）。
+    /// <para><b>不依赖 AI 结果，故调用方在付费 AI 调用之前调用它</b>（见 <c>ProcessOneAsync</c>）。</para>
+    /// <b>前置条件（由调用方保证）</b>：模式为重命名，且模板含 <c>{name}</c>。
+    /// </summary>
+    private static string? NestedRenameSkipReasonByHistory(
+        PhotoFile f, string template, HashSet<string> previouslyRenamedAnyFingerprint)
+    {
+        string curBase = Path.GetFileNameWithoutExtension(f.Name);
+        if (string.IsNullOrEmpty(curBase)) return null;
+
+        // 「本次不会改名」的排除：模板除 {name} 外没有任何内容（如模板就是 "{name}"）时，
+        // 输出与输入恒等（至多被 Sanitize 规整一次），不存在「逐轮叠加」，不该在这里拦——
+        // 否则会把「本次本来就不改名」误报成「疑似已命名」。
+        // 与旧实现「newBase == curBase 就早退」同义，但不需要先算出 newBase，故可放在 AI 之前。
+        // 只摘掉<b>第一个</b> {name}：模板写成 "{name}{name}" 时输出仍会变长，必须继续判定。
+        int nameIdx = template.IndexOf("{name}", StringComparison.Ordinal);
+        if (nameIdx < 0) return null;
+        if (template.Remove(nameIdx, "{name}".Length).Trim().Length == 0) return null;
+
+        if (previouslyRenamedAnyFingerprint.Contains(f.Path))
+            return "该文件看起来已被本规则命名过（历史日志显示它的当前路径曾是某个目标路径）。" +
+                   "为避免文件名被再次叠加（不可逆），已跳过。如确需重新命名，请改用「复制 / 移动」模式输出到新目录。";
+
+        return null;
+    }
+
+    /// <summary>
+    /// 叠加保护 · <b>判据二（形态兜底）</b>：模板在 <c>{name}</c> 之前有确定性的日期前缀，
+    /// 且当前名已以该前缀开头，并按 <c>{n}</c> 的<b>完整产出形态</b>校验后缀（见
+    /// <see cref="MatchesTemplateIndexSuffix"/>）。用于兜住「日志整体丢失」的场景——此时没有任何
+    /// 历史记录可查，只能从名称形态推断。
+    /// <para><b>为什么留在 AI 调用之后</b>：需要一个「输出确实会把当前名再嵌一次」的门，
+    /// 而该门只能由候选名给出（<paramref name="newBase"/>），故无法与判据一同上移。取舍见调用处注释。</para>
+    /// <b>不在此拦截「本次不改名」的情形</b>：候选名与当前名相同时直接返回 null，
     /// 交给下游的「未改动(内容相同)」判定，避免把正常的「无需改动」误报成「疑似已命名」。
     /// </summary>
-    private static string? NestedRenameSkipReason(
-        PhotoFile f, string template, DateTime when, string newBase, HashSet<string> previouslyRenamedAnyFingerprint)
+    private static string? NestedRenameSkipReasonByForm(
+        PhotoFile f, string template, DateTime when, string newBase)
     {
         string curBase = Path.GetFileNameWithoutExtension(f.Name);
         if (string.IsNullOrEmpty(curBase)) return null;
@@ -1918,17 +1979,11 @@ public sealed class OrganizeService : IOrganizeService
         if (string.IsNullOrEmpty(embedded) || !newBase.Contains(embedded, StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // 判据一（精确）：当前路径曾是历史记录的目标路径（不限指纹）。
-        if (previouslyRenamedAnyFingerprint.Contains(f.Path))
-            return "该文件看起来已被本规则命名过（历史日志显示它的当前路径曾是某个目标路径）。" +
-                   "为避免文件名被再次叠加（不可逆），已跳过。如确需重新命名，请改用「复制 / 移动」模式输出到新目录。";
-
-        // 判据二（形态兜底）：仅在「日志整体丢失、没有任何历史可查」时才需要用到，故放在精确判据之后。
         string datePrefix = TemplateDatePrefixBeforeName(template, when);
         if (datePrefix.Length > 0 &&
             curBase.StartsWith(datePrefix, StringComparison.OrdinalIgnoreCase) &&
-            MatchesTemplateIndexSuffix(curBase, template))
-            return "该文件的名称看起来已符合当前命名规则（已带相同日期前缀）。" +
+            MatchesTemplateIndexSuffix(curBase, template, datePrefix))
+            return "该文件的名称看起来已符合当前命名规则（已带相同日期前缀与序号）。" +
                    "为避免文件名被再次叠加（不可逆），已跳过。如确需重新命名，请改用「复制 / 移动」模式输出到新目录。";
 
         return null;
@@ -1972,19 +2027,63 @@ public sealed class OrganizeService : IOrganizeService
     }
 
     /// <summary>
-    /// 模板 <c>{name}</c> 之后若含 <c>{n}</c>（固定 4 位序号），则要求当前名以 4 位数字结尾——
-    /// 用来把「已符合本模板产出形态」与「用户自己起的名恰好带相同日期前缀」区分开
-    /// （如 <c>20240101_holiday.jpg</c> 不该被判成已命名）。后缀不含 <c>{n}</c> 时不作约束（返回 true）。
+    /// 「形态」判据的后缀校验：要求当前名确实以「模板里 <c>{name}</c> 与 <c>{n}</c> 之间的字面量
+    /// ＋ 4 位序号（<c>{n}</c> 由 <c>BuildName</c> 以 <c>index.ToString("D4")</c> 展开，恒 4 位）」结尾，
+    /// 且日期前缀与这段后缀之间还夹着<b>非空</b>的中间段（即上一轮 <c>{name}</c> 的展开值）。
+    /// <para><b>为什么必须这么严</b>：旧实现只要求「末 4 位是数字」，于是源文件名本身形如
+    /// <c>20240101_123456.jpg</c>（安卓 / 部分相机按拍摄日期命名，极常见）会被误判成
+    /// 「本模板的产出」——<c>20240101_</c> 前缀命中、末尾 <c>3456</c> 是数字，<b>首跑即整批跳过、
+    /// 一个文件都不改名</b>。要求「序号前必须是模板里的分隔符」后，<c>123456</c> 中末 4 位前的字符是
+    /// <c>2</c> 而非 <c>_</c>，自然不命中；而真正的产出 <c>20240101_IMG_0001_0001</c> 仍然命中。</para>
+    /// <para>模板 <c>{name}</c> 之后没有 <c>{n}</c> 时返回 true（无序号形态可校验，不作约束）；
+    /// <paramref name="datePrefix"/> 由 <see cref="TemplateDatePrefixBeforeName"/> 给出，
+    /// 用于划出「中间段」的起点。</para>
     /// </summary>
-    private static bool MatchesTemplateIndexSuffix(string curBase, string template)
+    private static bool MatchesTemplateIndexSuffix(string curBase, string template, string datePrefix)
     {
         int idx = template.IndexOf("{name}", StringComparison.Ordinal);
         if (idx < 0) return true;
         string suffix = template.Substring(idx + "{name}".Length);
-        if (!suffix.Contains("{n}", StringComparison.Ordinal)) return true;
-        if (curBase.Length < 4) return false;
-        for (int i = curBase.Length - 4; i < curBase.Length; i++)
+        int nIdx = suffix.IndexOf("{n}", StringComparison.Ordinal);
+        if (nIdx < 0) return true; // {name} 之后没有 {n}：无序号形态可校验
+
+        string beforeN = suffix.Substring(0, nIdx);                       // 如 "_"
+        string afterN = suffix.Substring(nIdx + "{n}".Length);            // 如 ""（模板通常只写主干）
+
+        // 末尾必须是 beforeN + 4 位数字 + afterN。
+        // 长度不足 ⇒ 连「中间段」都放不下，不可能是本模板的产出。
+        int tailLen = beforeN.Length + 4 + afterN.Length;
+        if (curBase.Length <= tailLen) return false;
+        if (!curBase.EndsWith(afterN, StringComparison.OrdinalIgnoreCase)) return false;
+
+        int numStart = curBase.Length - afterN.Length - 4;
+        for (int i = numStart; i < numStart + 4; i++)
             if (!char.IsDigit(curBase[i])) return false;
+
+        // 序号前必须是模板里的字面量分隔符（这是把「日期_纯数字」的相机名挡在门外的关键一步）。
+        if (numStart < beforeN.Length) return false;
+        if (!curBase.AsSpan(numStart - beforeN.Length, beforeN.Length)
+                    .Equals(beforeN.AsSpan(), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // 日期前缀与分隔符之间必须有非空的中间段（上一轮 {name} 的展开值）——
+        // 否则 "20240101_0001" 这种「日期 + 裸序号」仍会被当成产出。
+        int midLen = (numStart - beforeN.Length) - datePrefix.Length;
+        if (midLen <= 0) return false;
+
+        // 模板在 {name} 与 {n} 之间没写字面量分隔符时（如 "{yyyy}{MM}{dd}_{name}{n}"），
+        // 上面那步「序号前必须是分隔符」无锚可用，只能再补一道：中间段必须含非数字字符。
+        // 否则 "20240101_123456" 这类「日期_纯数字」相机名仍会误命中（首跑整批跳过）。
+        // 代价是「源名本身全是数字」（如 123456.jpg → 20240101_1234560001）会漏判——
+        // 这是有意的取舍：误跳比漏保护更隐蔽，且判据一（历史日志）仍覆盖该文件。
+        if (beforeN.Length == 0)
+        {
+            bool hasNonDigit = false;
+            for (int i = datePrefix.Length; i < numStart; i++)
+                if (!char.IsDigit(curBase[i])) { hasNonDigit = true; break; }
+            if (!hasNonDigit) return false;
+        }
+
         return true;
     }
 
@@ -1993,7 +2092,8 @@ public sealed class OrganizeService : IOrganizeService
     /// 索引失效（升级后旧日志无指纹列 / 参数变化 / 日志丢失）会让已改好名的文件被重新加工，
     /// 而重命名的输入名本身就是输出的一部分 → 文件名被叠加一层且不可逆。
     /// 这里按 R9-2 的口径「先给可见提示」让用户在首跑前就知道风险；运行期另有逐文件的
-    /// 保护性跳过（见 <see cref="NestedRenameSkipReason"/>）。
+    /// 保护性跳过（判据一见 <see cref="NestedRenameSkipReasonByHistory"/>，
+    /// 判据二见 <see cref="NestedRenameSkipReasonByForm"/>）。
     /// </summary>
     private static string RenameNestingCaution(OrganizeRequest req)
     {
@@ -2051,7 +2151,10 @@ public sealed class OrganizeService : IOrganizeService
         // 三个合法值必须显式列完，不能让兜底顺带承载 Rename：
         // 那样一旦未定义值漏进来，日志写「重命名」而 ExecuteAsync 实际在做失效安全的复制
         // → 又是一种谎报（与「模拟口径=实跑口径」同类）。
-        OperationMode.Rename => "重命名",
+        // 引用 RenameLogService.RenameOperation 而非再写一遍字面量：读侧（RecordIgnoredRow 的
+        // 「叠加保护」集合）按该值筛选，两侧各写一份必然漂移——一旦写侧改了值、读侧没跟上，
+        // 叠加保护会静默失效（或反过来把「只是被移动过」的文件误判成「已被改名」）。
+        OperationMode.Rename => RenameLogService.RenameOperation,
         // 未定义的枚举值：ExecuteAsync 会直接抛错、根本不会走到这里。文案写「未知」
         // 而不是「复制」——兜底文案必须与实际落点一致，否则日志说一套、实际做另一套。
         _ => "未知",

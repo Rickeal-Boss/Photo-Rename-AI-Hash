@@ -124,6 +124,10 @@ public sealed class RenameLogService
                     int iStatus = Array.IndexOf(header, "Status");
                     int iOriginalPath = Array.IndexOf(header, "OriginalPath");
                     int iNewPath = Array.IndexOf(header, "NewPath");
+                    // Operation 列：只供 RecordIgnoredRow 区分「改过名」与「只是被复制/移动/归档过」，
+                    // 不参与续传索引。该列自首个版本的表头起就存在（缺 Fingerprint 的 9 列旧表头也有它），
+                    // 故按列名找即可；真取不到时 RecordIgnoredRow 会保守地不入集合（见其说明）。
+                    int iOperation = Array.IndexOf(header, "Operation");
                     int iFingerprint = Array.IndexOf(header, "Fingerprint");
 
                     // 兼容「旧表头 + 新记录」混合的日志：表头只在文件首次创建时写一次，
@@ -162,7 +166,7 @@ public sealed class RenameLogService
                         {
                             // 调用方没给可接受指纹：按「参数不一致」计（宁可不计入索引）。
                             log.IgnoredByFingerprint++;
-                            RecordIgnoredRow(log, cols, iNewPath);
+                            RecordIgnoredRow(log, cols, iNewPath, iOperation);
                             continue;
                         }
 
@@ -170,14 +174,14 @@ public sealed class RenameLogService
                         {
                             // 旧版日志（9 列，无指纹列）写出的数据行：与用户是否改参数无关。
                             log.IgnoredByMissingFingerprintColumn++;
-                            RecordIgnoredRow(log, cols, iNewPath);
+                            RecordIgnoredRow(log, cols, iNewPath, iOperation);
                             continue;
                         }
 
                         if (Array.IndexOf(acceptedFingerprints, cols[iFingerprint]) < 0)
                         {
                             log.IgnoredByFingerprint++;
-                            RecordIgnoredRow(log, cols, iNewPath);
+                            RecordIgnoredRow(log, cols, iNewPath, iOperation);
                             continue;
                         }
 
@@ -210,6 +214,15 @@ public sealed class RenameLogService
     }
 
     private const string LogFileName = "rename_log.csv";
+
+    /// <summary>
+    /// <c>Operation</c> 列中「原地重命名」的字面值——<b>与 <c>OrganizeService.OpName</c> 共用同一常量</b>，
+    /// 写侧与读侧不会各写一套而漂移（写侧 <c>OpName</c> 已改为引用本常量）。
+    /// <para>读侧的用途只有一个：<see cref="RecordIgnoredRow"/> 只收重命名的行（见其说明）。
+    /// 不能改用「非复制 / 非移动 / 非归档」之类的反选写法——将来新增操作类型时，
+    /// 反选会把新类型默认收进来，重新引入「没改过名却被当成改过名」的误跳。</para>
+    /// </summary>
+    public const string RenameOperation = "重命名";
 
     /// <summary>
     /// Fingerprint 在 CSV 行中的固定列位（0 基；表头顺序见 <see cref="AppendRenameLogAsync"/>）。
@@ -275,16 +288,27 @@ public sealed class RenameLogService
     }
 
     /// <summary>
-    /// 把「因指纹原因未计入索引」的行的目标路径（NewPath）收进
+    /// 把「因指纹原因未计入索引」且<b>操作类型为重命名</b>的行的目标路径（NewPath）收进
     /// <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/>。
     /// <para>用途：重命名模式的「文件名叠加」保护。重命名的输入名本身就是输出的一部分
     /// （模板含 <c>{name}</c> 时），一旦该文件的续传索引失效（指纹变化 / 升级后旧日志无指纹列），
     /// 它会被再次加工 → 文件名逐轮叠加变长，且不可逆。这里把「曾被本工具改名到该路径」这一事实
     /// <b>与指纹无关地</b>记下来，供编排层判断「这个文件是不是已经被改过名了」。</para>
+    /// <para><b>为什么必须限定 Operation == <see cref="RenameOperation"/>：</b>
+    /// 本集合的语义是「曾被本工具<b>改名</b>到该路径」，而 <c>NewPath</c> 列对复制 / 移动 / 归档同样会写。
+    /// 若不加限定，这条常见流程会整批误跳：用户先用「移动」把照片整理进 <c>D:\Photos</c>，
+    /// 再把源文件夹选成 <c>D:\Photos</c> 做<b>原地重命名</b>——此时每个文件的当前路径都命中移动批次的
+    /// NewPath（模式不同 ⇒ 指纹不同 ⇒ 走到本方法），于是<b>一个文件都不会改名</b>，
+    /// 且归因谎报成「已被本规则命名过」（实际只是被移动过，文件名一个字符都没改）。
+    /// 归档批次（<c>Operation="归档"</c>）同理。</para>
+    /// <para>取不到 Operation 列（列名缺失 / 该行列数不足）时<b>不入集合</b>：宁可少一层保护
+    /// （重命名模式下还有形态兜底判据），也不能把「只是被移动过」的文件误判成「已被改名」。</para>
     /// <para>只记非空 NewPath：失败 / 「跳过」行通常没有目标路径，空串入集合会让空路径被无条件命中。</para>
     /// </summary>
-    private static void RecordIgnoredRow(CompletedLog log, string[] cols, int iNewPath)
+    private static void RecordIgnoredRow(CompletedLog log, string[] cols, int iNewPath, int iOperation)
     {
+        if (iOperation < 0 || iOperation >= cols.Length) return;
+        if (!string.Equals(cols[iOperation], RenameOperation, StringComparison.Ordinal)) return;
         if (iNewPath >= 0 && iNewPath < cols.Length && !string.IsNullOrEmpty(cols[iNewPath]))
             log.DoneByNewPathAnyFingerprint.Add(cols[iNewPath]);
     }
@@ -353,9 +377,12 @@ public sealed class CompletedLog
     public HashSet<string> DoneByNewPath { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 「曾被本工具改名为该绝对路径」的历史目标路径集合，<b>不区分运行指纹</b>（含旧版日志格式的行）。
+    /// 「曾被本工具<b>改名</b>为该绝对路径」的历史目标路径集合，<b>不区分运行指纹</b>（含旧版日志格式的行）。
     /// 与 <see cref="DoneByNewPath"/> 的区别：后者只收指纹匹配的记录，本集合把指纹不匹配 /
-    /// 缺列的记录的目标路径也收进来。用途只有一个——重命名模式下判断「当前文件是不是已经被改过名」，
+    /// 缺列的记录的目标路径也收进来。<b>且只收 <c>Operation == "重命名"</c> 的行</b>——
+    /// 复制 / 移动 / 归档同样会写 <c>NewPath</c>，但那些行只说明「文件被搬到过这里」，
+    /// 不说明「文件名被本工具改过」（见 <c>RenameLogService.RecordIgnoredRow</c>）。
+    /// 用途只有一个——重命名模式下判断「当前文件是不是已经被改过名」，
     /// 从而在续传索引失效时阻止文件名被逐轮叠加（不可逆）。<b>不得用作续传跳过判据</b>
     /// （那会让「改了参数」的记录也静默跳过，正是要消灭的 P0 缺陷）。
     /// </summary>
