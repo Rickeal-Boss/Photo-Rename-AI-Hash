@@ -1377,9 +1377,17 @@ public sealed class OrganizeService : IOrganizeService
     {
         if (req.AiProvider == AiProvider.None) return null;
 
+        // 以下三处「配置缺失」与 AI 层（ImageAnalysisHelper 的端点 / Key / 模型名 / https 校验）
+        // 同口径：空配置对每个文件都会以完全相同的方式失败，重试没有任何成功可能，
+        // 故统一为整批级永久错误。isBatchLevel: true 必须显式写出（P26：不可依赖默认值）。
+        // 注意：这三处都在<b>扫描之前</b>抛出，不进逐文件循环、不进重排队与分档，
+        // 由 ViewModel 的通用 catch 显示提示——换的是类型，行为与改造前一致；
+        // 换类型的目的是让「配置缺失 ⟹ AiPermanentException」这条不变量全域成立，
+        // 将来 VM 若按 PermanentOperationException 做定向引导（如「去设置页」按钮）不会漏掉这里。
         if (string.IsNullOrWhiteSpace(req.AiApiKey))
-            throw new InvalidOperationException(
-                $"已选择识别引擎「{req.AiProvider}」但未配置 API Key。请打开「设置」填写对应 Key 后再开始整理。");
+            throw new AiPermanentException(
+                $"已选择识别引擎「{req.AiProvider}」但未配置 API Key。请打开「设置」填写对应 Key 后再开始整理。",
+                isBatchLevel: true);
 
         // 退避等待钩子：把 AI 层内部的 Task.Delay 换成本方法，让「暂停」能打断 AI 退避
         // （否则退避期间点暂停要等整段 AI 调用结束才生效，最长约 4 分钟，期间界面已显示
@@ -1389,9 +1397,11 @@ public sealed class OrganizeService : IOrganizeService
         if (req.AiProvider == AiProvider.Custom)
         {
             if (string.IsNullOrWhiteSpace(req.CustomApiUrl))
-                throw new InvalidOperationException("自定义引擎未配置端点 URL：请打开「设置」填写自定义 API 端点。");
+                throw new AiPermanentException("自定义引擎未配置端点 URL：请打开「设置」填写自定义 API 端点。",
+                    isBatchLevel: true);
             if (string.IsNullOrWhiteSpace(req.CustomApiModel))
-                throw new InvalidOperationException("自定义引擎未配置模型名：请打开「设置」填写自定义模型名。");
+                throw new AiPermanentException("自定义引擎未配置模型名：请打开「设置」填写自定义模型名。",
+                    isBatchLevel: true);
             // rpmLimit 为 0 时保持端点嗅探得出的闸门（不替用户猜 RPM）
             return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey, req.CustomApiRpmLimit,
                 delayAsync);
