@@ -243,9 +243,17 @@ public sealed class SettingsService : ISettingsService
             target.BackupFolder = ReadString(root, nameof(AppSettings.BackupFolder), target.BackupFolder);
             target.DryRun = ReadBool(root, nameof(AppSettings.DryRun), target.DryRun);
             target.UseExifDate = ReadBool(root, nameof(AppSettings.UseExifDate), target.UseExifDate);
-            target.AiProvider = (AiProvider)Math.Clamp(
-                ReadInt(root, nameof(AppSettings.AiProvider), (int)target.AiProvider),
-                (int)AiProvider.None, (int)AiProvider.Nvidia);
+            // U1（第十二轮）：判据必须与两个 ViewModel 完全同源 —— 越界值落 AiProvider.None
+            // （不启用识别），<b>不</b>钳到枚举上界。AiProvider 的上界 Nvidia 正是唯一的内置付费引擎：
+            // 用 Math.Clamp 会把一次「配置损坏 + 越界 AiProvider」变成「调用付费引擎」——
+            // 有密钥时真的发起计费调用，无密钥时抛整批级错误把整批拦下，是典型的 fail-open。
+            // 同源对照：OrganizeViewModel 构造函数 / SelectedProvider / SyncProviderFromDisk，
+            // 以及 SettingsViewModel 构造函数 / SyncOwnedFieldsFromDisk，均为此口径；
+            // 与本方法上面 OperationMode / ConflictStrategy 的「越界落最小破坏档」也是同一句式。
+            int rawProviderVal = ReadInt(root, nameof(AppSettings.AiProvider), (int)target.AiProvider);
+            target.AiProvider = Enum.IsDefined(typeof(AiProvider), rawProviderVal)
+                ? (AiProvider)rawProviderVal
+                : AiProvider.None;
             target.ZhipuApiKey = ReadString(root, nameof(AppSettings.ZhipuApiKey), target.ZhipuApiKey);
             target.QwenApiKey = ReadString(root, nameof(AppSettings.QwenApiKey), target.QwenApiKey);
             target.NvidiaApiKey = ReadString(root, nameof(AppSettings.NvidiaApiKey), target.NvidiaApiKey);

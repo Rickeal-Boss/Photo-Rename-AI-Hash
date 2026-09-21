@@ -81,6 +81,33 @@ public partial class OrganizeViewModel : ObservableObject
     /// </remarks>
     private int _overwroteNoBackup;
 
+    // ── U2（第十二轮）：本批次「运行参数」快照 ──
+    /// <summary>
+    /// 本批次<b>开始那一刻</b>的运行参数快照（由 <see cref="BuildRequest"/> 写入，
+    /// 内核拿到的是同一时刻的同一组值）。终态文案与失败清单头部一律读这里，
+    /// <b>不读实时的 <see cref="DryRun"/> / <see cref="SelectedMode"/></b>。
+    /// </summary>
+    /// <remarks>
+    /// 为什么必须快照：<c>Views/OrganizePage.xaml</c> 的运行模式 <c>RadioButtons</c>、
+    /// 模式 / 冲突 <c>ComboBox</c>、EXIF <c>CheckBox</c> 与各 <c>TextBox</c> 都没有绑 <c>IsEnabled</c>，
+    /// 批次运行期间用户仍可改动它们；而内核在 <see cref="BuildRequest"/> 时就把参数快照走了。
+    /// 终态文案若读实时属性，就会出现「内核按实际执行做了（目标文件已被无备份替换），
+    /// 横幅却说『模拟运行预估：本批次将有…』」——把已发生的不可恢复后果说成预览（P33）。
+    /// 反向（模拟跑却报「本批次有…已被替换」）则虚报既成事实。
+    /// <para>
+    /// <b>跨域契约（与 <c>Services/OrganizeService.cs</c> 的划分，勿在任一侧单独改口径）：</b>
+    /// 内核<b>只输出计数</b>（含模拟运行下的同口径统计），<b>不生成任何时态措辞</b>；
+    /// 「将被…替换 / 已被…替换」的时态一律由本文件 <see cref="ReportDegradedSummary"/>
+    /// 按本快照选择。故内核侧 <c>overwroteExisting</c> 的 <c>!req.DryRun</c> 守卫保持不动
+    /// （过去时语义归 UI），模拟口径由内核另走同一汇总通道上报计数。
+    /// </para>
+    /// </remarks>
+    private bool _runDryRun;
+
+    /// <summary>本批次<b>开始那一刻</b>的操作模式快照。用途与理由同 <see cref="_runDryRun"/>：
+    /// 失败清单 CSV 的头部必须写内核真正用的那个模式，否则会与行内由内核写入的 <c>Operation</c> 自相矛盾。</summary>
+    private OperationMode _runMode;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -207,10 +234,12 @@ public partial class OrganizeViewModel : ObservableObject
     /// 因此必须把引擎选择与密钥配置一并算进来，天然比内核判据多出
     /// <see cref="SelectedProvider"/> 与 <c>KeyConfiguredFor</c> 两个合取项。
     /// 若强行与内核判据逐字对齐，反而会在「引擎已选 + 密钥已配 + 实跑」这种一切正常的组合下也弹提示。
-    /// 三个分支各自对应内核的一处真实行为：
+    /// 四个分支各自对应内核的一处真实行为：
     /// <list type="bullet">
     /// <item><description>模拟运行 &amp;&amp; 引擎≠无 &amp;&amp; 缺 Key：<c>CreateAi</c> 因 <c>TemplateWillUseAi</c> 为 false
     /// 返回 null ⇒ 不调 AI，AI 字段落 unknown 占位；额外提示「切实跑会因缺 Key 整批中止」。</description></item>
+    /// <item><description>模拟运行 &amp;&amp; 引擎=无：同上不调 AI，AI 字段落 unknown 占位；但因引擎未选，
+    /// 不能提示「切实跑会中止」（实跑会走模板回退那一支），故单列一支。</description></item>
     /// <item><description>实跑 &amp;&amp; 引擎=无：<c>ProcessOneAsync</c> 的 <c>aiValueUnavailable</c> 成立
     /// ⇒ 整条模板被换成 <c>DefaultNamingTemplate</c>。</description></item>
     /// <item><description>实跑 &amp;&amp; 引擎≠无 &amp;&amp; 缺 Key：<c>CreateAi</c> 抛整批级永久错误
@@ -262,10 +291,27 @@ public partial class OrganizeViewModel : ObservableObject
                    + "占位值显示，同一文件 6 个 AI 字段各占一位、互不相同，不是真实识别结果；"
                    + "且当前引擎尚未配置 API Key，切到「实际执行」时会因缺少密钥整批中止。";
         }
+        else if (usesAi && DryRun && provider == AiProvider.None)
+        {
+            // ②（第十二轮 U4）：模拟运行 + 引擎=无 + 模板含 AI 占位符。
+            // 这一支此前被「模拟 + 引擎≠无 + 缺 Key」（要求引擎≠无）与「实跑 + 引擎=无」（要求实跑）
+            // 两支同时排除，落进空 hint → 该组合下 UI 零提示，用户不知道模拟结果里那些 unknown… 是什么。
+            // 内核真实行为（OrganizeService.ProcessOneAsync）：
+            //   aiValueUnavailable = templateNeedsAi && !needsAi && !req.DryRun
+            // DryRun=true 时该式恒为 false，即【刻意不回退模板】，AI 字段落成
+            // unknown{index:D4}{a..z} 占位值。故本支文案<b>绝不能</b>写成「将回退默认模板」
+            // （那是③的实跑口径），否则与内核注释「模拟运行刻意不回落」直接冲突（P33）。
+            hint = "模拟运行不会调用识别接口：模板里的 AI 字段（category / scene / people / action / subtitle / source）"
+                   + "将以 unknown0007a / unknown0007b / … 这类「unknown + 该文件在批次中的序号 + 占位符位置 (a/b/c…)」"
+                   + "占位值显示，同一文件 6 个 AI 字段各占一位、互不相同，不是真实识别结果；"
+                   + "当前识别引擎为「无」，模拟运行不会因此改写你的命名规则（仍按你填的模板预览，"
+                   + "只是 AI 字段取不到真实值）。"
+                   + "若希望实际执行时这些字段有真实值，请在「识别引擎」中选择一个引擎并配置 API Key。";
+        }
         else if (usesAi && !DryRun && provider == AiProvider.None)
         {
-            // ② 实跑 + 引擎=无：整条模板被内核回退成默认模板，用户填的命名规则完全不生效。
-            // 这是与①不同的另一件事（不是「字段变占位值」，而是「模板整个被换掉」），文案必须分开。
+            // ③ 实跑 + 引擎=无：整条模板被内核回退成默认模板，用户填的命名规则完全不生效。
+            // 这是与①②④都不同的另一件事（不是「字段变占位值」，而是「模板整个被换掉」），文案必须分开。
             hint = "当前识别引擎为「无」，模板里的 AI 字段（category / scene / people / action / subtitle / source）"
                    + "本次无法产出真实值：为避免生成 unknown 占位名，命名规则将被回退为默认模板 "
                    + "{yyyy}{MM}{dd}_{name}_{n}（日期_原名_序号），你填写的模板不会生效。"
@@ -273,8 +319,8 @@ public partial class OrganizeViewModel : ObservableObject
         }
         else if (usesAi && !DryRun && !KeyConfiguredFor(provider))
         {
-            // ③ 实跑 + 引擎≠无（②已排除 None）+ 缺 Key：CreateAi 在扫描之前抛整批级永久错误。
-            // 与①②都不同：既不是占位值、也不是模板被换掉，而是「一个文件都不会动、整批直接中止」。
+            // ④ 实跑 + 引擎≠无（③已排除 None）+ 缺 Key：CreateAi 在扫描之前抛整批级永久错误。
+            // 与①②③都不同：既不是占位值、也不是模板被换掉，而是「一个文件都不会动、整批直接中止」。
             hint = "当前识别引擎尚未配置 API Key：点击「开始整理」后会立即整批中止，不会改动任何文件。"
                    + "请先在「设置」页为该引擎填写密钥，或从命名规则中去掉 AI 字段。";
         }
@@ -434,6 +480,11 @@ public partial class OrganizeViewModel : ObservableObject
         _degradedBatchCollision = 0;
         _degradedOther = 0;
         _overwroteNoBackup = 0;
+        // U2：运行参数快照复位到「最弱断言」一侧（视为预览 / 只读模式）。
+        // 真正的值由紧接着的 BuildRequest() 覆盖；此处复位是为了「BuildRequest 之前就结束」
+        // 的路径（校验失败 / 取消 / 异常）不会残留上一批的模式，也不会让任何文案凭空断言既成事实。
+        _runDryRun = true;
+        _runMode = OperationMode.Copy;
     }
 
     /// <summary>
@@ -505,9 +556,15 @@ public partial class OrganizeViewModel : ObservableObject
 
         var parts = new List<string>();
         // 「已覆盖」排在首位：它是本批次唯一「已经造成不可恢复后果」的一类，最需要用户先看到。
+        // U2：正文时态必须与下面的前缀同源（都取批次开始时的快照 _runDryRun）——
+        // 模拟运行下没有任何文件被改动，只能写将来时「将被替换」；写成过去时「已被替换」
+        // 就与前缀「模拟运行预估：本批次将有 …」自相矛盾，并把预览说成既成事实（P33）。
         if (_overwroteNoBackup > 0)
-            parts.Add($"{_overwroteNoBackup} 个目标位置的原有文件已被「覆盖」策略直接替换，" +
-                      "而这些被替换的文件没有备份、原内容不可恢复");
+            parts.Add(_runDryRun
+                ? $"{_overwroteNoBackup} 个目标位置的原有文件将被「覆盖」策略直接替换，" +
+                  "而这些将被替换的文件没有备份、原内容不可恢复"
+                : $"{_overwroteNoBackup} 个目标位置的原有文件已被「覆盖」策略直接替换，" +
+                  "而这些被替换的文件没有备份、原内容不可恢复");
         if (_degradedRenameMode > 0)
             parts.Add($"{_degradedRenameMode} 个文件因「重命名模式不支持覆盖」而自动加序号改名（未覆盖源文件夹中的其它文件）");
         if (_degradedBatchCollision > 0)
@@ -515,15 +572,20 @@ public partial class OrganizeViewModel : ObservableObject
         if (_degradedOther > 0)
             parts.Add($"{_degradedOther} 个文件未按「覆盖」处理、已自动加序号改名（原因见结果列表各行提示）");
 
-        // 模拟运行下没有任何文件被改动，措辞必须是「预估」而不是既成事实（P33：不能把预览说成已发生）
-        var note = (DryRun ? "模拟运行预估：本批次将有 " : "本批次有 ") + string.Join("；", parts) +
+        // 模拟运行下没有任何文件被改动，措辞必须是「预估」而不是既成事实（P33：不能把预览说成已发生）。
+        // 前缀取批次开始时的快照（_runDryRun），不取实时 DryRun —— 运行期间用户改了运行模式也不影响本批次的真实口径。
+        var note = (_runDryRun ? "模拟运行预估：本批次将有 " : "本批次有 ") + string.Join("；", parts) +
                    "。逐条原因见结果列表中各行的提示（悬停状态列）。";
         if (_overwroteNoBackup > 0)
         {
             // 补一句「两者相反」的点题：否则用户看到同一段汇总里既有「已覆盖」又有「已改名」，
             // 很容易读成「同一批文件既被覆盖又被改名」，反而更糊涂。
-            note += "注意：「已覆盖」与「已自动加序号改名」是相反的结果——前者目标文件的内容已被替换且不可恢复，" +
-                    "后者只是文件名多了一个序号、文件内容原样保留。";
+            // U2：时态同样随快照走，否则模拟下会出现「将有 … 已被替换」的混用。
+            note += _runDryRun
+                ? "注意：「覆盖」与「自动加序号改名」是相反的结果——前者会替换目标文件的内容且不可恢复，" +
+                  "后者只是文件名多了一个序号、文件内容原样保留。"
+                : "注意：「已覆盖」与「已自动加序号改名」是相反的结果——前者目标文件的内容已被替换且不可恢复，" +
+                  "后者只是文件名多了一个序号、文件内容原样保留。";
         }
         AppendLog(note);
         // 用 Warning 而非成功色：这不是失败，但用户选择「覆盖」却没被覆盖、或已不可恢复地覆盖了别的文件，都必须显眼
@@ -564,11 +626,14 @@ public partial class OrganizeViewModel : ObservableObject
             var path = Path.Combine(dir, "organize_failures_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".csv");
 
             var sb = new StringBuilder();
-            // 头部三行注释：让文件脱离界面也能自解释（用户几周后再打开，仍知道这是哪一批、什么参数）
+            // 头部三行注释：让文件脱离界面也能自解释（用户几周后再打开，仍知道这是哪一批、什么参数）。
+            // U2：这里必须写<b>批次开始时的快照</b>（_runDryRun / _runMode），不能读实时的
+            // DryRun / SelectedMode —— 行内的 Operation 是内核按 req 写入的（旧值），
+            // 头部若写实时值就会与行内自相矛盾（同一份 CSV 里两套参数）。
             sb.AppendLine("# 本批次失败清单：失败 " + _batchFailures.Count.ToString(CultureInfo.InvariantCulture) + " 项" +
-                          (DryRun ? "（模拟运行，未改动任何文件）" : ""));
+                          (_runDryRun ? "（模拟运行，未改动任何文件）" : ""));
             sb.AppendLine("# 批次时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
-                          "　模式：" + SelectedMode + "　" + (DryRun ? "模拟运行" : "实际执行"));
+                          "　模式：" + _runMode + "　" + (_runDryRun ? "模拟运行" : "实际执行"));
             sb.AppendLine("# 源文件夹：" + SourceFolder + "　输出文件夹：" + OutputFolder);
             sb.AppendLine("Timestamp,OriginalName,OriginalPath,Status,Message");
             foreach (var e in _batchFailures)
@@ -739,6 +804,14 @@ public partial class OrganizeViewModel : ObservableObject
             catch (System.Exception pex)
             {
                 AppendLog("配置保存失败：" + pex.Message);
+                // D-P2-2（第十二轮）：同族的闩 / 密文 / DPAPI 三处拦截都走 ShowTerminalStatus，
+                // 唯独这一处此前只写日志 —— 横幅会停在「整理完成」，而配置其实没落盘，
+                // 用户不翻日志根本看不到（P33 谎报 + 静默丢失本页改动）。
+                // 必须走 ShowTerminalStatus：此刻横幅多半已经开着（成功终态），
+                // 同值赋 StatusBarOpen=true 不触发钩子，横幅文案不会刷新。
+                ShowTerminalStatus("配置保存失败：" + pex.Message +
+                                   "（本次在整理页改的路径 / 模板等改动未落盘）。",
+                                   Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
             }
 
             // ②④（第九轮 R9-4 / R9-6）：落盘完整失败清单 + 汇总「覆盖被降级为自动改名」。
@@ -847,6 +920,14 @@ public partial class OrganizeViewModel : ObservableObject
             catch (System.Exception pex)
             {
                 AppendLog("配置保存失败：" + pex.Message);
+                // D-P2-2（第十二轮）：同族的闩 / 密文 / DPAPI 三处拦截都走 ShowTerminalStatus，
+                // 唯独这一处此前只写日志 —— 横幅会停在「整理完成」，而配置其实没落盘，
+                // 用户不翻日志根本看不到（P33 谎报 + 静默丢失本页改动）。
+                // 必须走 ShowTerminalStatus：此刻横幅多半已经开着（成功终态），
+                // 同值赋 StatusBarOpen=true 不触发钩子，横幅文案不会刷新。
+                ShowTerminalStatus("配置保存失败：" + pex.Message +
+                                   "（本次在整理页改的路径 / 模板等改动未落盘）。",
+                                   Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
             }
 
             // ②④（第九轮 R9-4 / R9-6）：落盘完整失败清单 + 汇总「覆盖被降级为自动改名」。
@@ -1027,6 +1108,14 @@ public partial class OrganizeViewModel : ObservableObject
     {
         _model = _settings.Load(); // 单例 VM 可能滞后于「设置」页改动，每次构建请求时刷新密钥/端点
         var provider = SelectedProvider; // 走归一属性：越界索引不得进请求（否则「未选引擎」会被当成「缺 Key」）
+
+        // U2（第十二轮）：把本次运行的实际参数快照下来。下面返回的 req 就是内核拿到的同一组值，
+        // 终态汇总（ReportDegradedSummary）与失败清单头部（WriteFailureListAsync）必须读这两个字段，
+        // 而不是读实时的 DryRun / SelectedMode —— 运行期间用户还能改那些控件，实时值已与内核不同源。
+        // 时态措辞由 UI 按 _runDryRun 生成，内核只给计数（跨域契约见字段注释）。
+        _runDryRun = DryRun;
+        _runMode = SelectedMode;
+
         string key = provider switch
         {
             AiProvider.Zhipu => _model.ZhipuApiKey,
@@ -1166,9 +1255,15 @@ public partial class OrganizeViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 拼出速率观测行：<c>AI 实际 4.0 张/分 · 服务端响应 15.2 秒/张 · 闸门上限 30 张/分（未触发，瓶颈在服务端）</c>。
+    /// 拼出速率观测行：<c>AI 实际 4.0 张/分 · 服务端响应 15.2 秒/张 · 闸门上限 30 张/分（闸门未触发，非限速瓶颈；服务端响应较慢）</c>。
     /// 三个数必须同屏：单看「闸门 30」会以为是速率目标，单看「实际 4」又会以为是我们限速限错了；
-    /// 并排之后才能看出 4 &lt;&lt; 30、闸门一次都没满过，慢的是服务端（单张就要 15 秒）。
+    /// 并排之后才能看出 4 &lt;&lt; 30、闸门一次都没满过。
+    /// <para>
+    /// U5（第十二轮）：<b>归因只写可证的否定式</b>。实际速率低于上限一半只能证明「瓶颈不是闸门」，
+    /// 不能据此断言「瓶颈是服务端」——小批次窗口还没填满、本机解码 / 磁盘成为主导时同样成立，
+    /// 断言服务端就是把弱结论写成强结论（P33）。故只在确有闸门且确未触发时写「闸门未触发，非限速瓶颈」，
+    /// 并仅当服务端响应时长本身明显偏大（≥2 秒/张）时才补一句服务端归因（由 <paramref name="latencyMs"/> 支撑）。
+    /// </para>
     /// </summary>
     /// <param name="rpm">最近 60 秒窗口内完成的真实请求数。</param>
     /// <param name="latencyMs">最近一次真实请求的端到端时长（毫秒）；null 时省略该段。</param>
@@ -1184,8 +1279,16 @@ public partial class OrganizeViewModel : ObservableObject
         if (gateRpm.HasValue)
         {
             sb.Append("上限 ").Append(gateRpm.Value.ToString(CultureInfo.InvariantCulture)).Append(" 张/分");
-            // 实际速率不足上限一半 → 闸门连窗口都没填满过，不可能在等闸门（P33：别把瓶颈赖给限速）
-            if (rpm < gateRpm.Value * 0.5) sb.Append("（未触发，瓶颈在服务端）");
+            // U5：实际速率不足上限一半 ⇒ 闸门连窗口都没填满过，只能证明「瓶颈不是闸门」。
+            // 因此这里只写可证的否定式，不写「瓶颈在服务端」（那需要服务端响应时长的证据）。
+            // 该句只在「确有闸门」且「确未触发」时出现；无闸门分支在下面显式写「不限」，不会给出任何归因。
+            if (rpm < gateRpm.Value * 0.5)
+            {
+                sb.Append("（闸门未触发，非限速瓶颈");
+                // 仅当响应时长本身明显偏大时才把瓶颈归到服务端——由 latencyMs 支撑，不是靠闸门反推
+                if (latencyMs.HasValue && latencyMs.Value >= 2000) sb.Append("；服务端响应较慢");
+                sb.Append("）");
+            }
         }
         else
         {

@@ -205,10 +205,12 @@
                 <StackPanel Spacing="12">
                     <TextBlock Text="执行控制" Style="{StaticResource CardTitleStyle}" />
                     <!-- AI 字段可用性提示：模板含 AI 占位符而本次拿不到真实识别值时，在点「开始整理」
-                         之前就说清后果。三种组合文案不同（由 VM 的 UpdateAiFieldHint 决定）：
-                           · 模拟运行 + 缺 Key —— AI 字段落 unknown 占位值，切实跑会整批中止；
+                         之前就说清后果。四种组合文案不同（由 VM 的 UpdateAiFieldHint 决定）：
+                           · 模拟运行 + 引擎≠无 + 缺 Key —— AI 字段落 unknown 占位值，切实跑会整批中止；
+                           · 模拟运行 + 引擎=无 —— AI 字段同样落 unknown 占位值（模拟刻意不回退模板），
+                             但不会提示「切实跑会中止」（实跑走的是下一条的回退分支）；
                            · 实际执行 + 引擎=无 —— 命名规则被回退为默认模板 {yyyy}{MM}{dd}_{name}_{n}；
-                           · 实际执行 + 缺 Key —— 一个文件都不会动，整批立即中止。
+                           · 实际执行 + 引擎≠无 + 缺 Key —— 一个文件都不会动，整批立即中止。
                          非阻断：只是说明，不拦操作。IsOpen 走 TwoWay（与页面另两个 InfoBar 一致）：
                          用户可手动关掉，之后条件再次成立时 VM 侧由 false 翻回 true 会重新弹出，不会永久静默。 -->
                     <InfoBar IsOpen="{x:Bind ViewModel.HasAiFieldHint, Mode=TwoWay}"
