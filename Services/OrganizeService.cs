@@ -1843,28 +1843,45 @@ public sealed class OrganizeService : IOrganizeService
     {
         string San(string v) => Sanitize(v);
 
-        // P1-3b 配套：模拟运行下 AI 字段没有真实值，占位值必须<b>逐文件可区分</b>。
-        // 若一律填同一个 "unknown"：默认模板 {category}_{scene}_{people}_{action}_{subtitle}_{source}
-        // 六个占位符全是 AI 字段（不含 {name} / {n}），于是同一批每个文件算出的候选名一字不差
-        // → 撞上 claimedThisRun → 一路加 _1 / _2 / _3 … → 预览变成「楼梯」。
-        // 而实跑时各文件 AI 结果不同、几乎不撞名，于是预览给出的<b>冲突数、后缀分布、最终文件名
-        // 全部与实跑对不上</b>——用户照预览做的判断是错的，违背「模拟口径必须与实跑一致」。
-        // 带上批次序号（该文件在队列中的次序，批内唯一）后候选名恢复唯一，假楼梯消失，
-        // 冲突口径回到与实跑一致；保留 unknown 前缀，用户一眼能看出是占位、不会误读成真实识别结果。
-        // 非模拟路径完全不动，仍是既有的 unknown 兜底。
+        // P1-3b 配套：模拟运行下 AI 字段没有真实值，占位值必须<b>逐占位符可区分</b>，
+        // 而非<b>逐文件</b>可区分。
+        // 历史：早期一律填同一个 "unknown" → 默认模板 {category}_{scene}_{people}_{action}_{subtitle}_{source}
+        // 六个占位符全是 AI 字段（不含 {name} / {n}），于是<b>同一文件内</b>六个位置产出同一个
+        // "unknown" → 拼成 "unknownunknownunknownunknownunknownunknown.jpg"，复读机形态，可读性 0。
+        // 第七轮改成 "unknown{index:D4}"（按文件批次序号），只解决了"批内多文件撞名"（_1/_2/_3 楼梯），
+        // 但同一文件的 6 个占位符仍复读为 "unknown0018unknown0018…unknown0018"（真机验证发现）。
+        //
+        // 修法：按<b>占位符在模板中出现的次序</b>再叠加一个字母后缀（a/b/c/d/e/f…），保证同一文件
+        // 内 6 个占位符的占位值也都不同：unknown0018a_unknown0018b_…_unknown0018f。仍然批内唯一
+        // （后缀与文件序号组合），且对默认模板无破坏（默认模板用 _ 分隔、加后缀后仍是合法文件名）。
+        // 字母后缀<b>只在 DryRun 下</b>追加；非模拟路径完全不动，仍是既有 "unknown" 兜底（实跑时
+        // 各文件真实结果不同，撞名概率极低；沿用此前口径，不引入新行为）。用户一眼能看出
+        // 「a/b/c…/f」是同一文件内的 6 个不同位置，而非真实识别结果。
+        //
+        // 占位符后缀按模板中真实出现次序递增：先匹配 category 再 scene 再 people 再 action
+        // 再 subtitle 再 source，与 AiPlaceholders 的定义顺序一致（Helpers/ImageAnalysisHelper.cs:67）。
+        // 不查模板里到底写了几个（用户可能删掉某些字段），改用「每次 Ai() 被调用时 aiPlaceIdx++」，
+        // 保证每个 AI 占位符位置都拿到不同后缀，即便模板只写 `{category}{category}` 这种重复用法
+        // 也会产出 unknown0018a_unknown0018b 而非复读。最大支持 26 个位置（a..z），超出罕见可走
+        // double-letter 兜底；单文件超 26 个 AI 字段几乎不可能（占位符就 6 个，模板去重后至多 6）。
+        var aiPlaceIdx = 0;
+        var aiPlaceSuffixes = new char[] { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+                                           'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z' };
         string Ai(string v) => string.IsNullOrWhiteSpace(v)
-            ? (dryRun ? "unknown" + index.ToString("D4") : "unknown")
+            ? (dryRun
+                ? "unknown" + index.ToString("D4")
+                    + (aiPlaceIdx < aiPlaceSuffixes.Length
+                        ? aiPlaceSuffixes[aiPlaceIdx].ToString()
+                        : "_" + (aiPlaceIdx / 26) + aiPlaceSuffixes[aiPlaceIdx % 26].ToString())
+                : "unknown")
             : San(v);
 
-        // 抽成局部函数：末尾「净化后为空」的兜底需要用它再跑一遍默认模板，
-        // 不抽就要把 15 行 Replace 抄两遍（抄两份必然漂移）。
-        // AI 占位符的替换必须<b>忽略大小写</b>：检测侧（<see cref="TemplateUsesAny"/> 与
-        // <c>ImageAnalysisHelper.RequiredAiKeys</c>）一律用 OrdinalIgnoreCase，若替换区分大小写，
-        // 用户模板写 {Category} 时会被判为「用到了 AI 字段」（建引擎、发请求、付费），
-        // 却一次都匹配不上 → AI 结果被丢弃、文件名里留下字面量 {Category}，UI 还宣称 AI 字段会生效（P33 类）。
-        // 注：日期占位符（{MM} 月 / {mm} 分）刻意<b>保持区分大小写</b>——它们存在仅大小写不同的成对写法，
-        // 忽略大小写会让 {MM} 的替换把 {mm} 也吃掉（月覆盖分钟），故不在本次统一范围内。
-        string Build(string tpl) => (tpl ?? "")
+        // 占位计数在 Build 调用前重置——Build 可能走两次（正常一次 + 净化后为空回退默认模板那次），
+        // 不重置会让默认模板里的 6 个占位符从 g 起算，与首批占位值产生"撞名"风险。
+        string Build(string tpl)
+        {
+            aiPlaceIdx = 0;
+            return (tpl ?? "")
             .Replace("{yyyy}", when.ToString("yyyy"))
             .Replace("{MM}", when.ToString("MM"))
             .Replace("{dd}", when.ToString("dd"))
@@ -1880,6 +1897,7 @@ public sealed class OrganizeService : IOrganizeService
             .Replace("{action}", Ai(f.Action), StringComparison.OrdinalIgnoreCase)
             .Replace("{subtitle}", Ai(f.Subtitle), StringComparison.OrdinalIgnoreCase)
             .Replace("{source}", Ai(f.SourceTag), StringComparison.OrdinalIgnoreCase);
+        }
 
         // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException。
         // 抽成局部函数复用：下方「净化后为空 → 回退默认模板」这条分支也必须过同一截断，
