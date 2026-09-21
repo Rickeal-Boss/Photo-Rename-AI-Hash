@@ -1867,13 +1867,21 @@ public sealed class OrganizeService : IOrganizeService
         var aiPlaceIdx = 0;
         var aiPlaceSuffixes = new char[] { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
                                            'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z' };
+
+        // 取下一个占位符后缀并<b>自增</b>。必须自增——若只读取不递增，6 个占位符会拿到同一个后缀
+        // （全是 a），输出仍是复读形态 unknown0018a×6，修复等于没生效。
+        // 抽成局部函数而非内联 `aiPlaceIdx++`：内联写法要在自增后用 `aiPlaceIdx - 1` 回读，
+        // 极易写错（自增位置与读取位置耦合），且可读性差。
+        string NextPlaceSuffix()
+        {
+            int i = aiPlaceIdx++;
+            return i < aiPlaceSuffixes.Length
+                ? aiPlaceSuffixes[i].ToString()
+                : "_" + (i / 26) + aiPlaceSuffixes[i % 26].ToString();
+        }
+
         string Ai(string v) => string.IsNullOrWhiteSpace(v)
-            ? (dryRun
-                ? "unknown" + index.ToString("D4")
-                    + (aiPlaceIdx < aiPlaceSuffixes.Length
-                        ? aiPlaceSuffixes[aiPlaceIdx].ToString()
-                        : "_" + (aiPlaceIdx / 26) + aiPlaceSuffixes[aiPlaceIdx % 26].ToString())
-                : "unknown")
+            ? (dryRun ? "unknown" + index.ToString("D4") + NextPlaceSuffix() : "unknown")
             : San(v);
 
         // 占位计数在 Build 调用前重置——Build 可能走两次（正常一次 + 净化后为空回退默认模板那次），
