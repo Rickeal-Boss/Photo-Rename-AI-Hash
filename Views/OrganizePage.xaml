@@ -68,10 +68,14 @@
 
                         <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="8">
                             <TextBlock Text="模式" VerticalAlignment="Center" />
-                            <ComboBox SelectedIndex="{x:Bind ViewModel.OperationModeIndex, Mode=TwoWay}" MinWidth="160">
-                                <ComboBoxItem Content="复制 (copy)" />
-                                <ComboBoxItem Content="移动 (move)" />
-                                <ComboBoxItem Content="重命名 (rename)" />
+                            <!-- ①（第十一轮真机验收）：原为「复制 (copy) / 移动 (move) / 重命名 (rename)」，
+                                 只写了英文代号、没说清「这个模式做什么」，用户反馈三个功能的解释混乱。
+                                 改为「动作 + 对原件的处置」，一眼可懂；MinWidth 相应放宽到 190 防中文裁剪。
+                                 只改显示文案，SelectedIndex 绑定与索引语义完全不变（零行为变更）。 -->
+                            <ComboBox SelectedIndex="{x:Bind ViewModel.OperationModeIndex, Mode=TwoWay}" MinWidth="190">
+                                <ComboBoxItem Content="复制（保留原件）" />
+                                <ComboBoxItem Content="移动（移走原件）" />
+                                <ComboBoxItem Content="重命名（强制备份）" />
                             </ComboBox>
                         </StackPanel>
 
@@ -94,12 +98,54 @@
                             <RadioButton Content="实际执行（真实改动文件）" />
                         </RadioButtons>
                     </Grid>
+                    <!-- ①（第十一轮真机验收）：三模式的「做什么 / 原件会怎样 / 要不要备份」此前散落在
+                         备份说明、归档说明、覆盖说明三段长文字里，用户反馈「解释有些混乱」。
+                         这里收敛成一张紧凑对照表：一行一个模式、三列固定语义，一眼可对照。
+                         语义与内核逐条对齐——复制保留源文件、移动移走源文件、
+                         重命名原地改名且实跑前强制先备份（原地覆盖不可恢复，故备份是硬要求）。
+                         下方「关于按日期归档」「关于冲突处理=覆盖」两段仍保留：它们说的是
+                         「归档 / 覆盖这两个选项各自的特例」，与模式本身的三行速查互补，不重复。 -->
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="三种模式分别做什么" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <Grid ColumnSpacing="12" RowSpacing="2"
+                              ColumnDefinitions="Auto,Auto,Auto"
+                              RowDefinitions="Auto,Auto,Auto,Auto">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="模式" FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="原件" FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="0" Grid.Column="2" Text="备份" FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="复制 (copy)"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="保留"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="1" Grid.Column="2" Text="不需要"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="移动 (move)"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="移走"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="2" Grid.Column="2" Text="不需要"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="重命名 (rename)"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="改名"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Row="3" Grid.Column="2" Text="强制备份（防误改不可恢复）"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                    </StackPanel>
                     <!-- A-10：模拟运行不调用识别接口（不产生 API 消耗），含 AI 字段的命名在模拟下取不到真实值 -->
                     <TextBlock TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}">
                         「模拟运行」不改动任何文件，也不会调用识别接口（不产生 API 消耗）：
-                        category / scene / people / action / subtitle / source 等 AI 字段一律填「unknown + 该文件在批次中的序号」
-                        这类占位值（形如 unknown0007），仅用于预览命名结构；
+                        category / scene / people / action / subtitle / source 等 AI 字段一律填「unknown + 该文件在批次中的序号 + 占位符位置（a/b/c…）」
+                        这类占位值（形如 unknown0007a、unknown0007b……同一文件的 6 个 AI 字段各占一位，互不相同），仅用于预览命名结构；
                         「实际执行」会真实复制/移动/重命名；仅当命名规则用到 AI 字段、且识别引擎已启用并配好密钥时才会调用识别接口
                         （识别引擎选「无」时不会调用，此时模板里的 AI 字段取不到真实值，命名规则将回退为默认模板
                         {yyyy}{MM}{dd}_{name}_{n}）。请确认模式后再开始。
