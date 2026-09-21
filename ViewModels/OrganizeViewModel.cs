@@ -66,7 +66,7 @@ public partial class OrganizeViewModel : ObservableObject
         // P1-4：结果集合变化时同步空态/列表可见性
         Results.CollectionChanged += (_, __) => UpdateResultVisibility();
         UpdateResultVisibility();
-        UpdateDryRunAiHint(); // 构造期的三个钩子未必都触发（赋值顺序 / 值未变化），结尾补算一次
+        UpdateAiFieldHint(); // 构造期的三个钩子未必都触发（赋值顺序 / 值未变化），结尾补算一次
     }
 
     [ObservableProperty] private string _sourceFolder = "";
@@ -103,13 +103,31 @@ public partial class OrganizeViewModel : ObservableObject
             ? (ConflictStrategy)ConflictIndex
             : ConflictStrategy.AutoRename;
 
+    /// <summary>
+    /// 钳制后的「识别引擎」。同 <see cref="SelectedMode"/>：越界索引（ComboBox 无匹配项时回写的 -1、
+    /// settings.json 残留的 99）会让 <c>(AiProvider)(-1)</c> 既不等于 <see cref="AiProvider.None"/>、
+    /// 又落不进 <c>CreateAi</c> 的 switch，于是「引擎未启用」被静默当成「引擎已选但缺 Key」
+    /// → 用户看到「已选择识别引擎「-1」但未配置 API Key」，把配置损坏谎报成缺密钥。
+    /// 凡参与判断 / 交给内核 / 写盘的地方统一走本属性（ComboBox 双向绑定仍绑原始索引）。
+    /// 越界值落到 <see cref="AiProvider.None"/>（不启用识别）而非枚举上界：不付费、不改名，
+    /// 破坏面最小；若钳到上界 <see cref="AiProvider.Nvidia"/>，反而会在无密钥时把整批拦下。
+    /// </summary>
+    private AiProvider SelectedProvider =>
+        System.Enum.IsDefined(typeof(AiProvider), AiProviderIndex)
+            ? (AiProvider)AiProviderIndex
+            : AiProvider.None;
+
     [ObservableProperty] private bool _dryRun;
 
-    // ── 模拟运行 + AI 模板的「开始前提示」（P1-3b 配套） ──
-    // 内核在模拟运行下完全不调用 AI，模板里的 AI 占位符落成「unknown + 该文件在批次中的序号(4 位)」，
-    // 形如 unknown0007（带序号是必要的：默认模板六个占位符全是 AI 字段、不含 {name}/{n}，
-    // 若一律填同一个 unknown，同一批每个文件的候选名一字不差 → 预览全变 _1/_2/_3 楼梯）。
-    // 这在事后才发现就是 P33 谎报（用户以为预览里的字是识别结果），所以必须在<b>开始之前</b>说清。
+    // ── AI 字段可用性提示（「开始整理」按钮上方的 Warning InfoBar + 日志框） ──
+    // 模板里写了 AI 占位符、而本次运行拿不到真实识别值时，必须在<b>开始之前</b>说清会发生什么，
+    // 否则用户只能在结果列表里发现「文件名不是我写的模板」（P33 谎报）。两种后果完全不同，故文案分两支：
+    //   ① 模拟运行：内核完全不调用 AI，AI 占位符落成「unknown + 该文件在批次中的序号(4 位)」，
+    //      形如 unknown0007（带序号是必要的：默认模板六个占位符全是 AI 字段、不含 {name}/{n}，
+    //      若一律填同一个 unknown，同一批每个文件的候选名一字不差 → 预览全变 _1/_2/_3 楼梯）。
+    //   ② 实际执行：内核会把整条模板换成默认模板 {yyyy}{MM}{dd}_{name}_{n}
+    //      （见 ProcessOneAsync 的 aiValueUnavailable 回退），用户填的命名规则<b>完全不生效</b>——
+    //      比模拟运行更彻底，此前却一个字都没提示（第八轮 P1-2 / 元模式 E）。
 
     /// <summary>命名模板里的 AI 占位符（与内核 <c>OrganizeService.AiPlaceholders</c> 同一口径，大小写不敏感）。</summary>
     private static readonly string[] AiPlaceholders =
@@ -117,14 +135,32 @@ public partial class OrganizeViewModel : ObservableObject
         "{category}", "{scene}", "{people}", "{action}", "{subtitle}", "{source}",
     };
 
-    /// <summary>模拟运行提示文案；空串表示当前组合不需要提示。</summary>
-    [ObservableProperty] private string _dryRunAiHint = "";
+    /// <summary>AI 字段可用性提示文案；空串表示当前组合不需要提示。</summary>
+    [ObservableProperty] private string _aiFieldHint = "";
 
     /// <summary>
-    /// 模拟运行提示是否成立。判据与内核 <c>TemplateWillUseAi</c> 对齐：
-    /// 模拟运行 &amp;&amp; 模板含 AI 占位符 &amp;&amp; 所选引擎不是「无」 &amp;&amp; 该引擎未配置 API Key。
+    /// 提示是否成立。
     /// </summary>
-    [ObservableProperty] private bool _hasDryRunAiHint;
+    /// <remarks>
+    /// <b>判据有意比内核 <c>TemplateWillUseAi</c> 更宽，不是它的镜像。</b>
+    /// 内核判据只回答一个问题——「本批次会不会真的调用识别接口」，等价于
+    /// 「非模拟运行 &amp;&amp; 模板含 AI 占位符」，<b>既不看引擎选择、也不看密钥</b>
+    /// （密钥校验发生在更下游的 <c>CreateAi</c> 里）。
+    /// 本提示回答的是另一个问题——「模板里的 AI 字段能不能取到真实值、取不到会怎样」，
+    /// 因此必须把引擎选择与密钥配置一并算进来，天然比内核判据多出
+    /// <see cref="SelectedProvider"/> 与 <c>KeyConfiguredFor</c> 两个合取项。
+    /// 若强行与内核判据逐字对齐，反而会在「引擎已选 + 密钥已配 + 实跑」这种一切正常的组合下也弹提示。
+    /// 三个分支各自对应内核的一处真实行为：
+    /// <list type="bullet">
+    /// <item><description>模拟运行 &amp;&amp; 引擎≠无 &amp;&amp; 缺 Key：<c>CreateAi</c> 因 <c>TemplateWillUseAi</c> 为 false
+    /// 返回 null ⇒ 不调 AI，AI 字段落 unknown 占位；额外提示「切实跑会因缺 Key 整批中止」。</description></item>
+    /// <item><description>实跑 &amp;&amp; 引擎=无：<c>ProcessOneAsync</c> 的 <c>aiValueUnavailable</c> 成立
+    /// ⇒ 整条模板被换成 <c>DefaultNamingTemplate</c>。</description></item>
+    /// <item><description>实跑 &amp;&amp; 引擎≠无 &amp;&amp; 缺 Key：<c>CreateAi</c> 抛整批级永久错误
+    /// ⇒ 在扫描之前即中止整批（不改动任何文件）。</description></item>
+    /// </list>
+    /// </remarks>
+    [ObservableProperty] private bool _hasAiFieldHint;
 
     /// <summary>模板是否用到 AI 占位符（大小写不敏感）。</summary>
     private static bool TemplateUsesAiPlaceholders(string? template)
@@ -152,39 +188,57 @@ public partial class OrganizeViewModel : ObservableObject
     };
 
     /// <summary>
-    /// 重算「模拟运行 + AI 模板」提示。<b>非阻断</b>：内核在模拟下不会抛异常、模拟照样能跑完，
-    /// 这里只负责在用户点「开始整理」之前把「AI 字段是占位值」与「实跑缺 Key 会整批中止」说出来。
+    /// 重算「AI 字段可用性」提示。<b>非阻断</b>：这里只负责在用户点「开始整理」之前把后果说出来，
+    /// 不拦任何操作（模拟运行照样跑得完；实跑的两支本就由内核在中止时抛出真实错误）。
     /// </summary>
-    private void UpdateDryRunAiHint()
+    private void UpdateAiFieldHint()
     {
-        var provider = (AiProvider)System.Math.Clamp(AiProviderIndex, (int)AiProvider.None, (int)AiProvider.Nvidia);
-        bool hit = DryRun
-                   && TemplateUsesAiPlaceholders(NamingTemplate)
-                   && provider != AiProvider.None
-                   && !KeyConfiguredFor(provider);
+        var provider = SelectedProvider;
+        bool usesAi = TemplateUsesAiPlaceholders(NamingTemplate);
+        string hint = "";
 
-        HasDryRunAiHint = hit;
-        DryRunAiHint = hit
-            ? "模拟运行不会调用识别接口：模板里的 AI 字段（category / scene / people / action / subtitle / source）"
-              + "将以 unknown0007 这类「unknown + 批次序号」占位值显示，不是真实识别结果；"
-              + "且当前引擎尚未配置 API Key，切到「实际执行」时会因缺少密钥整批中止。"
-            : "";
+        if (usesAi && DryRun && provider != AiProvider.None && !KeyConfiguredFor(provider))
+        {
+            // ① 模拟运行 + 缺 Key：不调 AI、AI 字段落占位值；且切到实跑会整批中止
+            hint = "模拟运行不会调用识别接口：模板里的 AI 字段（category / scene / people / action / subtitle / source）"
+                   + "将以 unknown0007 这类「unknown + 批次序号」占位值显示，不是真实识别结果；"
+                   + "且当前引擎尚未配置 API Key，切到「实际执行」时会因缺少密钥整批中止。";
+        }
+        else if (usesAi && !DryRun && provider == AiProvider.None)
+        {
+            // ② 实跑 + 引擎=无：整条模板被内核回退成默认模板，用户填的命名规则完全不生效。
+            // 这是与①不同的另一件事（不是「字段变占位值」，而是「模板整个被换掉」），文案必须分开。
+            hint = "当前识别引擎为「无」，模板里的 AI 字段（category / scene / people / action / subtitle / source）"
+                   + "本次无法产出真实值：为避免生成 unknown 占位名，命名规则将被回退为默认模板 "
+                   + "{yyyy}{MM}{dd}_{name}_{n}（日期_原名_序号），你填写的模板不会生效。"
+                   + "若要用自己的模板，请在「识别引擎」中选择一个引擎并配置 API Key，或从模板中去掉 AI 字段。";
+        }
+        else if (usesAi && !DryRun && !KeyConfiguredFor(provider))
+        {
+            // ③ 实跑 + 引擎≠无（②已排除 None）+ 缺 Key：CreateAi 在扫描之前抛整批级永久错误。
+            // 与①②都不同：既不是占位值、也不是模板被换掉，而是「一个文件都不会动、整批直接中止」。
+            hint = "当前识别引擎尚未配置 API Key：点击「开始整理」后会立即整批中止，不会改动任何文件。"
+                   + "请先在「设置」页为该引擎填写密钥，或从命名规则中去掉 AI 字段。";
+        }
+
+        AiFieldHint = hint;
+        HasAiFieldHint = hint.Length > 0;
     }
 
     // 三个输入任一变化都要重算：运行模式、命名模板、引擎选择
     partial void OnDryRunChanged(bool value)
     {
-        UpdateDryRunAiHint();
+        UpdateAiFieldHint();
     }
 
     partial void OnNamingTemplateChanged(string value)
     {
-        UpdateDryRunAiHint();
+        UpdateAiFieldHint();
     }
 
     partial void OnAiProviderIndexChanged(int value)
     {
-        UpdateDryRunAiHint();
+        UpdateAiFieldHint();
     }
 
     /// <summary>
@@ -381,10 +435,10 @@ public partial class OrganizeViewModel : ObservableObject
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
 
-        // P1-3b 配套：把「模拟运行下 AI 字段是占位值」写进日志再开跑。
+        // AI 字段可用性提示（模拟运行占位值 / 实跑模板被回退 / 实跑缺 Key 会中止）写进日志再开跑。
         // 这里刻意<b>不开横幅</b>——横幅一开就会折叠下方的实时状态行，整轮看不到进度；
         // 日志框是常驻的，跑完回头看也还在，且不影响进度展示。
-        if (DryRunAiHint.Length > 0) AppendLog(DryRunAiHint);
+        if (AiFieldHint.Length > 0) AppendLog(AiFieldHint);
 
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -471,8 +525,10 @@ public partial class OrganizeViewModel : ObservableObject
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
 
-        // 同 StartOrganizeAsync：模拟运行 + AI 模板的占位提示写进日志（非阻断，不开横幅）
-        if (DryRunAiHint.Length > 0) AppendLog(DryRunAiHint);
+        // 注意：此处<b>刻意不</b>追加 AiFieldHint。归档（ArchiveByDateAsync）不使用命名模板，
+        // 也不调用识别接口——它把文件原样放进 yyyy/yyyy-MM-dd 子目录（命名取 f.Name）。
+        // 把「模板里的 AI 字段会变成占位值 / 模板会被回退」写进归档日志，等于对本次运行做出
+        // 一个不会发生的陈述（P33 谎报家族），故只保留在「开始整理」路径上。
 
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -601,7 +657,7 @@ public partial class OrganizeViewModel : ObservableObject
         }
         finally
         {
-            UpdateDryRunAiHint();
+            UpdateAiFieldHint();
         }
     }
 
@@ -639,7 +695,7 @@ public partial class OrganizeViewModel : ObservableObject
     private OrganizeRequest BuildRequest()
     {
         _model = _settings.Load(); // 单例 VM 可能滞后于「设置」页改动，每次构建请求时刷新密钥/端点
-        var provider = (AiProvider)AiProviderIndex;
+        var provider = SelectedProvider; // 走归一属性：越界索引不得进请求（否则「未选引擎」会被当成「缺 Key」）
         string key = provider switch
         {
             AiProvider.Zhipu => _model.ZhipuApiKey,
@@ -701,8 +757,8 @@ public partial class OrganizeViewModel : ObservableObject
         _model.NamingTemplate = NamingTemplate;
         _model.DryRun = DryRun;
         _model.UseExifDate = UseExifDate;
-        _model.AiProvider = (AiProvider)AiProviderIndex;
-        // 写回同样用钳制后的值：否则越界索引会被固化进 settings.json，成为持久非法值
+        // 写回同样走归一属性：否则越界索引会被固化进 settings.json，成为持久非法值
+        _model.AiProvider = SelectedProvider;
         _model.OperationMode = SelectedMode;
         _model.ConflictStrategy = SelectedConflict;
         await _settings.SaveAsync(_model);
