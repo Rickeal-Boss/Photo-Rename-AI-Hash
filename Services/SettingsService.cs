@@ -238,6 +238,9 @@ public sealed class SettingsService : ISettingsService
                 ? (ConflictStrategy)rawConflictVal
                 : ConflictStrategy.AutoRename;
             target.OutputFolder = ReadString(root, nameof(AppSettings.OutputFolder), target.OutputFolder);
+            // 第九轮新增的持久化字段必须一并抢救：否则整份配置损坏走抢救路径时，用户此前
+            // 选好的备份文件夹会静默回落成空串，而重命名模式强制要求选它（等于白选一次）。
+            target.BackupFolder = ReadString(root, nameof(AppSettings.BackupFolder), target.BackupFolder);
             target.DryRun = ReadBool(root, nameof(AppSettings.DryRun), target.DryRun);
             target.UseExifDate = ReadBool(root, nameof(AppSettings.UseExifDate), target.UseExifDate);
             target.AiProvider = (AiProvider)Math.Clamp(
