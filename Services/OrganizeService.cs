@@ -126,7 +126,11 @@ public sealed class OrganizeService : IOrganizeService
         // 闸门上限（张/分）：null = 该引擎不带闸门（不主动限速）。
         // 只在批次开始时取一次：档位由 (引擎, 端点, RPM 上限) 三者决定，批次内不会变。
         // 用途是给 UI 显示「闸门上限 N」——N 是上限保护，不是速率目标。
-        int? gateRpm = AiProviderProfiles.For(req.AiProvider, req.CustomApiUrl, req.CustomApiRpmLimit).GateRpm;
+        // P1-3 / P1-3b 配套：本批次不会发任何 AI 请求时（模板不含 AI 占位符，或模拟运行）取 null，
+        // 否则界面会显示一个本批次根本不存在的「闸门上限」，与「模拟口径=实跑口径」同样相悖。
+        int? gateRpm = TemplateWillUseAi(req)
+            ? AiProviderProfiles.For(req.AiProvider, req.CustomApiUrl, req.CustomApiRpmLimit).GateRpm
+            : null;
 
         // 暂停令牌必须在扫描之前创建：此前它在处理循环前才 new，而 Pause() 在 _pts == null 时是
         // 静默 no-op，导致「开始后的扫描 / 加载索引窗口内点暂停」完全失效、UI 却谎报已暂停。
@@ -835,8 +839,10 @@ public sealed class OrganizeService : IOrganizeService
         // needsAi = 已创建引擎 && 模板含 AI 占位符 && 非模拟运行（判据见 TemplateWillUseAi）。
         // 此前只要 ai != null 就无条件调用：模板不含 AI 占位符时逐图付费却完全不影响文件名；
         // 模拟运行同样照调不误，而 UI 写的是「仅预览结果」——用户理解为不花钱的预览，实际每张都计费。
-        // 不调 AI 时 f.Category / Scene / … 保持原值（空），由 BuildName 的 Ai() 落成既有约定的
-        // 「unknown」占位，模拟结果里这些字段是可辨识的空值，不会伪装成真实识别结果。
+        // 不调 AI 时 f.Category / Scene / … 保持原值（空），由 BuildName 的 Ai() 落成带
+        // unknown 前缀的占位：模拟运行下还会带上本文件的批次序号（unknown0007 这种形态），
+        // 保证同一批的候选名互不撞车——否则默认模板（六个占位符全是 AI 字段）会让每个文件
+        // 算出同一个候选名、被一路加 _1/_2/_3，预览的冲突数与实跑完全对不上（详见 BuildName）。
         bool needsAi = ai != null && TemplateWillUseAi(req);
 
         // AI 识别（结果缓存：重试复用，避免重复计费）
@@ -882,15 +888,15 @@ public sealed class OrganizeService : IOrganizeService
         // 沿用 ai != null 会把用户自己写的、根本不需要 AI 的模板（如 {yyyy}_{name}_{n}）
         // 强行换成默认模板 —— 那等于抹掉用户填的命名规则，是比原问题更严重的回归。
         // 只有「模板确实用到 AI 占位符、而本批次拿不到 AI 值」才回退（即引擎未启用）。
-        // 模拟运行刻意<b>不</b>回退：按 P1-3b 用既有约定的 unknown 占位填 AI 字段（见 BuildName 的 Ai()），
-        // 让用户看清「哪些字段在模拟下没有真实值」，而不是整个模板被悄悄换掉——
-        // 后者会让模拟结果与实际运行的命名规则完全不同，预览也就失去意义。
+        // 模拟运行刻意<b>不</b>回退：按 P1-3b 用带 unknown 前缀的占位填 AI 字段（见 BuildName 的 Ai()，
+        // 并带批次序号以保证批内唯一），让用户看清「哪些字段在模拟下没有真实值」，
+        // 而不是整个模板被悄悄换掉——后者会让模拟结果与实际运行的命名规则完全不同，预览也就失去意义。
         bool templateNeedsAi = TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders);
         bool aiValueUnavailable = templateNeedsAi && !needsAi && !req.DryRun;
         string template = string.IsNullOrWhiteSpace(req.NamingTemplate) || aiValueUnavailable
-            ? "{yyyy}{MM}{dd}_{name}_{n}"
+            ? DefaultNamingTemplate
             : req.NamingTemplate;
-        string baseName = BuildName(f, template, when, index);
+        string baseName = BuildName(f, template, when, index, req.DryRun);
         string candidate = baseName + Path.GetExtension(f.Name);
 
         // P0-1：重命名模式按「文件自身所在目录」定输出目录，而不是一律用源根目录。
@@ -1376,12 +1382,41 @@ public sealed class OrganizeService : IOrganizeService
     /// 可能超过 MAX_PATH（app.manifest 已按既定取舍移除 longPathAware），此处整体收口。</summary>
     private const int MaxBaseNameLength = 180;
 
-    private static string BuildName(PhotoFile f, string template, DateTime when, int index)
+    /// <summary>
+    /// 命名模板的兜底值（「日期 + 原名 + 序号」）：未配置 AI 引擎、模板为空、
+    /// 或模板净化后为空时使用。抽成常量是因为 <see cref="ProcessOneAsync"/> 与
+    /// <see cref="BuildName"/> 两处都要用，写两份必然漂移。
+    /// </summary>
+    private const string DefaultNamingTemplate = "{yyyy}{MM}{dd}_{name}_{n}";
+
+    /// <summary>
+    /// 按命名模板生成最终基名（不含扩展名）。
+    /// </summary>
+    /// <param name="dryRun">
+    /// 模拟运行标志：为 true 时 AI 占位符在<b>没有真实值</b>的情况下会带上本文件的批次序号，
+    /// 而不是一律填同一个 <c>unknown</c>。理由见方法内 <c>Ai()</c> 的注释（P1-3b 配套）。
+    /// 有真实值（非模拟路径）时两者完全等价，实跑行为不受这个参数影响。
+    /// </param>
+    private static string BuildName(PhotoFile f, string template, DateTime when, int index, bool dryRun)
     {
         string San(string v) => Sanitize(v);
-        string Ai(string v) => string.IsNullOrWhiteSpace(v) ? "unknown" : San(v);
 
-        var built = (template ?? "")
+        // P1-3b 配套：模拟运行下 AI 字段没有真实值，占位值必须<b>逐文件可区分</b>。
+        // 若一律填同一个 "unknown"：默认模板 {category}_{scene}_{people}_{action}_{subtitle}_{source}
+        // 六个占位符全是 AI 字段（不含 {name} / {n}），于是同一批每个文件算出的候选名一字不差
+        // → 撞上 claimedThisRun → 一路加 _1 / _2 / _3 … → 预览变成「楼梯」。
+        // 而实跑时各文件 AI 结果不同、几乎不撞名，于是预览给出的<b>冲突数、后缀分布、最终文件名
+        // 全部与实跑对不上</b>——用户照预览做的判断是错的，违背「模拟口径必须与实跑一致」。
+        // 带上批次序号（该文件在队列中的次序，批内唯一）后候选名恢复唯一，假楼梯消失，
+        // 冲突口径回到与实跑一致；保留 unknown 前缀，用户一眼能看出是占位、不会误读成真实识别结果。
+        // 非模拟路径完全不动，仍是既有的 unknown 兜底。
+        string Ai(string v) => string.IsNullOrWhiteSpace(v)
+            ? (dryRun ? "unknown" + index.ToString("D4") : "unknown")
+            : San(v);
+
+        // 抽成局部函数：末尾「净化后为空」的兜底需要用它再跑一遍默认模板，
+        // 不抽就要把 15 行 Replace 抄两遍（抄两份必然漂移）。
+        string Build(string tpl) => (tpl ?? "")
             .Replace("{yyyy}", when.ToString("yyyy"))
             .Replace("{MM}", when.ToString("MM"))
             .Replace("{dd}", when.ToString("dd"))
@@ -1398,6 +1433,8 @@ public sealed class OrganizeService : IOrganizeService
             .Replace("{subtitle}", Ai(f.Subtitle))
             .Replace("{source}", Ai(f.SourceTag));
 
+        var built = Build(template);
+
         // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException
         if (built.Length > MaxBaseNameLength)
             built = built.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.');
@@ -1410,6 +1447,12 @@ public sealed class OrganizeService : IOrganizeService
         // 选中「剥离」而不是「报错拒绝整批」，是为了与既有 Sanitize 口径一致：
         // 非法字符一律替换而非中止（中止会让用户为一个字符重填整个模板并重启批次）。
         built = string.Concat(built.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, ':'));
+
+        // P1-5 兜底：模板字面量<b>全是</b>分隔符 / 空白（"../"、"\"、"/"、"   "…）时净化结果为空，
+        // 直接返回会让文件名只剩扩展名（".jpg"），同批文件还会互相撞名并被一路加 _1/_2/_3。
+        // 回退到默认模板，与 ProcessOneAsync 的「模板为空」回退同口径（同用 DefaultNamingTemplate）。
+        if (string.IsNullOrWhiteSpace(built))
+            built = Build(DefaultNamingTemplate);
 
         return built;
     }
