@@ -846,8 +846,13 @@ public sealed class OrganizeService : IOrganizeService
                         // 判据与 ExecuteAsync 的 overwrite 取值同源：
                         // targetMd5 非空 ⇒ 目标曾存在；targetMd5 != md5 ⇒ 内容不同（内容相同会在
                         // ResolveTargetAsync / ExecuteAsync 里提前判「未改动」返回）。
-                        // 与 degraded 互斥：degraded 表示「Overwrite 未生效、退化为加序号」，
-                        // 本判据表示「Overwrite 已生效、真的覆盖了」，二者不可能同时为真。
+                        // 与 degraded 互斥——<b>由判据本身保证，不是靠 if/else 结构</b>：
+                        // degraded 为真 ⇒ conflict==Overwrite 且 ResolveTargetAsync 走了加序号分支
+                        //（即 mode==Rename，或被本批次已登记的 target 逼退）。前者被本判据的
+                        // Mode!=Rename 排除；后者下 SuffixUntilFreeAsync 只会返回
+                        // targetMd5==null（拿到空位）或 targetMd5==md5（该序号名下已同内容）的路径，
+                        // 两者都不满足「targetMd5 非空且 != md5」。故同一 entry 不可能既有
+                        // degradeReason 又有本文案——改判据时务必保住这条不变式。
                         // <b>!req.DryRun 这个守卫不要去掉</b>：UI 的汇总文案是「模拟运行预估：本批次将有 …」，
                         // 而本条文案是过去时「已被替换」。模拟下真的写出它，就会把预览说成既成事实（P33）。
                         overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
@@ -1223,7 +1228,10 @@ public sealed class OrganizeService : IOrganizeService
         // 文件时，该文件被<b>无备份地</b>覆盖（备份只发生在「重命名模式」的源文件上，见上方
         // BackupOriginalAsync）。此前这条路径没有任何提示，与归档侧口径不一致，故一并写 Message。
         // 判据与 ExecuteAsync 的 overwrite 取值同源（targetMd5 非空 ⇒ 目标曾存在；!= md5 ⇒ 内容不同）。
-        // 与 degraded 互斥：degraded 是「Overwrite 未生效」，本判据是「Overwrite 已生效」。
+        // 与 degraded 互斥——<b>由判据本身保证，不是靠 if/else 结构</b>：
+        // degraded 为真 ⇒ conflict==Overwrite 且走了加序号分支（mode==Rename，或 target 已被
+        // 本批次登记）。前者被 Mode!=Rename 排除；后者下 SuffixUntilFreeAsync 只返回
+        // targetMd5==null 或 ==md5 的路径，均不满足「非空且 != md5」。不变式详见归档侧同段注释。
         // <b>!req.DryRun 守卫不要去掉</b>：UI 汇总前缀是「模拟运行预估：本批次将有 …」，
         // 本条文案却是过去时「已被替换」；模拟下写出它会重演 P33（把预览说成已发生）。
         bool overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
