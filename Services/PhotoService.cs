@@ -155,13 +155,18 @@ public sealed class PhotoService : IPhotoService
         return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
-    /// <summary>扫描异常诊断日志（最佳努力；写日志失败绝不能再抛，否则会掩盖真实故障）。</summary>
+    /// <summary>
+    /// 扫描异常诊断日志（最佳努力；写日志失败绝不能再抛，否则会掩盖真实故障）。
+    /// 落在 <c>%USERPROFILE%\.PhotoRenameAIHash\</c>，与 settings.json / crash.log 同目录——
+    /// <b>刻意不用 <c>%LOCALAPPDATA%</c></b>：MSIX 会把它纳入包数据、卸载 / 重置应用时一并删除
+    /// （判据见 <c>SettingsService.FilePath</c> 注释），而扫描现场正是排障时要留存的东西。
+    /// </summary>
     private static void TryAppendScanLog(string message)
     {
         try
         {
             var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhotoRenameAIHash");
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".PhotoRenameAIHash");
             // 全限定 System.IO.Directory：本文件同时 using 了 MetadataExtractor，
             // 后者也有 Directory 类型（EXIF 目录项），裸写会触发 CS0104 歧义
             System.IO.Directory.CreateDirectory(dir);

@@ -33,6 +33,20 @@ public sealed class OrganizeService : IOrganizeService
     private volatile bool _pendingPause;
 
     /// <summary>
+    /// 本批次是否仍在进行中：从进入 <see cref="RunAsync"/> / <see cref="ArchiveByDateAsync"/>
+    /// 起置 true，到该方法的 <c>finally</c> 收尾时置 false。
+    /// <b>为什么需要它</b>：<see cref="_pendingPause"/> 的清理责任落在服务侧 <c>finally</c>，
+    /// 但「服务侧 <c>finally</c> 已跑完、VM 侧 <c>finally</c> 尚未跑」的窗口里，UI 线程仍可能
+    /// 派发到用户点下的「暂停」（VM 的 <c>IsBusy</c> 此时仍为 true，闸门拦不住）。
+    /// 该请求若被记成 <see cref="_pendingPause"/>，就<b>没有任何人</b>会清除它
+    /// → 下一批在创建令牌时被 <see cref="ApplyPendingPause"/> 静默应用
+    /// → 批次卡在 0% 而 VM 的 <c>IsPaused</c> 为 false、按钮显示「暂停」，用户完全看不出发生了什么。
+    /// 故 <see cref="Pause"/> 只在批次活跃时记录待应用请求，批次已结束则直接丢弃。
+    /// volatile：写在 UI 线程（批次开始 / 结束），读在 UI 线程（Pause）。
+    /// </summary>
+    private volatile bool _batchActive;
+
+    /// <summary>
     /// 当前是否处于暂停状态（供 UI 显示「继续」）。
     /// <b>必须把 <c>_pendingPause</c> 一起算进来</b>：否则用户点暂停只置了待应用标记，本属性仍返回 false
     /// → 界面显示「当前阶段暂不支持暂停」，但稍后创建点把暂停应用上了、循环真的挂起
@@ -48,7 +62,10 @@ public sealed class OrganizeService : IOrganizeService
     public void Pause()
     {
         if (_pts != null) _pts.Pause();
-        else _pendingPause = true;
+        // 仅在批次仍活跃时记「待应用」：批次已结束时（服务侧 finally 已跑、VM 侧 finally 未跑）
+        // 用户仍可能点到暂停，若不丢弃，该标记会残留到下一批并让下一批一启动就静默暂停
+        // （界面却显示未暂停）——正是此前修过的 _pendingPause 污染类，这里堵掉最后一段窗口。
+        else if (_batchActive) _pendingPause = true;
     }
 
     /// <summary>继续被暂停的处理循环：同时清掉待应用标记，避免下一批次一开始就莫名处于暂停。</summary>
@@ -69,6 +86,20 @@ public sealed class OrganizeService : IOrganizeService
         _pendingPause = false;
     }
 
+    /// <summary>
+    /// 批次收尾（正常结束 / 熔断中止 / 早退 / 抛异常四条路径共用）：
+    /// 清掉暂停令牌（避免 IsPaused 在新批次开始前误报 true）、清掉待应用暂停标记、
+    /// 并把 <see cref="_batchActive"/> 置回 false（让收尾后到 VM <c>finally</c> 之间点下的「暂停」被丢弃，
+    /// 不再残留到下一批 —— 见 <see cref="_batchActive"/> 的说明）。
+    /// 三件事必须一起做：任何一处单独使用都会留下一个污染下一批次的窗口。
+    /// </summary>
+    private void EndBatch()
+    {
+        _pts = null;
+        _pendingPause = false;
+        _batchActive = false;
+    }
+
     public async Task<OrganizeReport> RunAsync(OrganizeRequest req, IProgress<OrganizeProgress> progress, CancellationToken ct = default)
     {
         var report = new OrganizeReport();
@@ -77,6 +108,9 @@ public sealed class OrganizeService : IOrganizeService
         // 注意：这里<b>不清</b> _pendingPause——用户可能在进入本方法之前就点了暂停，那份请求
         // 要留到创建点补应用；清掉会让界面（已按 pending 显示「已暂停」）与循环实际行为再次对不上。
         _pts = null;
+        // 批次进入活跃期：从此刻起 Pause() 才会把「令牌尚未创建」的请求记成待应用
+        //（批次已结束的收尾窗口内点下的暂停会被丢弃，见 _batchActive 说明）。
+        _batchActive = true;
         // 日志服务是进程级单例、失败计数跨批次累加，故记录批次开始时的基线，
         // 只统计本批次新产生的写入失败，避免把历史累计值报给用户。
         int logFailBefore = _log.FailedWrites;
@@ -87,7 +121,7 @@ public sealed class OrganizeService : IOrganizeService
             progress.Report(new OrganizeProgress { Message = "源文件夹无效。" });
             // 早退发生在 _pts 创建之前、try/finally 不会执行：必须在这里清掉待应用标记。
             // 否则它会残留到下一批次（用户没点过暂停，下一批一创建令牌却被应用 → 一启动就暂停）。
-            _pendingPause = false;
+            EndBatch();
             return report;
         }
 
@@ -96,7 +130,7 @@ public sealed class OrganizeService : IOrganizeService
         {
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
             // 同「源文件夹无效」：早退不会经过 try/finally，此处必须清掉待应用标记，避免污染下一批次。
-            _pendingPause = false;
+            EndBatch();
             return report;
         }
 
@@ -120,8 +154,7 @@ public sealed class OrganizeService : IOrganizeService
             // 与 :87-89「源文件夹无效」早退同源：构造 AI 失败是 throw 而非 return，发生在
             // _pts 创建之前、try/finally 不会执行，若不在此清掉待应用标记，它会残留到下一批次
             // → 用户没点过暂停，下一批一创建令牌却被应用 → 一启动即暂停。
-            _pendingPause = false;
-            _pts = null;
+            EndBatch();
             throw;
         }
 
@@ -148,8 +181,7 @@ public sealed class OrganizeService : IOrganizeService
         {
             // 同上：扫描失败（取消 / 目录不可访问）也是「令牌刚创建、try/finally 尚未进入」的窗口，
             // 必须在这里清掉待应用标记与令牌，否则下一批一启动就处于暂停态。
-            _pendingPause = false;
-            _pts = null;
+            EndBatch();
             throw;
         }
         report.Total = files.Count;
@@ -209,6 +241,19 @@ public sealed class OrganizeService : IOrganizeService
 
         // 索引可信度告警（放在建队之后：Percent 用同源的 skippedAtStart 计数）。
         // 必须带 Percent：VM 无条件赋值 Progress = p.Percent，不带会把进度条打回 0。
+        // 两种原因<b>分开陈述</b>：旧版日志格式（升级）与「参数确实变了」是两回事。
+        // 合并计数会向「升级后什么都没改」的用户谎报「你改了命名配置，请保持这些参数不变」。
+        if (completed.IgnoredByMissingFingerprintColumn > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                LogLine = $"检测到 {completed.IgnoredByMissingFingerprintColumn} 条历史记录没有指纹列" +
+                          "（升级前的旧版日志，或上次运行被中断留下的半行记录），无法判断它们是否与本次参数一致，" +
+                          "已按「未处理」对待并重新处理对应文件。这类记录与你的命名配置无关。" +
+                          RenameNestingCaution(req),
+            });
+        }
         if (completed.IgnoredByFingerprint > 0)
         {
             progress.Report(new OrganizeProgress
@@ -217,7 +262,8 @@ public sealed class OrganizeService : IOrganizeService
                 LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
                           "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
                           "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
-                          "若希望继续沿用旧记录续传，请保持这些参数不变。",
+                          "若希望继续沿用旧记录续传，请保持这些参数不变。" +
+                          RenameNestingCaution(req),
             });
         }
         if (completed.EnumerationIncomplete)
@@ -296,7 +342,7 @@ public sealed class OrganizeService : IOrganizeService
                 var (f, index) = queue.Dequeue();
                 try
                 {
-                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun).ConfigureAwait(false);
+                    var entry = await ProcessOneAsync(f, req, output, ai, aiStats, index, ct, aiCache, md5Cache, claimedThisRun, backedUpThisRun, completed.DoneByNewPathAnyFingerprint).ConfigureAwait(false);
                     Categorize(report, entry);
                     consecutivePermanent = 0; // 成功处理即重置：仅「连续」失败才熔断，容忍偶发假阳性
                     // 同因计数一并清零：中止文案写的是「连续 3 个文件出现相同原因的错误」，
@@ -309,7 +355,12 @@ public sealed class OrganizeService : IOrganizeService
                     {
                         Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                         Result = entry,
-                        LogLine = $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
+                        // 叠加保护性跳过没有 NewName（没有产出任何名字），且「跳过原因」默认只挂在结果行的
+                        // ToolTip 上（用户不悬停就看不到）。这类跳过关系到「文件为什么没被改名」，
+                        // 必须让原因直接出现在常驻日志里，否则等于换了一种方式的静默。
+                        LogLine = entry.Status.Contains("疑似已命名")
+                            ? $"{entry.OriginalName} [{entry.Status}] {entry.Message}"
+                            : $"{entry.OriginalName} -> {entry.NewName} [{entry.Status}]",
                         // 速率三件套只在此处（成功处理一个文件后）刷新：
                         // 失败/重排队路径不该刷——那会拿失败尝试去算速率。
                         AiRpm = RecentAiRpm(aiStats.Stamps),
@@ -485,8 +536,9 @@ public sealed class OrganizeService : IOrganizeService
         }
         finally
         {
-            _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
-            _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
+            // 正常结束或熔断中止都确保清理：清令牌、清待应用标记、标记批次结束
+            //（批次结束后到 VM finally 之间点下的「暂停」不再残留到下一批，见 _batchActive 说明）。
+            EndBatch();
 
             // 写盘失败此前完全静默：磁盘满时用户会以为已全部记录，实际审计与续传索引已中断。
             // <b>必须放在 finally</b>：熔断中止（consecutivePermanent / sameCauseCount / IsEnvironmentError）
@@ -521,15 +573,28 @@ public sealed class OrganizeService : IOrganizeService
         // 同 RunAsync：清掉上一批可能残留的暂停令牌，避免 IsPaused 在新批次开始前误报 true。
         // 同 RunAsync：此处不清 _pendingPause（用户可能在进入本方法之前已点暂停，需留到创建点补应用）。
         _pts = null;
+        _batchActive = true; // 同 RunAsync：批次进入活跃期，之后 Pause() 才会记录待应用请求
         // 与 RunAsync 同口径：失败计数是进程级单例的累计值，取基线后只统计本批次新增。
         int logFailBefore = _log.FailedWrites;
+
+        // 归档语义归一：归档 = 把照片按日期归入输出目录，必然改变文件的目录位置，
+        // 因此「重命名」（原地改名）这个模式在归档语境下没有意义。
+        // 此前归档入口把 VM 选中的模式原样透传（BuildRequest 的 Mode = SelectedMode），
+        // 于是用户选「重命名」再点「按日期归档」时：文件被 File.Move 搬进日期子目录（源目录里的原件消失），
+        // 状态却写成「已重命名」，且归档路径**完全不经过备份**（备份只在 ProcessOneAsync 里），
+        // 而重命名模式在整理路径下是强制要求先选备份文件夹的 —— 用户按整理页建立的「有兜底」预期
+        // 在归档页落空，且没有任何一处说明模式会影响归档行为（静默移动 + 状态谎报）。
+        // 归一为 Move 后：文件离开原位进入归档结构（与用户选「重命名」时的直觉一致），
+        // 状态产出「已归档」，Overwrite 判据（Mode != Rename）也随之恢复正常语义。
+        bool modeNormalized = req.Mode == OperationMode.Rename;
+        if (modeNormalized) req.Mode = OperationMode.Move;
 
         if (string.IsNullOrWhiteSpace(req.SourceFolder) || !Directory.Exists(req.SourceFolder))
         {
             progress.Report(new OrganizeProgress { Message = "源文件夹无效。" });
             // 早退发生在 _pts 创建之前、try/finally 不会执行：必须在这里清掉待应用标记。
             // 否则它会残留到下一批次（用户没点过暂停，下一批一创建令牌却被应用 → 一启动就暂停）。
-            _pendingPause = false;
+            EndBatch();
             return report;
         }
 
@@ -537,7 +602,7 @@ public sealed class OrganizeService : IOrganizeService
         {
             progress.Report(new OrganizeProgress { Message = "输出文件夹无效。" });
             // 同「源文件夹无效」：早退不会经过 try/finally，此处必须清掉待应用标记，避免污染下一批次。
-            _pendingPause = false;
+            EndBatch();
             return report;
         }
 
@@ -564,17 +629,41 @@ public sealed class OrganizeService : IOrganizeService
         {
             // 与 RunAsync 同源：扫描失败发生在「令牌已创建、try/finally 尚未进入」的窗口，
             // 必须清掉待应用标记与令牌，否则下一批次一启动就处于暂停态。
-            _pendingPause = false;
-            _pts = null;
+            EndBatch();
             throw;
         }
         report.Total = files.Count;
+
+        // 模式被归一（用户选「重命名」却点了「按日期归档」）时必须出声：
+        // 归档必然改变文件的目录位置，归一为「移动」是正确语义，但用户是按「原地改名」的理解点的按钮，
+        // 静默改变行为与状态文案属于谎报家族（P33）。此处明说「按移动处理 + 文件会离开源文件夹」。
+        if (modeNormalized)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = 0,
+                LogLine = "提示：归档会把照片按日期放入输出目录、必然改变文件位置，「重命名」模式在归档下没有意义，" +
+                          "本次已按「移动」处理（文件会离开源文件夹进入 yyyy/yyyy-MM-dd 子目录）。" +
+                          "若希望保留源文件，请改用「复制」模式后重新归档。",
+            });
+        }
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         // 同 RunAsync：指纹不一致的历史记录不计入索引（参数变了就该重做）。
         var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint, prevFingerprint, legacyFingerprint).ConfigureAwait(false);
 
-        // 索引可信度告警（与 RunAsync 同文案、同口径；Percent 取 0：此时本批次尚未处理任何文件）
+        // 索引可信度告警（与 RunAsync 同口径；Percent 取 0：此时本批次尚未处理任何文件）
+        // 两种原因分开陈述：旧版日志格式（升级）与「参数确实变了」是两回事，合并计数会谎报。
+        if (completed.IgnoredByMissingFingerprintColumn > 0)
+        {
+            progress.Report(new OrganizeProgress
+            {
+                Percent = 0,
+                LogLine = $"检测到 {completed.IgnoredByMissingFingerprintColumn} 条历史记录没有指纹列" +
+                          "（升级前的旧版日志，或上次运行被中断留下的半行记录），无法判断它们是否与本次参数一致，" +
+                          "已按「未处理」对待并重新处理对应文件。这类记录与你的命名配置无关。",
+            });
+        }
         if (completed.IgnoredByFingerprint > 0)
         {
             progress.Report(new OrganizeProgress
@@ -697,7 +786,7 @@ public sealed class OrganizeService : IOrganizeService
                     }
                     else
                     {
-                        string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct).ConfigureAwait(false);
+                        string status = await ExecuteAsync(req, f.Path, resolved, targetMd5, md5, "归档", ct, isArchive: true).ConfigureAwait(false);
 
                         // 与 RunAsync 同口径：登记本批次已落地的目标。
                         // 模拟运行也要登记（此前 `if (!req.DryRun)` 只在实跑登记）：
@@ -773,8 +862,9 @@ public sealed class OrganizeService : IOrganizeService
         }
         finally
         {
-            _pts = null; // 正常结束或熔断中止都确保清理，避免残留 PauseTokenSource
-            _pendingPause = false; // 同理清掉待应用标记，避免污染下一批次
+            // 正常结束或熔断中止都确保清理：清令牌、清待应用标记、标记批次结束
+            //（批次结束后到 VM finally 之间点下的「暂停」不再残留到下一批，见 _batchActive 说明）。
+            EndBatch();
 
             // 归档模式同样写 rename_log.csv（分散在各日期子目录），写盘失败的静默风险与 RunAsync 相同。
             // <b>必须放在 finally</b>：环境级熔断中止是从 catch 里 throw 的，异常会穿过 finally 直接离开方法
@@ -837,7 +927,8 @@ public sealed class OrganizeService : IOrganizeService
     private async Task<RenameLogEntry> ProcessOneAsync(
         PhotoFile f, OrganizeRequest req, string output, IImageAnalysisService? ai, AiRunStats aiStats, int index, CancellationToken ct,
         Dictionary<string, ImageAnalysisResult> aiCache, Dictionary<string, string> md5Cache,
-        HashSet<string> claimedThisRun, HashSet<string> backedUpThisRun)
+        HashSet<string> claimedThisRun, HashSet<string> backedUpThisRun,
+        HashSet<string> previouslyRenamedAnyFingerprint)
     {
         // A-01：MD5 结果缓存——重试时复用，避免对同一文件重复计算（大图 MD5 为全文件读取）。
         if (!md5Cache.TryGetValue(f.Path, out var md5))
@@ -933,6 +1024,38 @@ public sealed class OrganizeService : IOrganizeService
         string baseName = BuildName(f, template, when, index, req.DryRun);
         string candidate = baseName + Path.GetExtension(f.Name);
 
+        // ── 重命名模式的「文件名叠加」保护（不可逆操作绝不能静默发生）──────────────────
+        // 重命名的输入名本身就是输出的一部分：模板含 {name} 时，输出会把「当前文件名」再嵌一次。
+        // 一旦该文件的续传索引失效（日志写失败 / 用户删日志 / 指纹变化 / 升级后旧日志无指纹列），
+        // 它会被再次加工：IMG_0001 → 20240101_IMG_0001_0001 → 下一轮再变长…… 文件名不可逆污染，
+        // 而结果列表里每一行都是绿色的「已重命名」。
+        // 为「宁可重做」辩护的理由（重做时内容相同会被判「未改动」、不产生副本）**只对 Copy/Move 成立**
+        // ——那两种模式下输入名不变、重做幂等；重命名模式下输入名会变，该理由不成立。
+        // 故这里在真正改名之前先判定「这个文件看起来是不是已经被本规则命名过」，命中则保护性跳过并
+        // 明确提示。判据见 NestedRenameSkipReason（两条：历史目标路径精确命中 / 名称形态命中），
+        // 两者都只在「输出确实会把当前名再嵌一次」的前提下才生效，且**只作用于重命名模式**——
+        // Copy/Move 的「宁可重做」既有口径原样保留（判据里显式排除了重命名模式之外的分支）。
+        if (req.Mode == OperationMode.Rename && template.Contains("{name}", StringComparison.Ordinal))
+        {
+            string? nestedReason = NestedRenameSkipReason(f, template, when, baseName, previouslyRenamedAnyFingerprint);
+            if (nestedReason != null)
+            {
+                var nested = new RenameLogEntry
+                {
+                    OriginalPath = f.Path,
+                    OriginalName = f.Name,
+                    Md5 = md5,
+                    Operation = OpName(req.Mode),
+                    Status = "跳过(疑似已命名)",
+                    Message = nestedReason,
+                    Fingerprint = req.Fingerprint,
+                };
+                // 跳过态写日志仅作审计（读侧按 Contains("跳过") 排除，不会污染续传索引）。
+                if (!req.DryRun) await _log.AppendRenameLogAsync(output, nested).ConfigureAwait(false);
+                return nested;
+            }
+        }
+
         // P0-1：重命名模式按「文件自身所在目录」定输出目录，而不是一律用源根目录。
         // 扫描是递归的（PhotoService.EnumerateImages），源根目录下的子目录照片也会被枚举进来；
         // 若把它们的 target 一律拼到源根目录，File.Move 会把子目录里的照片搬到根上
@@ -1019,8 +1142,12 @@ public sealed class OrganizeService : IOrganizeService
     /// 覆盖等于删除源目录中的另一个文件，而备份只备份 source、不备份 target → 不可恢复的静默丢数据。
     /// P2-7：<paramref name="targetMd5"/> 为 ResolveTargetAsync 阶段算得的目标 MD5
     /// （内容相同时即源 MD5），直接复用其结论，不再重复计算一次目标 MD5。
+    /// <paramref name="isArchive"/>：本次调用来自「按日期归档」路径。归档的移动语义是「归档」而非普通
+    /// 「移动」，状态文案必须与实际一致（此前归档透传用户选的「重命名」模式，产出「已重命名」——
+    /// 文件其实被搬进了日期子目录，是典型的 P33 状态谎报）。归档入口已把 Rename 归一为 Move，
+    /// 故这里只需把 Move 的状态文案按调用来源区分。
     /// </summary>
-    private async Task<string> ExecuteAsync(OrganizeRequest req, string source, string target, string? targetMd5, string md5, string opName, CancellationToken ct)
+    private async Task<string> ExecuteAsync(OrganizeRequest req, string source, string target, string? targetMd5, string md5, string opName, CancellationToken ct, bool isArchive = false)
     {
         // 入口检查：File.Copy / File.Move 没有 CancellationToken 重载，真正可中断需改写成
         // FileStream.CopyToAsync(dest, 81920, ct)——本轮不做，此处仅保证「已取消时不再动盘」。
@@ -1057,7 +1184,9 @@ public sealed class OrganizeService : IOrganizeService
             if (req.Mode == OperationMode.Move)
             {
                 File.Move(source, target, overwrite);
-                return "已移动";
+                // 归档路径下状态写「已归档」：文件确实被移入 yyyy/yyyy-MM-dd 子目录，
+                // 与「已移动」语义相同但更贴合用户操作；沿用「已重命名」则是状态谎报。
+                return isArchive ? "已归档" : "已移动";
             }
 
             // 走到这里只可能是「未定义的枚举值」（settings.json 被写坏、或抢救路径拿到越界整数）。
@@ -1108,9 +1237,20 @@ public sealed class OrganizeService : IOrganizeService
         }
     }
 
-    // HRESULT_FROM_WIN32：ERROR_DISK_FULL(112) / ERROR_OUTOFMEMORY(14) / ERROR_NOT_ENOUGH_MEMORY(8)。
+    // HRESULT_FROM_WIN32：ERROR_DISK_FULL(112) / ERROR_HANDLE_DISK_FULL(39) / ERROR_DISK_QUOTA_EXCEEDED(129)
+    // / ERROR_OUTOFMEMORY(14) / ERROR_NOT_ENOUGH_MEMORY(8)。
     // 以负 int 常量比较，避免 0x8xxxxxxx 字面量溢出 int。
+    //
+    // 为什么 39 / 129 也必须在内：它们是「写不进去」的另外两种真实成因（卷配额 / 网络共享配额 /
+    // OneDrive 占位符配额），与 112 是同一个根因族，但错误码不同。
+    // 漏掉时 ExecuteAsync 的 IsDiskFull 过滤器不命中、也不命中占用/权限过滤器 → 冒到 RunAsync 的
+    // 通用 catch → 判「确定性失败」→ 每个文件重排 2 次并逐文件记错，整批<b>永不早停</b>
+    // （N 个文件 × 2 行同因错误，用户完全不知道是磁盘/配额问题）；BackupOriginalAsync 里则会
+    // 落到兜底文案「请确认备份文件夹存在且当前用户可写入」——归因误导（用户去查权限，真因是空间）。
+    // 这两个码只会由「写入失败」抛出，不会命中「已存在 / 被占用 / 权限」场景，故补齐不会误判。
     private const int ErrorDiskFull = unchecked((int)0x80070070);
+    private const int ErrorHandleDiskFull = unchecked((int)0x80070027);
+    private const int ErrorDiskQuotaExceeded = unchecked((int)0x80070081);
     private const int ErrorOutOfMemory = unchecked((int)0x8007000E);
     private const int ErrorNotEnoughMemory = unchecked((int)0x80070008);
 
@@ -1306,10 +1446,14 @@ public sealed class OrganizeService : IOrganizeService
         }
     }
 
-    /// <summary>是否为「磁盘或内存不足以完成写入」的 HRESULT。备份写入中途失败的典型真因，
-    /// 必须与「权限未授予 / 路径不可访问」区分，否则提示会误导用户排障。</summary>
+    /// <summary>是否为「磁盘或内存不足以完成写入」的 HRESULT。备份写入 / 写入 / 归档建目录中途失败的典型真因，
+    /// 必须与「权限未授予 / 路径不可访问 / 文件被占用」区分，否则提示会误导用户排障。
+    /// 集合含 ERROR_DISK_FULL(112) 与 ERROR_HANDLE_DISK_FULL(39)、ERROR_DISK_QUOTA_EXCEEDED(129)——
+    /// 后两者是同一根因族的其它错误码（卷配额 / 网络共享配额），漏掉会让整批不早停（详见常量处注释）。</summary>
     private static bool IsDiskFull(Exception ex)
-        => ex.HResult == ErrorDiskFull || ex.HResult == ErrorOutOfMemory || ex.HResult == ErrorNotEnoughMemory;
+        => ex.HResult == ErrorDiskFull || ex.HResult == ErrorHandleDiskFull ||
+           ex.HResult == ErrorDiskQuotaExceeded ||
+           ex.HResult == ErrorOutOfMemory || ex.HResult == ErrorNotEnoughMemory;
 
     /// <summary>
     /// 是否值得按「单文件重排队 10 次」的口径重试。只有两类配得上：
@@ -1353,6 +1497,60 @@ public sealed class OrganizeService : IOrganizeService
     }
 
     /// <summary>
+    /// 读取「已存在的目标文件」的 MD5，用于冲突判定。
+    /// <list type="bullet">
+    /// <item><description>目标不存在 → 返回 <c>null</c>（无冲突，正常）。</description></item>
+    /// <item><description>目标存在但<b>读不出</b> → <b>不再静默降级成空串</b>，而是显式失败。</description></item>
+    /// </list>
+    /// <b>为什么必须显式失败</b>：此前调用点写 <c>await _hash.TryComputeMd5Async(target, ct) ?? ""</c>，
+    /// 而 <c>TryComputeMd5Async</c> 会把任何非取消异常（含 IOException / UnauthorizedAccessException，
+    /// 即目标被看图软件 / 云盘同步 / 杀软独占、ACL 变更、网络位置掉线）吞成 null。
+    /// 空串会让「内容相同」判定（<c>!string.IsNullOrEmpty(md5) &amp;&amp; md5 == existing</c>）恒 false
+    /// → 目标被判成「内容不同」→ AutoRename 下静默多生成一份重复副本（占空间且难以察觉）、
+    /// Skip 下把「读不出」谎报成状态「跳过(已存在)」（归因错误：目标并不是同一个文件，只是读不出来）。
+    /// 同一份代码在<b>源</b> MD5 处已对这个后果做了显式失败处理（见 ProcessOneAsync 内注释），
+    /// 目标侧此前没跟上——典型「只修了一半」。本方法把目标侧补齐，并与
+    /// <see cref="ExecuteAsync"/> / <see cref="BackupOriginalAsync"/> 已翻译 0x80070020 / 0x80070021
+    /// 的占用类口径<b>三级对齐</b>。
+    /// <b>不是整批熔断</b>：抛出的永久错误都是逐文件级（isEnvironmentError / isBatchLevel 均为 false），
+    /// 只让当前文件失败并继续处理其它文件。
+    /// </summary>
+    private async Task<string?> TryReadTargetMd5Async(string target, CancellationToken ct)
+    {
+        // 目标不存在（含「本批次已登记但模拟运行未落地」的占位）：无内容可比，返回 null（正常路径）。
+        if (!File.Exists(target)) return null;
+
+        try
+        {
+            // 用会抛异常的 ComputeMd5Async（而非吞异常的 TryComputeMd5Async），才能拿到真实失败原因。
+            return await _hash.ComputeMd5Async(target, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // 取消语义不得被包装（与 BackupOriginalAsync 同口径）
+        }
+        catch (IOException ex) when (ex.HResult == ErrorSharingViolation || ex.HResult == ErrorLockViolation)
+        {
+            // 目标被其它程序独占（与 ExecuteAsync / BackupOriginalAsync 同文案口径）。
+            throw new PermanentOperationException(
+                $"目标文件被其它程序占用，无法比较内容：{Path.GetFileName(target)}。请关闭可能占用它的看图软件/编辑器/云盘同步后重试。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new PermanentOperationException(
+                $"没有权限读取目标文件以比较内容：{Path.GetFileName(target)}。请检查文件/文件夹权限或以管理员身份运行。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
+        catch (Exception ex)
+        {
+            // 其它读失败（网络/云盘位置掉线、读时被删除的竞态…）：显式失败，绝不降级成「内容不同」。
+            throw new InvalidOperationException(
+                "无法读取目标文件内容以比较 MD5（目标可能已被删除、位于不可用的网络/云盘位置，或正被其它程序独占）：" + target, ex);
+        }
+    }
+
+    /// <summary>
     /// 计算最终写入目标路径：
     /// - 不存在（且未被本批次占用）→ 直接返回；
     /// - 存在且内容相同(MD5) → 返回该路径（调用方按「未改动」处理）；
@@ -1374,7 +1572,9 @@ public sealed class OrganizeService : IOrganizeService
         // 此前只判 File.Exists → 模拟运行时不登记 claimed，于是模拟会比实跑少算冲突、多报覆盖。
         if (!claimedThisRun.Contains(target) && !File.Exists(target)) return (target, null, false, "");
 
-        string existing = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
+        // 目标 MD5：不存在返回 null（无冲突）；存在但读不出 → 显式失败，不再降级成「内容不同」
+        //（降级会让 AutoRename 静默多生成重复副本、Skip 谎报「跳过(已存在)」，详见 TryReadTargetMd5Async）。
+        string existing = await TryReadTargetMd5Async(target, ct).ConfigureAwait(false) ?? "";
         if (!string.IsNullOrEmpty(md5) && md5 == existing)
             return (target, existing, false, ""); // 内容相同，无需动作
 
@@ -1426,7 +1626,8 @@ public sealed class OrganizeService : IOrganizeService
             if (!File.Exists(target) && !claimedThisRun.Contains(target))
                 return (target, null); // 拿到空位
 
-            string em = await _hash.TryComputeMd5Async(target, ct).ConfigureAwait(false) ?? "";
+            // 同 ResolveTargetAsync：目标存在但读不出 → 显式失败，不降级成「内容不同」而白加序号。
+            string em = await TryReadTargetMd5Async(target, ct).ConfigureAwait(false) ?? "";
             if (!string.IsNullOrEmpty(md5) && md5 == em)
                 return (target, em); // 该序号名下已是相同内容
 
@@ -1534,6 +1735,137 @@ public sealed class OrganizeService : IOrganizeService
             built = Truncate(Build(DefaultNamingTemplate));
 
         return built;
+    }
+
+    /// <summary>
+    /// 重命名模式下判断「当前文件是否看起来已被本规则命名过」，命中则返回给用户看的跳过原因（否则返回 null）。
+    /// <b>为什么需要</b>：重命名的输入名本身就是输出的一部分（模板含 <c>{name}</c>），
+    /// 续传索引一旦失效就会把同一文件逐轮再加工 → 文件名不可逆叠加变长。
+    /// <b>前置条件（由调用方保证）</b>：模式为重命名，且模板含 <c>{name}</c>。
+    /// <para>两条判据，任一命中即跳过（均为「保守」判定：命中时改名确实会造成叠加）：</para>
+    /// <list type="number">
+    /// <item><description><b>精确</b>：当前路径曾是历史记录的「目标路径」（<b>不限指纹</b>，
+    /// 见 <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/>）——说明这个文件确实被本工具改过名。
+    /// 覆盖「升级后旧日志无指纹列」「指纹变化」两类失效（旧记录的目标路径仍然可读）。</description></item>
+    /// <item><description><b>形态</b>：模板在 <c>{name}</c> 之前有确定性的日期前缀，且当前名已以该前缀开头
+    /// （并按 <c>{n}</c> 后缀形态校验末尾 4 位数字）。用于兜住「日志整体丢失」的场景——此时没有任何
+    /// 历史记录可查，只能从名称形态推断。该判据只在「名字已符合本模板产出形态」时命中，
+    /// 此时改名必然叠加，故跳过是安全方向。</description></item>
+    /// </list>
+    /// <b>不在此拦截「本次不改名」的情形</b>：候选名与当前名相同（如模板为 <c>{name}</c>）时直接返回 null，
+    /// 交给下游的「未改动(内容相同)」判定，避免把正常的「无需改动」误报成「疑似已命名」。
+    /// </summary>
+    private static string? NestedRenameSkipReason(
+        PhotoFile f, string template, DateTime when, string newBase, HashSet<string> previouslyRenamedAnyFingerprint)
+    {
+        string curBase = Path.GetFileNameWithoutExtension(f.Name);
+        if (string.IsNullOrEmpty(curBase)) return null;
+
+        // 本次不会改变名字 → 下游会判「未改动(内容相同)」，不在这里拦（否则会把正常结果误报成跳过）。
+        if (string.Equals(newBase, curBase, StringComparison.OrdinalIgnoreCase)) return null;
+
+        // 只有「输出把当前名再嵌一次」才是叠加形态：{name} 取的就是当前名，故新基名必然包含它。
+        // 用 Sanitize 后的值比对——BuildName 替换 {name} 时走的就是 Sanitize（会把空格折成 _、截断 40 字符）。
+        string embedded = Sanitize(curBase);
+        if (string.IsNullOrEmpty(embedded) || !newBase.Contains(embedded, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // 判据一（精确）：当前路径曾是历史记录的目标路径（不限指纹）。
+        if (previouslyRenamedAnyFingerprint.Contains(f.Path))
+            return "该文件看起来已被本规则命名过（历史日志显示它的当前路径曾是某个目标路径）。" +
+                   "为避免文件名被再次叠加（不可逆），已跳过。如确需重新命名，请改用「复制 / 移动」模式输出到新目录。";
+
+        // 判据二（形态兜底）：仅在「日志整体丢失、没有任何历史可查」时才需要用到，故放在精确判据之后。
+        string datePrefix = TemplateDatePrefixBeforeName(template, when);
+        if (datePrefix.Length > 0 &&
+            curBase.StartsWith(datePrefix, StringComparison.OrdinalIgnoreCase) &&
+            MatchesTemplateIndexSuffix(curBase, template))
+            return "该文件的名称看起来已符合当前命名规则（已带相同日期前缀）。" +
+                   "为避免文件名被再次叠加（不可逆），已跳过。如确需重新命名，请改用「复制 / 移动」模式输出到新目录。";
+
+        return null;
+    }
+
+    /// <summary>
+    /// 取模板中 <c>{name}</c> 之前那段「确定性前缀」的展开值，作为「名称形态」判据的锚点。
+    /// 只有前缀满足全部条件才返回非空：<c>{name}</c> 存在且不在最前、前缀里含至少一个日期占位符、
+    /// 且不含任何取值不确定的占位符（AI 字段 / <c>{n}</c> / 未知占位符）。
+    /// 之所以只认「日期前缀」：日期值对同一文件是稳定的（EXIF / 修改时间不变），
+    /// 而 AI 字段取值不可预测、<c>{n}</c> 随队列次序变化，都无法作为形态判据。
+    /// 返回空串表示「无法用形态判定」——保守处理，不误报。
+    /// </summary>
+    private static string TemplateDatePrefixBeforeName(string template, DateTime when)
+    {
+        int idx = template.IndexOf("{name}", StringComparison.Ordinal);
+        if (idx <= 0) return ""; // 无 {name}，或 {name} 在最前（没有可用前缀）
+        string prefix = template.Substring(0, idx);
+
+        foreach (var p in AiPlaceholders)
+            if (prefix.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0) return "";
+        if (prefix.Contains("{n}", StringComparison.Ordinal)) return "";
+
+        bool hasDate = false;
+        foreach (var p in DatePlaceholders)
+            if (prefix.IndexOf(p, StringComparison.Ordinal) >= 0) hasDate = true;
+        if (!hasDate) return "";
+
+        // 展开日期占位符（与 BuildName 同口径、同大小写敏感性），字面量原样保留。
+        string expanded = prefix
+            .Replace("{yyyy}", when.ToString("yyyy"))
+            .Replace("{MM}", when.ToString("MM"))
+            .Replace("{dd}", when.ToString("dd"))
+            .Replace("{HH}", when.ToString("HH"))
+            .Replace("{mm}", when.ToString("mm"))
+            .Replace("{ss}", when.ToString("ss"))
+            .Replace("{date}", when.ToString("yyyy-MM-dd"));
+
+        // 仍含未展开的占位符（未知占位符）→ 形态判据不可靠，放弃。
+        return expanded.Contains('{') || expanded.Contains('}') ? "" : expanded;
+    }
+
+    /// <summary>
+    /// 模板 <c>{name}</c> 之后若含 <c>{n}</c>（固定 4 位序号），则要求当前名以 4 位数字结尾——
+    /// 用来把「已符合本模板产出形态」与「用户自己起的名恰好带相同日期前缀」区分开
+    /// （如 <c>20240101_holiday.jpg</c> 不该被判成已命名）。后缀不含 <c>{n}</c> 时不作约束（返回 true）。
+    /// </summary>
+    private static bool MatchesTemplateIndexSuffix(string curBase, string template)
+    {
+        int idx = template.IndexOf("{name}", StringComparison.Ordinal);
+        if (idx < 0) return true;
+        string suffix = template.Substring(idx + "{name}".Length);
+        if (!suffix.Contains("{n}", StringComparison.Ordinal)) return true;
+        if (curBase.Length < 4) return false;
+        for (int i = curBase.Length - 4; i < curBase.Length; i++)
+            if (!char.IsDigit(curBase[i])) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// 重命名模式 + 有效模板含 <c>{name}</c> 时，返回一段「文件名可能被叠加」的前置警示（否则空串）。
+    /// 索引失效（升级后旧日志无指纹列 / 参数变化 / 日志丢失）会让已改好名的文件被重新加工，
+    /// 而重命名的输入名本身就是输出的一部分 → 文件名被叠加一层且不可逆。
+    /// 这里按 R9-2 的口径「先给可见提示」让用户在首跑前就知道风险；运行期另有逐文件的
+    /// 保护性跳过（见 <see cref="NestedRenameSkipReason"/>）。
+    /// </summary>
+    private static string RenameNestingCaution(OrganizeRequest req)
+    {
+        if (req.DryRun || req.Mode != OperationMode.Rename) return ""; // 模拟运行不改动文件，无需警示
+
+        // 有效模板与 ProcessOneAsync 同口径：模板为空、或模板用到 AI 字段而本批次拿不到 AI 值时，
+        // 实际用的是 DefaultNamingTemplate（它含 {name}）。
+        // 「本批次拿不到 AI 值」= 未启用引擎（AiProvider.None → CreateAi 返回 null）或模拟运行；
+        // 引擎非 None 但模板用到 AI 字段时 CreateAi 会成功（配置缺失则抛整批级错误、根本到不了这里），
+        // 故 needsAi 与 ProcessOneAsync 的 `ai != null && TemplateWillUseAi(req)` 等价。
+        string tpl = req.NamingTemplate ?? "";
+        bool templateNeedsAi = TemplateUsesAny(tpl, AiPlaceholders);
+        bool needsAi = req.AiProvider != AiProvider.None && TemplateWillUseAi(req);
+        bool aiValueUnavailable = templateNeedsAi && !needsAi;
+        string effective = string.IsNullOrWhiteSpace(tpl) || aiValueUnavailable ? DefaultNamingTemplate : tpl;
+        if (!effective.Contains("{name}", StringComparison.Ordinal)) return "";
+
+        return "注意：重命名模式下命名规则含 {name}（取当前文件名），若这些文件此前已按本规则改过名，" +
+               "重新处理会让文件名叠加一层且不可逆。程序会逐文件识别并跳过看起来已被命名过的文件；" +
+               "如不确定，请先备份源文件夹再运行。";
     }
 
     private static readonly char[] Invalid = Path.GetInvalidFileNameChars();

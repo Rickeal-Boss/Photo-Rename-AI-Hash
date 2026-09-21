@@ -85,10 +85,13 @@ public sealed class RenameLogService
     /// </param>
     /// <remarks>
     /// <b>兼容性（有意为之，勿「修」）：</b>旧版本写出的 rename_log.csv 没有 Fingerprint 列，
-    /// 升级后的首次运行会把它们全部判为「参数不一致」→ 整批重新处理。
+    /// 升级后的首次运行会把它们全部判为「不可计入索引」→ 整批重新处理。
     /// 这是刻意选择：宁可重做（重做时内容相同的文件会被判为「未改动(内容相同)」，不产生副本），
     /// 也绝不能延续「改了参数却整批静默跳过」的 P0 缺陷。届时 UI 会给出
-    /// <see cref="CompletedLog.IgnoredByFingerprint"/> 提示，用户可据此判断。
+    /// <see cref="CompletedLog.IgnoredByMissingFingerprintColumn"/> 提示（与「参数确实变了」分开陈述），
+    /// 用户可据此判断。注意：该理由对 Copy / Move 成立（输入名不进输出，重做幂等），
+    /// <b>对重命名模式不成立</b>——重命名的输入名本身就是输出的一部分，重做会让文件名叠加，
+    /// 故编排层对重命名模式另有「叠加保护」（见 <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/>）。
     /// <b>仅限「首次」：</b>表头只在文件创建时写一次，若不按 <see cref="FingerprintColumnIndex"/>
     /// 兜底定位，升级后新写入的记录也会一直读不到指纹 → 变成「每次都整批重做」的永久回归。
     /// </remarks>
@@ -138,20 +141,43 @@ public sealed class RenameLogService
                         if (iStatus < 0 || iStatus >= cols.Length) continue;
                         string status = cols[iStatus];
                         // 失败不计入「已完成」，便于下次重试；
-                        // 「跳过(已存在)」同理：该状态下文件并未被处理（冲突策略为 Skip 时直接放弃），
+                        // 「跳过」同理：该状态下文件并未被真正处理（冲突策略为 Skip 时直接放弃、
+                        // 或重命名模式下为避免文件名叠加而保护性跳过），
                         // 若计入索引会导致用户改模板/换策略/清掉冲突文件后重跑仍被永久跳过。
-                        if (status.Contains("错误") || status.Contains("跳过(已存在)")) continue;
+                        // 用 Contains("跳过") 而非列举具体文案：日志里可能出现的跳过态只有
+                        // 「跳过(已存在)」与「跳过(疑似已命名)」两类，且将来新增跳过态时
+                        // 必须落在同一侧（宁可重做也不静默跳过），列举写法会漏掉新态。
+                        if (status.Contains("错误") || status.Contains("跳过")) continue;
 
                         // 运行指纹比对：列缺失（旧版日志）或值不等 → 该行不计入索引。
                         // 宁可让文件重做（重做的代价是「内容相同则跳过 / 加序号」，不丢数据），
                         // 也绝不能让「改了参数却整批静默跳过」再次发生。
                         // 可接受多个指纹（新版 + 上一代），任一命中即视为同一命名配置。
-                        // 没有传入任何可接受值时全部忽略——与「列缺失」同向，宁可重做也不静默跳过。
-                        if (acceptedFingerprints == null || acceptedFingerprints.Length == 0 ||
-                            iFingerprint < 0 || iFingerprint >= cols.Length ||
-                            Array.IndexOf(acceptedFingerprints, cols[iFingerprint]) < 0)
+                        // 两种原因必须<b>分开计数</b>：列缺失是「旧版日志格式」（升级场景，与用户参数无关），
+                        // 值不等才是「用户改了命名配置」。此前合并成一个计数，导致升级后首跑
+                        // 谎报成「检测到 N 条历史记录来自不同的命名配置……请保持这些参数不变」——
+                        // 用户什么都没改却被要求「保持参数不变」，提示与事实矛盾。
+                        bool hasFingerprintColumn = iFingerprint >= 0 && iFingerprint < cols.Length;
+                        if (acceptedFingerprints == null || acceptedFingerprints.Length == 0)
+                        {
+                            // 调用方没给可接受指纹：按「参数不一致」计（宁可不计入索引）。
+                            log.IgnoredByFingerprint++;
+                            RecordIgnoredRow(log, cols, iNewPath);
+                            continue;
+                        }
+
+                        if (!hasFingerprintColumn)
+                        {
+                            // 旧版日志（9 列，无指纹列）写出的数据行：与用户是否改参数无关。
+                            log.IgnoredByMissingFingerprintColumn++;
+                            RecordIgnoredRow(log, cols, iNewPath);
+                            continue;
+                        }
+
+                        if (Array.IndexOf(acceptedFingerprints, cols[iFingerprint]) < 0)
                         {
                             log.IgnoredByFingerprint++;
+                            RecordIgnoredRow(log, cols, iNewPath);
                             continue;
                         }
 
@@ -248,6 +274,21 @@ public sealed class RenameLogService
         return found;
     }
 
+    /// <summary>
+    /// 把「因指纹原因未计入索引」的行的目标路径（NewPath）收进
+    /// <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/>。
+    /// <para>用途：重命名模式的「文件名叠加」保护。重命名的输入名本身就是输出的一部分
+    /// （模板含 <c>{name}</c> 时），一旦该文件的续传索引失效（指纹变化 / 升级后旧日志无指纹列），
+    /// 它会被再次加工 → 文件名逐轮叠加变长，且不可逆。这里把「曾被本工具改名到该路径」这一事实
+    /// <b>与指纹无关地</b>记下来，供编排层判断「这个文件是不是已经被改过名了」。</para>
+    /// <para>只记非空 NewPath：失败 / 「跳过」行通常没有目标路径，空串入集合会让空路径被无条件命中。</para>
+    /// </summary>
+    private static void RecordIgnoredRow(CompletedLog log, string[] cols, int iNewPath)
+    {
+        if (iNewPath >= 0 && iNewPath < cols.Length && !string.IsNullOrEmpty(cols[iNewPath]))
+            log.DoneByNewPathAnyFingerprint.Add(cols[iNewPath]);
+    }
+
     private static string[] SplitCsvLine(string line)
     {
         var result = new List<string>();
@@ -312,11 +353,28 @@ public sealed class CompletedLog
     public HashSet<string> DoneByNewPath { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// 「曾被本工具改名为该绝对路径」的历史目标路径集合，<b>不区分运行指纹</b>（含旧版日志格式的行）。
+    /// 与 <see cref="DoneByNewPath"/> 的区别：后者只收指纹匹配的记录，本集合把指纹不匹配 /
+    /// 缺列的记录的目标路径也收进来。用途只有一个——重命名模式下判断「当前文件是不是已经被改过名」，
+    /// 从而在续传索引失效时阻止文件名被逐轮叠加（不可逆）。<b>不得用作续传跳过判据</b>
+    /// （那会让「改了参数」的记录也静默跳过，正是要消灭的 P0 缺陷）。
+    /// </summary>
+    public HashSet<string> DoneByNewPathAnyFingerprint { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// 因「运行指纹」与本次参数不一致而未被计入索引的记录条数。
     /// &gt;0 说明本次参数（模式 / 冲突策略 / 命名模板 / 引擎…）与历史批次不同，
     /// 对应文件本次会重新处理——这是有意为之，UI 应提示用户「若想沿用旧记录请保持参数不变」。
     /// </summary>
     public int IgnoredByFingerprint { get; set; }
+
+    /// <summary>
+    /// 因「日志行没有指纹列」（旧版本写出的 9 列日志）而未被计入索引的记录条数。
+    /// <b>与 <see cref="IgnoredByFingerprint"/> 分开计数</b>：本条的原因是「旧版日志格式」，
+    /// 与用户是否修改过命名参数<b>无关</b>；升级后首跑时若把它并进 IgnoredByFingerprint，
+    /// 会向「什么都没改」的用户谎报「你改了命名配置，请保持这些参数不变」。
+    /// </summary>
+    public int IgnoredByMissingFingerprintColumn { get; set; }
 
     /// <summary>
     /// 日志目录枚举是否不完整（部分子目录无权限 / 不可访问，或个别日志文件读取失败）。

@@ -56,10 +56,18 @@ public partial class App : Application
         MainWindow.Activate();
     }
 
-    /// <summary>崩溃日志路径：与 settings.json 同目录，便于用户直接把现场提供给我们排障。</summary>
+    /// <summary>
+    /// 崩溃日志路径：<c>%USERPROFILE%\.PhotoRenameAIHash\crash.log</c>，与 settings.json 同目录，
+    /// 便于用户直接把现场提供给我们排障。
+    /// <b>刻意不放 <c>%LOCALAPPDATA%</c></b>：MSIX 会把 <c>%LOCALAPPDATA%</c> / <c>%APPDATA%</c>
+    /// 纳入包数据、<b>卸载 / 重置应用时一并删除</b>（判据见 <c>SettingsService.FilePath</c> 的注释，
+    /// settings.json 正是为此才搬到 Profile 根目录）。崩溃取证数据恰恰是卸载重装后最需要保留的，
+    /// 放在「卸载即删」的目录等于用户一做排障常见动作就先把现场丢掉。
+    /// 路径构造方式与 <c>SettingsService</c> 保持一致（同一个目录）。
+    /// </summary>
     private static string CrashLogPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "PhotoRenameAIHash", "crash.log");
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".PhotoRenameAIHash", "crash.log");
 
     private static void OnAppUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
