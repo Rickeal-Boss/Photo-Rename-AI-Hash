@@ -85,8 +85,9 @@
                     <TextBlock TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}">
                         「模拟运行」不改动任何文件，也不会调用识别接口（不产生 API 消耗）：
-                        category / scene / people / action / subtitle / source 等 AI 字段一律填 unknown0001、unknown0002 … 这类占位值，
-                        仅用于预览命名结构；「实际执行」会真实复制/移动/重命名并调用识别接口，请确认模式后再开始。
+                        category / scene / people / action / subtitle / source 等 AI 字段一律填「unknown + 该文件在批次中的序号」
+                        这类占位值（形如 unknown0007），仅用于预览命名结构；
+                        「实际执行」会真实复制/移动/重命名并调用识别接口，请确认模式后再开始。
                         注意：模拟运行下 AI 字段取不到真实识别结果，预览出的文件名与实际执行的结果会不同，请以实际执行为准。
                     </TextBlock>
                     <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
@@ -124,6 +125,14 @@
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
                     <TextBlock Text="执行控制" Style="{StaticResource CardTitleStyle}" />
+                    <!-- P1-3b 配套：模拟运行 + 模板含 AI 占位符 + 该引擎未配置 Key 时，在点「开始整理」
+                         之前就说明「AI 字段是占位值、实跑缺 Key 会整批中止」。非阻断：模拟照样能跑完。
+                         IsOpen 走 TwoWay（与页面另两个 InfoBar 一致）：用户可手动关掉，
+                         之后条件再次成立时 VM 侧由 false 翻回 true 会重新弹出，不会永久静默。 -->
+                    <InfoBar IsOpen="{x:Bind ViewModel.HasDryRunAiHint, Mode=TwoWay}"
+                             Severity="Warning"
+                             Message="{x:Bind ViewModel.DryRunAiHint, Mode=OneWay}"
+                             IsClosable="True" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <!-- P0-1：改用系统 AccentButtonStyle，亮/暗主题下前景色由系统保证对比度 -->
                         <Button Content="开始整理" Command="{x:Bind ViewModel.StartOrganizeCommand}"

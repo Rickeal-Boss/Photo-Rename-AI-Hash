@@ -50,11 +50,23 @@ public partial class OrganizeViewModel : ObservableObject
         // settings.json 里手工编辑出的 "OperationMode": 7 会被原样读成越界枚举：
         // 既让 ComboBox 因无匹配项而空白，也会让「是否重命名模式」的判断失效
         // （越界值 != Rename →「重命名必须先选备份文件夹」的弹窗被绕过）。在读取处就钳进定义域。
-        OperationModeIndex = System.Math.Clamp((int)_model.OperationMode, (int)OperationMode.Copy, (int)OperationMode.Rename);
-        ConflictIndex = System.Math.Clamp((int)_model.ConflictStrategy, (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
+        // 失效安全（fail-safe）：越界值【不】钳到枚举上界，而是落到破坏面最小的那一档。
+        // 能走到这条分支的前提是「settings.json 被写坏 / 走了逐字段抢救路径」，本身就是异常起点。
+        // 上界 Rename 是本应用破坏力最大的模式——上一轮 P0-2（重命名 + 冲突策略「覆盖」=
+        // 静默删除源目录里的另一个文件，而备份只备份 source 不备份 target，不可恢复）正出在此模式；
+        // 上界 Overwrite 是三种冲突策略里唯一会覆盖既有文件的。
+        // 钳到上界 = 把配置损坏的用户送进破坏力最强的组合；落到 Copy + AutoRename 则最坏
+        // 只是「多复制一份副本、原件不动」，不丢数据、随时可重来。
+        OperationModeIndex = System.Enum.IsDefined(typeof(OperationMode), _model.OperationMode)
+            ? (int)_model.OperationMode
+            : (int)OperationMode.Copy;
+        ConflictIndex = System.Enum.IsDefined(typeof(ConflictStrategy), _model.ConflictStrategy)
+            ? (int)_model.ConflictStrategy
+            : (int)ConflictStrategy.AutoRename;
         // P1-4：结果集合变化时同步空态/列表可见性
         Results.CollectionChanged += (_, __) => UpdateResultVisibility();
         UpdateResultVisibility();
+        UpdateDryRunAiHint(); // 构造期的三个钩子未必都触发（赋值顺序 / 值未变化），结尾补算一次
     }
 
     [ObservableProperty] private string _sourceFolder = "";
@@ -77,13 +89,103 @@ public partial class OrganizeViewModel : ObservableObject
     /// 只钳「赋值处」不够：后续的比较与写回仍会用到原值，故所有读取处统一走本属性。
     /// </summary>
     private OperationMode SelectedMode =>
-        (OperationMode)System.Math.Clamp(OperationModeIndex, (int)OperationMode.Copy, (int)OperationMode.Rename);
+        System.Enum.IsDefined(typeof(OperationMode), OperationModeIndex)
+            ? (OperationMode)OperationModeIndex
+            : OperationMode.Copy;
 
-    /// <summary>钳制后的「冲突处理策略」：同 <see cref="SelectedMode"/>，越界值一律钳回枚举定义域。</summary>
+    /// <summary>
+    /// 钳制后的「冲突处理策略」。同 <see cref="SelectedMode"/>：越界值一律落到破坏面最小的
+    /// <see cref="ConflictStrategy.AutoRename"/>，<b>不</b>钳到枚举上界
+    /// <see cref="ConflictStrategy.Overwrite"/>（三种冲突策略里唯一会覆盖既有文件的那一档）。
+    /// </summary>
     private ConflictStrategy SelectedConflict =>
-        (ConflictStrategy)System.Math.Clamp(ConflictIndex, (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
+        System.Enum.IsDefined(typeof(ConflictStrategy), ConflictIndex)
+            ? (ConflictStrategy)ConflictIndex
+            : ConflictStrategy.AutoRename;
 
     [ObservableProperty] private bool _dryRun;
+
+    // ── 模拟运行 + AI 模板的「开始前提示」（P1-3b 配套） ──
+    // 内核在模拟运行下完全不调用 AI，模板里的 AI 占位符落成「unknown + 该文件在批次中的序号(4 位)」，
+    // 形如 unknown0007（带序号是必要的：默认模板六个占位符全是 AI 字段、不含 {name}/{n}，
+    // 若一律填同一个 unknown，同一批每个文件的候选名一字不差 → 预览全变 _1/_2/_3 楼梯）。
+    // 这在事后才发现就是 P33 谎报（用户以为预览里的字是识别结果），所以必须在<b>开始之前</b>说清。
+
+    /// <summary>命名模板里的 AI 占位符（与内核 <c>OrganizeService.AiPlaceholders</c> 同一口径，大小写不敏感）。</summary>
+    private static readonly string[] AiPlaceholders =
+    {
+        "{category}", "{scene}", "{people}", "{action}", "{subtitle}", "{source}",
+    };
+
+    /// <summary>模拟运行提示文案；空串表示当前组合不需要提示。</summary>
+    [ObservableProperty] private string _dryRunAiHint = "";
+
+    /// <summary>
+    /// 模拟运行提示是否成立。判据与内核 <c>TemplateWillUseAi</c> 对齐：
+    /// 模拟运行 &amp;&amp; 模板含 AI 占位符 &amp;&amp; 所选引擎不是「无」 &amp;&amp; 该引擎未配置 API Key。
+    /// </summary>
+    [ObservableProperty] private bool _hasDryRunAiHint;
+
+    /// <summary>模板是否用到 AI 占位符（大小写不敏感）。</summary>
+    private static bool TemplateUsesAiPlaceholders(string? template)
+    {
+        if (string.IsNullOrWhiteSpace(template)) return false;
+        foreach (var p in AiPlaceholders)
+        {
+            if (template!.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 所选引擎的密钥是否已配置。读 <see cref="_model"/> 的缓存快照而不是每次重新 Load()：
+    /// 本方法会在命名模板每次按键时被调用，逐键做一次读盘 + DPAPI 解密太重。
+    /// 快照由构造 / <see cref="SyncProviderFromDisk"/> / <see cref="BuildRequest"/> 这几处真实 Load 刷新。
+    /// </summary>
+    private bool KeyConfiguredFor(AiProvider provider) => provider switch
+    {
+        AiProvider.Zhipu => !string.IsNullOrWhiteSpace(_model.ZhipuApiKey),
+        AiProvider.Qwen => !string.IsNullOrWhiteSpace(_model.QwenApiKey),
+        AiProvider.Nvidia => !string.IsNullOrWhiteSpace(_model.NvidiaApiKey),
+        AiProvider.Custom => !string.IsNullOrWhiteSpace(_model.CustomApiKey),
+        _ => false,
+    };
+
+    /// <summary>
+    /// 重算「模拟运行 + AI 模板」提示。<b>非阻断</b>：内核在模拟下不会抛异常、模拟照样能跑完，
+    /// 这里只负责在用户点「开始整理」之前把「AI 字段是占位值」与「实跑缺 Key 会整批中止」说出来。
+    /// </summary>
+    private void UpdateDryRunAiHint()
+    {
+        var provider = (AiProvider)System.Math.Clamp(AiProviderIndex, (int)AiProvider.None, (int)AiProvider.Nvidia);
+        bool hit = DryRun
+                   && TemplateUsesAiPlaceholders(NamingTemplate)
+                   && provider != AiProvider.None
+                   && !KeyConfiguredFor(provider);
+
+        HasDryRunAiHint = hit;
+        DryRunAiHint = hit
+            ? "模拟运行不会调用识别接口：模板里的 AI 字段（category / scene / people / action / subtitle / source）"
+              + "将以 unknown0007 这类「unknown + 批次序号」占位值显示，不是真实识别结果；"
+              + "且当前引擎尚未配置 API Key，切到「实际执行」时会因缺少密钥整批中止。"
+            : "";
+    }
+
+    // 三个输入任一变化都要重算：运行模式、命名模板、引擎选择
+    partial void OnDryRunChanged(bool value)
+    {
+        UpdateDryRunAiHint();
+    }
+
+    partial void OnNamingTemplateChanged(string value)
+    {
+        UpdateDryRunAiHint();
+    }
+
+    partial void OnAiProviderIndexChanged(int value)
+    {
+        UpdateDryRunAiHint();
+    }
 
     /// <summary>
     /// 运行模式选项索引（P0-2 修复）：0=模拟运行，1=实际执行。
@@ -278,6 +380,12 @@ public partial class OrganizeViewModel : ObservableObject
         LogText = "";
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
+
+        // P1-3b 配套：把「模拟运行下 AI 字段是占位值」写进日志再开跑。
+        // 这里刻意<b>不开横幅</b>——横幅一开就会折叠下方的实时状态行，整轮看不到进度；
+        // 日志框是常驻的，跑完回头看也还在，且不影响进度展示。
+        if (DryRunAiHint.Length > 0) AppendLog(DryRunAiHint);
+
         var cts = new CancellationTokenSource();
         _cts = cts;
 
@@ -362,6 +470,10 @@ public partial class OrganizeViewModel : ObservableObject
         LogText = "";
         RateText = ""; // 新批次：清掉上一轮的速率观测，避免旧数字被当成当前批次的实况
         StatusBarOpen = false; // P1-1：新任务开始，关闭上一轮 InfoBar
+
+        // 同 StartOrganizeAsync：模拟运行 + AI 模板的占位提示写进日志（非阻断，不开横幅）
+        if (DryRunAiHint.Length > 0) AppendLog(DryRunAiHint);
+
         var cts = new CancellationTokenSource();
         _cts = cts;
 
@@ -465,19 +577,32 @@ public partial class OrganizeViewModel : ObservableObject
         // 只在下次启动时发现「我填的路径 / 模板 / 引擎全没了」，且原文件已被覆盖、无从察觉。
         ShowLoadFailureWarningIfNeeded();
 
-        // P2-4：System.Text.Json 数字→枚举不校验定义域（settings.json 写 "AiProvider": 99 不报错）。
-        // 越界值会让下方 ComboBox 无匹配项而空白，也会让 CreateAi 抛「已选择识别引擎「99」但未配置 API Key」。
-        // 在读取处就钳到枚举实际范围：既覆盖下面的比较，也覆盖赋值给 AiProviderIndex 的那一支
-        // （只钳赋值处不够——disk=99 与钳后的当前值不等，会被误判成「磁盘值有变」而把越界值再写进 VM）。
-        int disk = System.Math.Clamp((int)_settings.Load().AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
-        if (disk == AiProviderIndex)
+        // 顺带刷新本页的磁盘配置快照：密钥是否已配置会影响「模拟运行 AI 占位」提示的判定，
+        // 用户在「设置」页填好 Key 后回到整理页，提示应当立刻消失。（_model 只在本方法、
+        // 构造、BuildRequest、PersistConfigAsync 这几处被赋值，后三处都会先重新 Load，故无覆盖风险。）
+        _model = _settings.Load();
+
+        // try/finally：下面两条 return 是正常路径，但模拟运行提示无论走哪条都要重算
+        try
         {
-            _syncedProviderIndex = disk; // 已一致（含「手动值刚被持久化」的情况）：重新对齐基线
-            return;
+            // P2-4：System.Text.Json 数字→枚举不校验定义域（settings.json 写 "AiProvider": 99 不报错）。
+            // 越界值会让下方 ComboBox 无匹配项而空白，也会让 CreateAi 抛「已选择识别引擎「99」但未配置 API Key」。
+            // 在读取处就钳到枚举实际范围：既覆盖下面的比较，也覆盖赋值给 AiProviderIndex 的那一支
+            // （只钳赋值处不够——disk=99 与钳后的当前值不等，会被误判成「磁盘值有变」而把越界值再写进 VM）。
+            int disk = System.Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
+            if (disk == AiProviderIndex)
+            {
+                _syncedProviderIndex = disk; // 已一致（含「手动值刚被持久化」的情况）：重新对齐基线
+                return;
+            }
+            if (AiProviderIndex != _syncedProviderIndex) return; // 用户手动改过 → 保留其当次选择
+            AiProviderIndex = disk;
+            _syncedProviderIndex = disk;
         }
-        if (AiProviderIndex != _syncedProviderIndex) return; // 用户手动改过 → 保留其当次选择
-        AiProviderIndex = disk;
-        _syncedProviderIndex = disk;
+        finally
+        {
+            UpdateDryRunAiHint();
+        }
     }
 
     /// <summary>

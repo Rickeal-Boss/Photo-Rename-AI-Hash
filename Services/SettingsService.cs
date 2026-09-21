@@ -174,11 +174,16 @@ public sealed class SettingsService : ISettingsService
         // 用户的确认是针对「那一次」损坏的，新的损坏必须重新确认一次，否则同一会话内二次损坏时
         // HasUnacknowledgedLoadFailure 恒为 false → 保护闩失效，整理结束的自动持久化会把归零的默认
         // 配置（4 个密钥全空）写回磁盘。
-        // 复位只能放在这个判重分支<b>之后</b>：设置页的保存流程是「先 AcknowledgeLoadFailure()
-        // 再 Load() 再 SaveAsync()」，同一次损坏期间 Load 会被反复调用，若复位放在判重之前，
-        // 用户刚点下确认就被清掉 → 保存必然被闩拦下 → 在设置页永远存不进去（比原缺陷严重得多）。
-        _loadFailureAcknowledged = false;
-
+        //
+        // 复位的位置有<b>两处</b>约束，缺一不可：
+        //  ① 必须在上面的「判重分支」<b>之后</b>：设置页的保存流程是「先 AcknowledgeLoadFailure()
+        //     再 Load() 再 SaveAsync()」，同一次损坏期间 Load 会被反复调用；若复位放在判重之前，
+        //     用户刚点下确认就被清掉 → 保存必然被闩拦下 → 在设置页永远存不进去（比原缺陷严重得多）。
+        //  ② 必须在「备份成功」<b>之后</b>：备份失败（典型是磁盘满）时若已经复位，下次 Load 进来
+        //     会因为 LastCorruptedBackupPath 仍为空而使判重分支不生效 → 再复位一次 → 每次 Load
+        //     都清掉用户刚点的确认 → 同样是「在设置页永远存不进去」，而且用户连问题出在磁盘上
+        //     都看不到。备份失败时保持不复位，用户仍能保存（功能可用），代价只是这份损坏文件
+        //     没能备份下来 —— 与「永远存不进去」相比，这个代价小得多。
         try
         {
             if (!File.Exists(FilePath)) return; // 文件根本不存在（全新安装）：没有可备份的东西
@@ -190,10 +195,15 @@ public sealed class SettingsService : ISettingsService
             var backup = Path.Combine(dir, "settings.corrupted." + stamp + ".json");
             File.Copy(FilePath, backup, overwrite: false);
             LastCorruptedBackupPath = backup;
+
+            // 备份成功 → 这确实是一次「新的损坏」，此时才复位用户的确认（约束 ②）。
+            _loadFailureAcknowledged = false;
         }
         catch (Exception backupEx)
         {
             LastLoadError = ex.Message + "（备份失败：" + backupEx.Message + "）";
+            // 备份失败时【不】复位：见上面约束 ② —— 否则每次 Load 都清掉用户的确认，
+            // 结果是「在设置页永远存不进去」。
         }
     }
 
@@ -216,13 +226,17 @@ public sealed class SettingsService : ISettingsService
             target.Language = ReadString(root, nameof(AppSettings.Language), target.Language);
             // P1-1：逐字段抢救拿到的整数同样不校验定义域（这里绕过 JsonSerializer 自己读的），
             // 越界值会让下拉框空白，也会让「是否重命名模式」的判断失效（备份弹窗被绕过）。钳进枚举范围。
-            target.OperationMode = (OperationMode)Math.Clamp(
-                ReadInt(root, nameof(AppSettings.OperationMode), (int)target.OperationMode),
-                (int)OperationMode.Copy, (int)OperationMode.Rename);
+            // 同 ViewModel 侧的口径：越界值落到「破坏面最小」的那一档（Copy / AutoRename），
+            // 不钳到枚举上界（Rename / Overwrite）——能走到抢救路径本身就说明配置已损坏。
+            int rawModeVal = ReadInt(root, nameof(AppSettings.OperationMode), (int)target.OperationMode);
+            target.OperationMode = Enum.IsDefined(typeof(OperationMode), rawModeVal)
+                ? (OperationMode)rawModeVal
+                : OperationMode.Copy;
             target.NamingTemplate = ReadString(root, nameof(AppSettings.NamingTemplate), target.NamingTemplate);
-            target.ConflictStrategy = (ConflictStrategy)Math.Clamp(
-                ReadInt(root, nameof(AppSettings.ConflictStrategy), (int)target.ConflictStrategy),
-                (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
+            int rawConflictVal = ReadInt(root, nameof(AppSettings.ConflictStrategy), (int)target.ConflictStrategy);
+            target.ConflictStrategy = Enum.IsDefined(typeof(ConflictStrategy), rawConflictVal)
+                ? (ConflictStrategy)rawConflictVal
+                : ConflictStrategy.AutoRename;
             target.OutputFolder = ReadString(root, nameof(AppSettings.OutputFolder), target.OutputFolder);
             target.DryRun = ReadBool(root, nameof(AppSettings.DryRun), target.DryRun);
             target.UseExifDate = ReadBool(root, nameof(AppSettings.UseExifDate), target.UseExifDate);
