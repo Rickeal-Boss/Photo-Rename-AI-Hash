@@ -22,7 +22,15 @@ public sealed class OrganizeService : IOrganizeService
     private readonly IHashService _hash = AppServices.HashService;
     private readonly RenameLogService _log = AppServices.RenameLogService;
 
-    private PauseTokenSource? _pts;
+    /// <summary>
+    /// 当前批次的暂停令牌。<b>volatile 是必需的</b>：写发生在 UI 线程（<see cref="Pause"/> /
+    /// <see cref="Resume"/> / 批次收尾的 <see cref="EndBatch"/>），读发生在工作线程
+    /// （<see cref="DelayBackoffHonoringPauseAsync"/> 在 AI 退避期间逐段轮询它，见该方法内注释）。
+    /// 不标 volatile 时工作线程可能读到陈旧的 <c>null</c>，那一段退避就会退回原生 <c>Task.Delay</c>、
+    /// 无法被暂停打断（影响有界：AI 调用后的检查点仍会挂起，但「暂停可打断退避」这条不变量会漏掉一段）。
+    /// 同文件的 <see cref="_pendingPause"/> / <see cref="_batchActive"/> 都已标 volatile，口径统一。
+    /// </summary>
+    private volatile PauseTokenSource? _pts;
 
     /// <summary>
     /// 「用户点了暂停，但当时暂停令牌还没创建」的待应用标记。
@@ -687,10 +695,22 @@ public sealed class OrganizeService : IOrganizeService
         // done 提到 try 之外：熔断中止时 finally 里的「日志写失败告警」要按真实完成比例报进度，
         // 声明在 try 内会让 finally 取不到它（CS0103）。
         int done = 0;
+
+        // 工作队列 + 单文件尝试次数：与整理模式（RunAsync）同档的「确定性失败给 2 次」。
+        // 此前归档用 foreach 一次即弃——同一张图、同一个瞬时抖动（例如云盘同步恰好锁住一秒），
+        // 在「整理」下能自愈、在「按日期归档」下被记成永久「错误」，两条路径口径不一致。
+        // 归档不调用 AI，故<b>没有</b>「网络/超时类 10 次」那一档：瞬时故障在归档侧只可能来自
+        // 文件系统抖动，2 次足够（给一次「也许刚释放了锁」的机会）。
+        // 用 Queue 而非 foreach：重排队要把文件放回队尾（保留原次序语义），
+        // done 只统计「真正出结论」的文件，重试不计入进度。
+        var queue = new Queue<PhotoFile>(files);
+        var attempts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        const int maxDeterministicAttempts = 2;
         try
         {
-            foreach (var f in files)
+            while (queue.Count > 0)
             {
+                var f = queue.Dequeue();
                 ct.ThrowIfCancellationRequested();
                 await _pts.WaitWhilePausedAsync(ct).ConfigureAwait(false); // 协作式暂停
                 // 续传跳过：源路径精确匹配优先；目标匹配仅限重命名模式（避免 Copy/Move 误跳新文件）。
@@ -720,6 +740,8 @@ public sealed class OrganizeService : IOrganizeService
                     continue;
                 }
                 RenameLogEntry? entry = null;
+                // 本次是否真的覆盖掉了目标位置原有的同名文件（内容不同）。用于日志行提示，见下方赋值处。
+                bool overwroteExisting = false;
                 try
                 {
                     // 与 RunAsync 同口径：算不出 MD5 必须显式失败，不能退化成空串。
@@ -769,6 +791,17 @@ public sealed class OrganizeService : IOrganizeService
                                 $"没有权限创建归档目录：{destDir}。请检查输出文件夹的权限或以管理员身份运行。",
                                 isEnvironmentError: true, inner: authEx);
                         }
+                        catch (IOException ioEx) when (ioEx.HResult == ErrorPathTooLong || ioEx.HResult == ErrorInvalidName)
+                        {
+                            // 路径过长 / 文件名非法（与 ExecuteAsync 的同类翻译同口径，F5）：
+                            // 归档目录 = 输出目录 + yyyy/yyyy-MM-dd，输出目录过深时必然超 MAX_PATH。
+                            // 逐文件级（非环境级）：日期不同 → 目录深度可能不同，且不该因一个文件熔断整批；
+                            // 同时它必须在通用 catch 的重排队之外——重试必然复现。
+                            throw new PermanentOperationException(
+                                $"归档失败：路径过长或文件名非法，无法创建目标目录：{destDir}。" +
+                                "请改用更短的输出路径。",
+                                isEnvironmentError: false, isBatchLevel: false, inner: ioEx);
+                        }
                     }
 
                     var (resolved, targetMd5, degraded, degradeReason) = await ResolveTargetAsync(destDir, f.Name, md5, req.Conflict, req.Mode, claimedThisRun, ct).ConfigureAwait(false);
@@ -808,6 +841,17 @@ public sealed class OrganizeService : IOrganizeService
                         {
                             entry.Message = degradeReason;
                         }
+                        // 归档路径<b>没有备份</b>（备份只在重命名模式的 ProcessOneAsync 里）：
+                        // 若本次是「覆盖」且目标位置原本已有同名且内容不同的文件，那个文件已被替换且没有副本，
+                        // 必须在常驻日志里说清。判据与 ExecuteAsync 的 overwrite 取值同源：
+                        // targetMd5 非空 ⇒ 目标曾存在；targetMd5 != md5 ⇒ 内容不同（内容相同会在
+                        // ResolveTargetAsync / ExecuteAsync 里提前判「未改动」返回）。
+                        // 刻意只写日志行、<b>不写 entry.Message</b>——VM 的 ReportDegradedSummary 靠匹配
+                        // Message 文案分桶，新增文案会被误归进「未按覆盖处理、已自动加序号改名」，
+                        // 反而把「已覆盖」谎报成「已改名」。要进 Message 需先与 UI 侧约定新桶。
+                        overwroteExisting = req.Conflict == ConflictStrategy.Overwrite && !req.DryRun &&
+                                            req.Mode != OperationMode.Rename &&
+                                            !string.IsNullOrEmpty(targetMd5) && targetMd5 != md5;
                         if (!req.DryRun) await _log.AppendRenameLogAsync(destDir, entry).ConfigureAwait(false);
                     }
 
@@ -816,9 +860,10 @@ public sealed class OrganizeService : IOrganizeService
                 catch (PermanentOperationException ex) when (ex.IsEnvironmentError)
                 {
                     // 与 RunAsync 对齐：环境级错误（如归档目标盘写满）对整批文件都成立，继续处理
-                    // 只会刷出 N 行同一真因的错误并让用户白等全批跑完。归档模式本身不调用 AI、
-                    // 也无重排队，熔断纯粹是为了「早停 + 不刷屏」。
-                    // 过滤器保留：非环境的永久错误仍走下方通用 catch 记单文件错误，行为不变。
+                    // 只会刷出 N 行同一真因的错误并让用户白等全批跑完。归档模式不调用 AI，
+                    // 熔断纯粹是为了「早停 + 不刷屏」。
+                    // 过滤器保留：非环境的永久错误由下方<b>专用</b>的 catch (PermanentOperationException)
+                    // 记单文件失败（既不熔断、也不进通用 catch 的重排队），行为与整理模式一致。
                     var envEntry = new RenameLogEntry
                     {
                         OriginalName = f.Name,
@@ -835,12 +880,12 @@ public sealed class OrganizeService : IOrganizeService
                     });
                     throw;
                 }
-                catch (Exception ex)
+                catch (PermanentOperationException ex)
                 {
-                    // 与 RunAsync 对齐：用户取消立即向上传播，不记成「错误」。
-                    // 同样必须带 ct.IsCancellationRequested 过滤（理由见 RunAsync 内注释，P1-4）：
-                    // 否则非取消来源的 OCE 会让归档在 N 个文件处戛然而止且谎报「已取消」。
-                    if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
+                    // 非环境级永久错误（文件被占用 / 无权限 / 路径过长或非法 / 目标文件读不出…）：
+                    // 重试无法恢复，直接记单文件失败、<b>不再重排队</b>——与整理模式的同名分支口径一致。
+                    // <b>该分支必须存在</b>：下面的通用 catch 现在带重排队，若不在此单独截住，
+                    // 这些「确定性失败」会被白试 2 次（正是本轮要修的口径不一致）。
                     report.Failed++;
                     entry = new RenameLogEntry
                     {
@@ -850,13 +895,50 @@ public sealed class OrganizeService : IOrganizeService
                     };
                     report.Results.Add(entry);
                 }
+                catch (Exception ex)
+                {
+                    // 与 RunAsync 对齐：用户取消立即向上传播，不记成「错误」。
+                    // 同样必须带 ct.IsCancellationRequested 过滤（理由见 RunAsync 内注释，P1-4）：
+                    // 否则非取消来源的 OCE 会让归档在 N 个文件处戛然而止且谎报「已取消」。
+                    if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
+                    attempts.TryGetValue(f.Path, out int n);
+                    n++;
+                    if (n < maxDeterministicAttempts)
+                    {
+                        // 重新排队到队尾稍后重试：给一次「也许刚释放了锁」的机会。
+                        // 与整理模式同档（2 次）；归档不调 AI，故没有「网络/超时 10 次」那一档。
+                        attempts[f.Path] = n;
+                        queue.Enqueue(f);
+                        progress.Report(new OrganizeProgress
+                        {
+                            // 重试不算完成（done 未递增），沿用当前百分比即可：不给值会被 VM 打回 0%。
+                            Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
+                            LogLine = $"{f.Name} [重试 {n}/{maxDeterministicAttempts}] 上次失败：{ex.Message}",
+                        });
+                        continue;
+                    }
+
+                    report.Failed++;
+                    entry = new RenameLogEntry
+                    {
+                        OriginalName = f.Name,
+                        Status = "错误",
+                        // 终态自带「已尝试 N 次」：与整理模式同口径，让用户知道已经试过了
+                        //（这类异常的 Message 本身不带次数，不补这句会像「一次就放弃」）。
+                        Message = $"（已尝试 {n} 次）{ex.Message}",
+                    };
+                    report.Results.Add(entry);
+                }
 
                 done++;
                 progress.Report(new OrganizeProgress
                 {
                     Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                     Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
-                    LogLine = $"{f.Name} 已归档进度 {done}/{files.Count}",
+                    // 覆盖了原有同名文件时必须在常驻日志里点名（归档没有备份，被覆盖者没有副本）。
+                    LogLine = overwroteExisting
+                        ? $"{f.Name} 已归档（覆盖了输出目录中已存在的同名文件，该文件没有备份）进度 {done}/{files.Count}"
+                        : $"{f.Name} 已归档进度 {done}/{files.Count}",
                 });
             }
         }
@@ -1227,6 +1309,19 @@ public sealed class OrganizeService : IOrganizeService
                 $"文件被其它程序占用，无法处理：{Path.GetFileName(source)}。请关闭可能占用它的看图软件/编辑器/云盘同步后重试。",
                 isEnvironmentError: false, isBatchLevel: false, inner: ex);
         }
+        catch (IOException ex) when (ex.HResult == ErrorPathTooLong || ex.HResult == ErrorInvalidName)
+        {
+            // 路径过长 / 文件名非法：确定性失败，重试必然复现（此前会空转 2 次），
+            // 且框架原文是英文、排障方向也不对。给出可执行的整改方向。
+            // 逐文件级（非环境级）：不同文件的目录深度 / 名字长度不同，不该熔断整批。
+            // 说明：MaxBaseNameLength(180) 只约束基名，不约束输出目录深度，
+            // 而 app.manifest 已按既定取舍移除 longPathAware，故深目录 + 长基名仍可超 MAX_PATH；
+            // ERROR_INVALID_NAME 则多来自模板字面量里的保留设备名（CON 等）——Sanitize 只净化占位符的「值」。
+            throw new PermanentOperationException(
+                $"路径过长或文件名非法，无法处理：{Path.GetFileName(source)}。" +
+                "请改用更短的输出路径或更短的命名模板（避免过深的输出目录与保留设备名）。",
+                isEnvironmentError: false, isBatchLevel: false, inner: ex);
+        }
         catch (UnauthorizedAccessException ex)
         {
             // 权限不足（只读属性、ACL、受保护目录、被策略拒绝）。
@@ -1265,6 +1360,16 @@ public sealed class OrganizeService : IOrganizeService
     // 与「磁盘满」区分：前者关掉占用程序即可恢复，后者必须清理空间，提示语必须不同。
     private const int ErrorSharingViolation = unchecked((int)0x80070020);
     private const int ErrorLockViolation = unchecked((int)0x80070021);
+
+    // HRESULT_FROM_WIN32：ERROR_PATH_TOO_LONG / ERROR_FILENAME_EXCED_RANGE 的 .NET 包装值
+    // （PathTooLongException，0x800700CE）与 ERROR_INVALID_NAME(123)。
+    // 两者都是<b>确定性</b>失败：同一条路径重试必然再抛一次，且与「磁盘满 / 被占用 / 无权限」的
+    // 排障方向完全不同（前者要改短路径或模板，后者要清空间 / 关占用程序 / 提权）。
+    // 此前它们不在 ExecuteAsync 的过滤器链里 → 冒到 RunAsync 通用 catch → 判「确定性失败」重排队 2 次，
+    // 终态文案还是框架英文原文（"The specified path, file name, or both are too long…"），
+    // 用户拿到一句英文 + 一次空转，无从下手（P23：归因必须可执行）。
+    private const int ErrorPathTooLong = unchecked((int)0x800700CE);
+    private const int ErrorInvalidName = unchecked((int)0x8007007B);
 
     /// <summary>备份文件名去重的最大尝试次数（原名 + _1…_9999），与 <see cref="SuffixUntilFreeAsync"/> 的 9999 上限一致。</summary>
     private const int MaxBackupNameAttempts = 9999;
