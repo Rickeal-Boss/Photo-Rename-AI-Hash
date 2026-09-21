@@ -66,6 +66,21 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     private int _degradedOther;
 
+    // ── ⑩（第十轮 R10）：本批次「真的覆盖了目标、且没有备份」的计数 ──
+    /// <summary>
+    /// 归档 / 整理（Move、Copy）路径在「冲突策略=覆盖」且目标位置原本已有同名且<b>内容不同</b>的文件时，
+    /// 目标文件已被<b>无备份地</b>替换的条目数。备份只发生在「重命名模式」的<b>源</b>文件上
+    /// （<c>BackupOriginalAsync</c>），归档 / 整理这两条路径不备份<b>目标</b>。
+    /// </summary>
+    /// <remarks>
+    /// <b>为什么必须与上面三个桶分开</b>：它们是<b>相反</b>的后果——降级桶是「<b>没有</b>覆盖、改了名、原内容还在」，
+    /// 本桶是「<b>真的</b>覆盖了、没改名、原内容不可恢复」。并进中性桶（<see cref="_degradedOther"/>）就会
+    /// 把「已覆盖」汇总成「已自动加序号改名」，即把「内容被替换」谎报成「内容原样保留」（P33）。
+    /// <b>为什么不用 <c>_degraded*</c> 命名</b>：这不是「覆盖被降级」，而是覆盖<b>已经生效</b>的后果告知，
+    /// 名字带 degraded 会误导后续维护者把它当成第四个降级原因。
+    /// </remarks>
+    private int _overwroteNoBackup;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -416,6 +431,7 @@ public partial class OrganizeViewModel : ObservableObject
         _degradedRenameMode = 0;
         _degradedBatchCollision = 0;
         _degradedOther = 0;
+        _overwroteNoBackup = 0;
     }
 
     /// <summary>
@@ -423,14 +439,18 @@ public partial class OrganizeViewModel : ObservableObject
     /// <list type="bullet">
     /// <item>失败条目 → 进 <see cref="_batchFailures"/>（不设上限，供批次结束时落盘完整清单）。</item>
     /// <item>「覆盖被降级为自动改名」的成功条目 → 计数（供终态横幅汇总，不再只藏在行 ToolTip 里）。</item>
+    /// <item>「已覆盖且没有备份」的成功条目 → 单独计数（<see cref="_overwroteNoBackup"/>），与降级改名<b>分开</b>汇总。</item>
     /// </list>
     /// </summary>
     /// <remarks>
-    /// 判定「降级」的依据：内核只在这两种情况下给<b>成功</b>条目写 <c>Message</c>
-    /// （<c>OrganizeService</c> 的 <c>entry.Message = degradeReason</c> 两处，均在 <c>degraded</c> 为真时）；
+    /// 判定依据：内核只在三种情况下给<b>成功</b>条目写 <c>Message</c>
+    /// （<c>OrganizeService</c> 的 <c>entry.Message = degradeReason</c> 两处，均在 <c>degraded</c> 为真时，
+    /// 外加归档 / 整理两侧 <c>entry.Message = OverwriteNoBackupNotice</c>）；
     /// 其余成功条目的 <c>Message</c> 恒为空，错误条目则已被上面的 <see cref="RenameLogEntry.IsError"/> 分流。
-    /// 两类原因按文案区分：重命名模式的说明含「重命名模式」，本批次占用冲突的含「本批次」；
+    /// 降级那两类按文案区分：重命名模式的说明含「重命名模式」，本批次占用冲突的含「本批次」；
     /// 两者都不含时落 <see cref="_degradedOther"/>（中性兜底，汇总时不硬套原因）。
+    /// <b>第三种成功条目文案</b>（第十轮 R10）：<c>OrganizeService.OverwriteNoBackupNotice</c>，
+    /// 含「已覆盖」，表示覆盖<b>已经生效</b>、目标文件已被无备份替换——与上面两类是相反的后果，单独成桶。
     /// </remarks>
     private void TrackBatchIssues(RenameLogEntry entry)
     {
@@ -441,10 +461,21 @@ public partial class OrganizeViewModel : ObservableObject
         }
         if (!entry.IsSuccess || string.IsNullOrWhiteSpace(entry.Message)) return;
 
-        // 归类依据是内核的<b>文案</b>（内核没有结构化标志）。两类已知文案见 OrganizeService.ResolveTargetAsync：
-        // 「重命名模式下不会覆盖源文件夹中的其它文件…」与「目标已被本批次其他文件占用…」。
+        // 归类依据是内核的<b>文案</b>（内核没有结构化标志）。三类已知文案见 OrganizeService：
+        // 「重命名模式下不会覆盖源文件夹中的其它文件…」「目标已被本批次其他文件占用…」
+        // 与 OverwriteNoBackupNotice「已覆盖输出目录中已存在的同名文件（该文件没有备份）」。
+        //
+        // 【匹配顺序即优先级，不要调整】「已覆盖」必须排在最前：
+        // ① 语义上它与另外两类互斥且相反（覆盖已生效 vs 覆盖被降级），一旦被别的规则先吃掉，
+        //    汇总就会把「内容被替换、不可恢复」说成「只改了名、内容还在」——P33 谎报；
+        // ② 现有文案恰好互不包含（降级文案写的是「不会覆盖…」，无「已覆盖」子串），
+        //    但内核措辞将来若把「已覆盖」并入更长的句子，前置判定是唯一能兜住改动方向的顺序；
+        // ③ 万一将来某条文案同时含两类关键字，前置判定会把它记成「已覆盖」——方向上偏「多警告」：
+        //    把真覆盖说成改名 = 用户以为内容还在（静默数据损失）；把改名说成覆盖 = 虚惊一场。
+        //    两者代价不对称，故一律取更保守的那一侧。
         // 都不匹配时落中性桶，汇总时不硬套原因——宁可少说，也不能把原因说错（P33）。
-        if (entry.Message.Contains("重命名模式", StringComparison.Ordinal)) _degradedRenameMode++;
+        if (entry.Message.Contains("已覆盖", StringComparison.Ordinal)) _overwroteNoBackup++;
+        else if (entry.Message.Contains("重命名模式", StringComparison.Ordinal)) _degradedRenameMode++;
         else if (entry.Message.Contains("本批次", StringComparison.Ordinal)) _degradedBatchCollision++;
         else _degradedOther++;
     }
@@ -454,11 +485,21 @@ public partial class OrganizeViewModel : ObservableObject
     /// 此前只有结果行的 ToolTip 里有原因，用户不逐行悬停就完全看不到——选「覆盖」却得到 <c>_1</c> 后缀，
     /// 会以为策略没生效或程序有问题。
     /// </summary>
+    /// <remarks>
+    /// ⑩（第十轮 R10）本方法同时汇总<b>相反</b>的另一类后果：覆盖<b>已经生效</b>且目标文件无备份
+    /// （见 <see cref="_overwroteNoBackup"/>）。两者都必须说，且必须<b>分开</b>说——一个是「改了名、内容原样」，
+    /// 一个是「没改名、内容已被替换且不可恢复」，合成一句就是把后者谎报成前者（P33）。
+    /// </remarks>
     private void ReportDegradedSummary()
     {
-        if (_degradedRenameMode == 0 && _degradedBatchCollision == 0 && _degradedOther == 0) return;
+        if (_degradedRenameMode == 0 && _degradedBatchCollision == 0 && _degradedOther == 0 &&
+            _overwroteNoBackup == 0) return;
 
         var parts = new List<string>();
+        // 「已覆盖」排在首位：它是本批次唯一「已经造成不可恢复后果」的一类，最需要用户先看到。
+        if (_overwroteNoBackup > 0)
+            parts.Add($"{_overwroteNoBackup} 个目标位置的原有文件已被「覆盖」策略直接替换，" +
+                      "而这些被替换的文件没有备份、原内容不可恢复");
         if (_degradedRenameMode > 0)
             parts.Add($"{_degradedRenameMode} 个文件因「重命名模式不支持覆盖」而自动加序号改名（未覆盖源文件夹中的其它文件）");
         if (_degradedBatchCollision > 0)
@@ -469,8 +510,15 @@ public partial class OrganizeViewModel : ObservableObject
         // 模拟运行下没有任何文件被改动，措辞必须是「预估」而不是既成事实（P33：不能把预览说成已发生）
         var note = (DryRun ? "模拟运行预估：本批次将有 " : "本批次有 ") + string.Join("；", parts) +
                    "。逐条原因见结果列表中各行的提示（悬停状态列）。";
+        if (_overwroteNoBackup > 0)
+        {
+            // 补一句「两者相反」的点题：否则用户看到同一段汇总里既有「已覆盖」又有「已改名」，
+            // 很容易读成「同一批文件既被覆盖又被改名」，反而更糊涂。
+            note += "注意：「已覆盖」与「已自动加序号改名」是相反的结果——前者目标文件的内容已被替换且不可恢复，" +
+                    "后者只是文件名多了一个序号、文件内容原样保留。";
+        }
         AppendLog(note);
-        // 用 Warning 而非成功色：这不是失败，但用户选择「覆盖」却没被覆盖，必须显眼
+        // 用 Warning 而非成功色：这不是失败，但用户选择「覆盖」却没被覆盖、或已不可恢复地覆盖了别的文件，都必须显眼
         AppendTerminalNote(note, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
     }
 
@@ -959,9 +1007,12 @@ public partial class OrganizeViewModel : ObservableObject
         _undecryptableKeysNotified = true;
 
         ShowTerminalStatus("本机 Windows 凭据无法解密已保存的 API Key（设置文件可能来自其它账户或机器）。" +
-                           "为避免把解不开的密文覆盖成空值，本页不再自动保存配置；请到「设置」页重新填写密钥并保存。",
+                           "为避免把解不开的密文覆盖成空值，本页不再自动保存配置——" +
+                           "本次在整理页改的路径 / 模板等改动同样不会落盘，关闭应用即丢失；" +
+                           "请到「设置」页重新填写密钥并保存，之后本页的自动保存会恢复。",
                            Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
-        AppendLog("本机无法解密 settings.json 中的 API Key；整理页的自动保存已停用，以免覆盖掉磁盘上的密文。");
+        AppendLog("本机无法解密 settings.json 中的 API Key；整理页的自动保存已停用，以免覆盖掉磁盘上的密文。" +
+                  "本页的路径 / 模板等改动因此也未保存，需在密钥恢复后重新保存。");
     }
 
     private OrganizeRequest BuildRequest()
@@ -1028,13 +1079,20 @@ public partial class OrganizeViewModel : ObservableObject
         // ⑤（第九轮 F3，后半段）：密钥「是密文但本机解不开」时，上面那次 Load 已把这些字段置空。
         // 若照常保存，写回的就是空串 → 磁盘上的 enc: 密文被覆盖掉，且不可逆（用户把文件拷回原机器也救不回来）。
         // 因此这里与「配置读取失败保护闩」同策：<b>本次不自动写入</b>，由用户到设置页重新填密钥后显式保存。
-        // 代价是这一次整理页的路径 / 模板改动也不会自动落盘（用户可在设置页保存时一并落盘），
-        // 但相比「不可逆地销毁密钥」，这个代价可恢复、且已被下面的提示明确告知（P33）。
+        // 代价是这一次整理页的路径 / 模板改动也不会自动落盘，但相比「不可逆地销毁密钥」这个代价可恢复。
         // 自愈：用户重填密钥并保存后，密文被换成可解密的新密文，下一次 Load 该标志即为 false，自动保存恢复。
         if (_settings is SettingsService keyImpl && keyImpl.LastLoadHadUndecryptableKeys)
         {
+            // ⑩（第十轮 R10）：<b>必须把「本页改动也没落盘」说出来</b>。
+            // 此前的文案只说「配置未自动保存…本次未写入」，用户很容易理解成「密钥没存上，路径模板存上了」，
+            // 于是带着「已保存」的错觉继续用，直到重开应用发现路径 / 模板回到旧值——又是一次静默失败。
+            // 提示里不能说「到设置页保存时会一并落盘」：设置页保存<b>只写它自己拥有的字段</b>
+            // （见 SettingsViewModel 的 P1-A 注释，DefaultFolder / OutputFolder / BackupFolder / NamingTemplate
+            // 都不在其回写清单内），本页这些改动只能靠本方法（批次结束时）落盘。
             var reason = "配置未自动保存：本机无法解密 settings.json 中的 API Key（文件可能来自其它账户或机器），" +
-                         "为避免把解不开的密文覆盖成空值，本次未写入；请到「设置」页重新填写密钥并保存。";
+                         "为避免把解不开的密文覆盖成空值，本次未写入；" +
+                         "本次在整理页所做的路径 / 模板等改动也一并未保存，关闭应用即丢失——" +
+                         "请到「设置」页重新填写密钥并保存，再回到本页执行一次整理，跑完会自动保存本页改动。";
             AppendLog(reason);
             ShowTerminalStatus(reason, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
             // 同闩分支：本次未落盘，但仍把当前值视为基线，避免留下永久性的「用户手动改过」误判
