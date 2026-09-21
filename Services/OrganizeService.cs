@@ -102,7 +102,11 @@ public sealed class OrganizeService : IOrganizeService
 
         // 运行指纹：把「影响输出文件名 / 目标路径」的参数固化成一个字符串，写入 rename_log.csv。
         // 续传索引只采纳指纹相同的记录——改模板 / 换模式 / 换冲突策略后重跑不再被旧记录静默跳过。
-        req.Fingerprint = ComputeFingerprint(req, output);
+        // conditional: true = 只纳入真正会改变文件名的参数（换引擎但模板不用 AI 占位符时不算变更）。
+        req.Fingerprint = ComputeFingerprint(req, output, conditional: true);
+        // 读侧一并接受上一代指纹（无条件口径）：否则算法一升级，老用户的所有历史记录立刻全部失配，
+        // 每次升级都要被迫全量重做一遍。参数真变了才会两代都不匹配 → 那时重做才是应该的。
+        string legacyFingerprint = ComputeFingerprint(req, output, conditional: false);
 
         IImageAnalysisService? ai;
         try
@@ -148,7 +152,7 @@ public sealed class OrganizeService : IOrganizeService
         // 避免重复处理（例如已正确命名的 game_古建筑竞技场_..._screenshot.png）。
         // 第二参数是指纹：历史记录的指纹与本次不同（或旧日志根本没有该列）则一律不计入索引，
         // 宁可重做——重做的最坏结果是「内容相同则跳过 / 加序号」，而静默跳过是用户完全无感的丢活。
-        var completed = await _log.LoadRenameLogAsync(output, req.Fingerprint).ConfigureAwait(false);
+        var completed = await _log.LoadRenameLogAsync(output, req.Fingerprint, legacyFingerprint).ConfigureAwait(false);
 
         // 工作队列：文件处理失败（如视觉模型偶发未按 JSON 返回、网络抖动、瞬时限流等）不直接跳过，
         // 而是重新入队到队尾稍后再次尝试，最大化「成功重命名」的比例；达到单文件最大尝试次数仍失败才放弃。
@@ -198,8 +202,10 @@ public sealed class OrganizeService : IOrganizeService
             progress.Report(new OrganizeProgress
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
-                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录与本次参数（模式/冲突策略/命名模板）不一致，" +
-                          "已忽略这些记录、将重新处理对应文件；若希望沿用旧记录，请保持参数不变。",
+                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
+                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源中至少一项与本次不同），" +
+                          "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
+                          "若希望继续沿用旧记录续传，请保持这些参数不变。",
             });
         }
         if (completed.EnumerationIncomplete)
@@ -493,7 +499,11 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         // 同 RunAsync：运行指纹（归档的目标子目录由「输出目录 + 日期来源」决定，故同样纳入）
-        req.Fingerprint = ComputeFingerprint(req, req.OutputFolder);
+        // 归档的目标子目录由「输出目录 + 日期来源」决定，故 isArchive: true —— 日期来源恒为有效维度，
+        // 即便命名模板里没写 {yyyy} 之类的占位符（子目录本身已经用了日期）。
+        req.Fingerprint = ComputeFingerprint(req, req.OutputFolder, conditional: true, isArchive: true);
+        // 与 RunAsync 同：读侧一并接受上一代指纹，避免算法升级导致老用户全量重做。
+        string legacyFingerprint = ComputeFingerprint(req, req.OutputFolder, conditional: false, isArchive: true);
 
         // 本批次已实际落地的目标路径（语义同 RunAsync）
         var claimedThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -518,7 +528,7 @@ public sealed class OrganizeService : IOrganizeService
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         // 同 RunAsync：指纹不一致的历史记录不计入索引（参数变了就该重做）。
-        var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint).ConfigureAwait(false);
+        var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint, legacyFingerprint).ConfigureAwait(false);
 
         // 索引可信度告警（与 RunAsync 同文案、同口径；Percent 取 0：此时本批次尚未处理任何文件）
         if (completed.IgnoredByFingerprint > 0)
@@ -526,8 +536,10 @@ public sealed class OrganizeService : IOrganizeService
             progress.Report(new OrganizeProgress
             {
                 Percent = 0,
-                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录与本次参数（模式/冲突策略/命名模板）不一致，" +
-                          "已忽略这些记录、将重新处理对应文件；若希望沿用旧记录，请保持参数不变。",
+                LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
+                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源中至少一项与本次不同），" +
+                          "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
+                          "若希望继续沿用旧记录续传，请保持这些参数不变。",
             });
         }
         if (completed.EnumerationIncomplete)
@@ -1328,24 +1340,55 @@ public sealed class OrganizeService : IOrganizeService
         _ => "重命名",
     };
 
-    /// <summary>指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
-    private const string FingerprintVersion = "fp1";
+    /// <summary>当前指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
+    private const string FingerprintVersion = "fp2";
+
+    /// <summary>
+    /// 上一代指纹算法版本（无条件纳入全部参数）。读侧<b>一并接受</b>它，
+    /// 这样算法升级时老用户的历史记录仍能续传，不会每次升级都被迫全量重做一遍。
+    /// </summary>
+    private const string LegacyFingerprintVersion = "fp1";
+
+    /// <summary>由 AI 产出的占位符：只有模板用到它们时，引擎 / 模型 / 语言才会改变输出文件名。</summary>
+    private static readonly string[] AiPlaceholders =
+        { "{category}", "{scene}", "{people}", "{action}", "{subtitle}", "{source}" };
+
+    /// <summary>由拍摄/修改时间产出的占位符：只有模板用到它们时，「取 EXIF 日期」才会改变输出文件名。</summary>
+    private static readonly string[] DatePlaceholders =
+        { "{yyyy}", "{MM}", "{dd}", "{HH}", "{mm}", "{ss}", "{date}" };
+
+    private static bool TemplateUsesAny(string template, string[] placeholders)
+    {
+        if (string.IsNullOrEmpty(template)) return false;
+        foreach (var p in placeholders)
+            if (template.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        return false;
+    }
 
     /// <summary>
     /// 计算本次运行的「参数指纹」：把所有<b>影响输出文件名或目标路径</b>的参数拼成一个字符串。
     /// 用途：写入 rename_log.csv，下次续传时只有指纹相同的记录才被当作「已处理」——
-    /// 用户改了命名模板 / 换模式 / 换冲突策略 / 换引擎后重跑，对应文件会被重新处理，
+    /// 用户改了命名模板 / 换模式 / 换冲突策略后重跑，对应文件会被重新处理，
     /// 而不是被上一轮的成功记录永久跳过（这正是 P0 缺陷：改模板重跑整批静默不动）。
     /// </summary>
     /// <param name="req">本次请求参数。</param>
     /// <param name="output">本次实际的输出目录（重命名模式下即源目录）。</param>
+    /// <param name="conditional">
+    /// true = 条件性指纹（当前算法 fp2）：只纳入<b>真正会改变文件名</b>的参数；
+    /// false = 上一代写法 fp1（无条件纳入全部参数），仅用于读侧兼容旧日志。
+    /// </param>
+    /// <param name="isArchive">归档模式：日期子目录由拍摄时间决定，故「取 EXIF 日期」恒为有效维度。</param>
     /// <remarks>
+    /// <b>为什么必须是「条件性」的</b>（fp1 → fp2 要解决的问题）：
+    /// fp1 无条件把 引擎 / 模型 / 语言 / 日期来源 全部纳入。于是用户只是换了个识别引擎，
+    /// 而命名模板里根本没用 {category} 这类 AI 占位符时，文件名<b>一个字都不会变</b>，
+    /// 指纹却变了 → 全部历史记录失配 → 整批重做，白白重新调用一遍 AI（费时费钱）。
+    /// 治好「静默跳过」的同时不该引入「无谓重做」，所以改为：
+    /// <b>模板用到哪类占位符，对应参数才进指纹。</b>
     /// 刻意<b>不</b>纳入：API Key（敏感信息，不落盘）、CustomApiUrl / CustomApiRpmLimit
     /// （端点地址与速率上限不改变「命名结果」本身，修端点不该让整批重做）。
-    /// 宁可多包含也不要漏：漏了会退回「静默跳过」的老 bug；多了的代价只是「重做」，
-    /// 而重做时内容相同的文件会被判为「未改动(内容相同)」直接跳过，不会生成垃圾副本。
     /// </remarks>
-    private static string ComputeFingerprint(OrganizeRequest req, string output)
+    private static string ComputeFingerprint(OrganizeRequest req, string output, bool conditional, bool isArchive = false)
     {
         var sb = new StringBuilder();
         // 自由文本字段（用户可直接输入，可能含分隔符 '|'）统一走 Field() 加「长度前缀」：
@@ -1354,14 +1397,27 @@ public sealed class OrganizeService : IOrganizeService
         // 枚举 / 布尔字段不含 '|'，无需前缀。
         void Field(string v) => sb.Append('|').Append(v.Length).Append(':').Append(v);
 
-        sb.Append(FingerprintVersion);
+        string template = req.NamingTemplate ?? "";
+
+        // 条件性纳入的判定：conditional=false 时保持 fp1 的全量口径（读侧兼容用）。
+        bool usesAiPlaceholders = !conditional || TemplateUsesAny(template, AiPlaceholders);
+        bool usesDatePlaceholders = !conditional || isArchive || TemplateUsesAny(template, DatePlaceholders);
+
+        sb.Append(conditional ? FingerprintVersion : LegacyFingerprintVersion);
         sb.Append('|').Append(req.Mode);                 // 模式决定目标目录与是否原地改名
         sb.Append('|').Append(req.Conflict);             // 冲突策略决定同名文件处理方式
-        Field(req.NamingTemplate ?? "");                 // 命名模板直接影响输出文件名
-        sb.Append('|').Append(req.UseExifDate ? 1 : 0);  // 日期来源影响 {yyyy}{MM}{dd} 等占位符（归档还影响子目录）
-        Field(req.Language ?? "");                       // 提示语言影响 AI 产出的命名内容
-        sb.Append('|').Append(req.AiProvider);           // 引擎不同 → 命名结果不同（None 时走日期回退模板）
-        Field(req.CustomApiModel ?? "");                 // 自定义模型名：不同模型命名风格不同
+        Field(template);                                 // 命名模板直接影响输出文件名
+
+        if (usesDatePlaceholders)
+            sb.Append('|').Append(req.UseExifDate ? 1 : 0);  // 仅当模板真的用到日期占位符（或归档）时才有效
+
+        if (usesAiPlaceholders)
+        {
+            Field(req.Language ?? "");                   // 提示语言影响 AI 产出的命名内容
+            sb.Append('|').Append(req.AiProvider);       // 引擎不同 → 命名结果不同
+            Field(req.CustomApiModel ?? "");             // 自定义模型名：不同模型命名风格不同
+        }
+
         Field(output);                                   // 输出目录：换目录就该往新目录重做
         return sb.ToString();
     }

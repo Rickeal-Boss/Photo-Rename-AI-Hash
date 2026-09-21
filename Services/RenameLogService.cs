@@ -92,7 +92,13 @@ public sealed class RenameLogService
     /// <b>仅限「首次」：</b>表头只在文件创建时写一次，若不按 <see cref="FingerprintColumnIndex"/>
     /// 兜底定位，升级后新写入的记录也会一直读不到指纹 → 变成「每次都整批重做」的永久回归。
     /// </remarks>
-    public Task<CompletedLog> LoadRenameLogAsync(string outputFolder, string fingerprint)
+    /// <param name="acceptedFingerprints">
+    /// 本次可接受的「运行指纹」集合，任一命中即视为同一命名配置。
+    /// 之所以是多个而非单个：指纹算法会随版本演进（见 <c>OrganizeService.ComputeFingerprint</c> 的版本前缀），
+    /// 若只认最新一种写法，算法一升级老用户的所有历史记录就全部失配 → 每次升级都要全量重做一遍。
+    /// 传入「新版算法值 + 上一代算法值」即可平滑迁移：参数没变的老记录仍能续传，参数真变了才重做。
+    /// </param>
+    public Task<CompletedLog> LoadRenameLogAsync(string outputFolder, params string[] acceptedFingerprints)
     {
         var log = new CompletedLog();
         if (string.IsNullOrWhiteSpace(outputFolder) || !Directory.Exists(outputFolder))
@@ -138,8 +144,11 @@ public sealed class RenameLogService
                         // 运行指纹比对：列缺失（旧版日志）或值不等 → 该行不计入索引。
                         // 宁可让文件重做（重做的代价是「内容相同则跳过 / 加序号」，不丢数据），
                         // 也绝不能让「改了参数却整批静默跳过」再次发生。
-                        if (iFingerprint < 0 || iFingerprint >= cols.Length ||
-                            !string.Equals(cols[iFingerprint], fingerprint, StringComparison.Ordinal))
+                        // 可接受多个指纹（新版 + 上一代），任一命中即视为同一命名配置。
+                        // 没有传入任何可接受值时全部忽略——与「列缺失」同向，宁可重做也不静默跳过。
+                        if (acceptedFingerprints == null || acceptedFingerprints.Length == 0 ||
+                            iFingerprint < 0 || iFingerprint >= cols.Length ||
+                            Array.IndexOf(acceptedFingerprints, cols[iFingerprint]) < 0)
                         {
                             log.IgnoredByFingerprint++;
                             continue;
