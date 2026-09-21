@@ -55,5 +55,11 @@ Install.bat 是分两步找安装包的，两步都不写死版本号，所以�
 
   该位置不受 MSIX 写虚拟化影响，因此「卸载应用不会删除」你的命名模板、
   默认目录与已保存的 API Key。
+
+  同一目录下还有排障用的文件（反馈问题时请一并提供）：
+    crash.log                        程序崩溃现场（未处理异常）
+    scan.log                         目录扫描诊断
+    organize_failures_<时间戳>.csv    每批整理的失败清单
+  它们刻意放在这里而不是 AppData：卸载/重装不会把现场一并删掉。
   如果旧版本曾在 %LOCALAPPDATA%\PhotoRenameAIHash\ 留下 settings.json，
   新版本首次启动时会自动迁移过来，无需手动复制。

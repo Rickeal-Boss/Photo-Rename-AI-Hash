@@ -89,6 +89,12 @@ This location is **not** subject to MSIX write virtualization, so it survives un
 resetting the app. A `settings.json` left behind by an older version in
 `%LOCALAPPDATA%\PhotoRenameAIHash\` is migrated automatically on first launch.
 
+The same folder also holds the diagnostics worth attaching when reporting a problem:
+`crash.log` (unhandled exceptions), `scan.log` (directory-scan diagnostics) and
+`organize_failures_<timestamp>.csv` (per-batch failure list). They live here on purpose,
+for the same reason as `settings.json` — an uninstall/reinstall would otherwise wipe
+the evidence before it can be sent.
+
 ## Build & Run
 
 ### Prerequisites
