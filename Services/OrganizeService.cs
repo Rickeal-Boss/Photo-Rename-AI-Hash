@@ -947,17 +947,25 @@ public sealed class OrganizeService : IOrganizeService
                 {
                     Percent = (int)(100.0 * done / Math.Max(1, files.Count)),
                     Result = entry, // A-05：归档模式同样把结果推给 UI（此前只发日志，结果卡片恒为空态）
-                    // 日志行必须与结果行的 Status 一致（P33：日志说「已归档」而结果行是「错误」，
-                    // 两处互相矛盾，用户不知道信哪个）。失败条目在上面两个 catch（非环境级永久错误 /
-                    // 通用重试终态）里都把 entry 置成 Status="错误"，此前它们会落到同一条「已归档」
-                    // 文案上——谎报成功。（环境级那个 catch 是 `throw` 离开方法的，到不了这里。）
-                    // 用 IsError 而非列举文案：将来新增失败态时不会漏（与 RenameLogEntry 的既有判据同源）。
+                    // 日志行必须与结果行的 Status 一致（P33：日志说「已归档」而结果行是「错误」或
+                    // 「跳过」，两处互相矛盾，用户不知道信哪个）。归档循环能产出三类非成功态，
+                    // 此前它们全都落到同一条「已归档」文案上：
+                    //   · 错误 —— 上面两个 catch（非环境级永久错误 / 通用重试终态）置 Status="错误"；
+                    //     环境级那个 catch 是 `throw` 离开方法的，到不了这里。
+                    //   · 跳过(已存在) —— resolved == null（冲突策略 Skip 且日期子目录已有同名异内容文件）。
+                    //   · 未改动(内容相同) / 模拟(归档) —— ExecuteAsync 的提前返回：前者源文件根本
+                    //     没被搬动，后者（DryRun）更是把预览说成既成事实——直接违反上方
+                    //     overwroteExisting 判据里那条 !req.DryRun 不变式。
+                    // 用 RenameLogEntry 的既有三态（IsError / IsNeutral / IsSuccess）分流，而不是
+                    // 列举状态文案：将来新增状态时不会漏。中间那一档内嵌真实 Status，天然不谎报。
                     // 覆盖了原有同名文件时必须在常驻日志里点名（归档没有备份，被覆盖者没有副本）。
                     LogLine = entry != null && entry.IsError
                         ? $"{f.Name} [错误] {entry.Message} 进度 {done}/{files.Count}"
-                        : overwroteExisting
-                            ? $"{f.Name} 已归档（覆盖了输出目录中已存在的同名文件，该文件没有备份）进度 {done}/{files.Count}"
-                            : $"{f.Name} 已归档进度 {done}/{files.Count}",
+                        : entry != null && entry.IsNeutral
+                            ? $"{f.Name} [{entry.Status}] 进度 {done}/{files.Count}"
+                            : overwroteExisting
+                                ? $"{f.Name} 已归档（覆盖了输出目录中已存在的同名文件，该文件没有备份）进度 {done}/{files.Count}"
+                                : $"{f.Name} 已归档进度 {done}/{files.Count}",
                 });
             }
         }
@@ -2028,8 +2036,12 @@ public sealed class OrganizeService : IOrganizeService
 
     /// <summary>
     /// 「形态」判据的后缀校验：要求当前名确实以「模板里 <c>{name}</c> 与 <c>{n}</c> 之间的字面量
-    /// ＋ 4 位序号（<c>{n}</c> 由 <c>BuildName</c> 以 <c>index.ToString("D4")</c> 展开，恒 4 位）」结尾，
-    /// 且日期前缀与这段后缀之间还夹着<b>非空</b>的中间段（即上一轮 <c>{name}</c> 的展开值）。
+    /// ＋ 4 位序号」结尾，且日期前缀与这段后缀之间还夹着<b>非空</b>的中间段（即上一轮 <c>{name}</c> 的展开值）。
+    /// <para><b>已知边界（有意不修，勿据此做新判断）</b>：<c>{n}</c> 由 <c>BuildName</c> 以
+    /// <c>index.ToString("D4")</c> 展开，<b>D4 只保证「至少 4 位」</b>——单批文件数 &gt; 9999 时
+    /// <c>index ≥ 10000</c> 会产出 5 位序号（如 <c>20240101_IMG_0001_10000</c>），本方法按「恰好 4 位」
+    /// 校验会<b>漏判</b>。方向是漏保护（不会误跳），且还要叠加「历史日志整体丢失」这个前提
+    /// （判据一覆盖不到时才会走到这里），故只在此备案不改。</para>
     /// <para><b>为什么必须这么严</b>：旧实现只要求「末 4 位是数字」，于是源文件名本身形如
     /// <c>20240101_123456.jpg</c>（安卓 / 部分相机按拍摄日期命名，极常见）会被误判成
     /// 「本模板的产出」——<c>20240101_</c> 前缀命中、末尾 <c>3456</c> 是数字，<b>首跑即整批跳过、
