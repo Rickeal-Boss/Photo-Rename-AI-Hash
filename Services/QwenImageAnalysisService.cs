@@ -22,9 +22,14 @@ public sealed class QwenImageAnalysisService : IImageAnalysisService
     /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
     private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
 
-    public QwenImageAnalysisService(string apiKey, Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    /// <summary>命名模板：用于裁剪提示词——只要求模型输出模板真正用到的字段。为 null 时按全部字段兜底。</summary>
+    private readonly string? _template;
+
+    public QwenImageAnalysisService(string apiKey, string? template = null,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _apiKey = apiKey;
+        _template = template;
         _delayAsync = delayAsync;
     }
 
@@ -43,7 +48,7 @@ public sealed class QwenImageAnalysisService : IImageAnalysisService
         // 3~20 RPM（差两个数量级）→ 该档不带闸门（闸门永不触发，加了只会人为降速）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(Endpoint, Model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language), dataUrl,
+            ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl,
             AiProviderProfiles.For(AiProvider.Qwen), ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);

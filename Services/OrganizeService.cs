@@ -1350,8 +1350,8 @@ public sealed class OrganizeService : IOrganizeService
     private const string LegacyFingerprintVersion = "fp1";
 
     /// <summary>由 AI 产出的占位符：只有模板用到它们时，引擎 / 模型 / 语言才会改变输出文件名。</summary>
-    private static readonly string[] AiPlaceholders =
-        { "{category}", "{scene}", "{people}", "{action}", "{subtitle}", "{source}" };
+    /// <remarks>与 <see cref="ImageAnalysisHelper.BuildPrompt"/> 共用同一份定义，避免两处各写一份导致漂移。</remarks>
+    private static readonly string[] AiPlaceholders = ImageAnalysisHelper.AiPlaceholders;
 
     /// <summary>由拍摄/修改时间产出的占位符：只有模板用到它们时，「取 EXIF 日期」才会改变输出文件名。</summary>
     private static readonly string[] DatePlaceholders =
@@ -1460,14 +1460,15 @@ public sealed class OrganizeService : IOrganizeService
                     isBatchLevel: true);
             // rpmLimit 为 0 时保持端点嗅探得出的闸门（不替用户猜 RPM）
             return new CustomImageAnalysisService(req.CustomApiUrl, req.CustomApiModel, req.AiApiKey, req.CustomApiRpmLimit,
-                delayAsync);
+                req.NamingTemplate, delayAsync);
         }
 
         return req.AiProvider switch
         {
-            AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey, delayAsync),
-            AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey, delayAsync),
-            AiProvider.Nvidia => new NvidiaImageAnalysisService(req.AiApiKey, delayAsync),
+            // 传入命名模板：提示词只要求模型输出模板真正用到的字段（省 token，也让模型更专注）。
+            AiProvider.Zhipu => new ZhipuImageAnalysisService(req.AiApiKey, req.NamingTemplate, delayAsync),
+            AiProvider.Qwen => new QwenImageAnalysisService(req.AiApiKey, req.NamingTemplate, delayAsync),
+            AiProvider.Nvidia => new NvidiaImageAnalysisService(req.AiApiKey, req.NamingTemplate, delayAsync),
             _ => null,
         };
     }

@@ -27,18 +27,23 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
     /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
     private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
 
+    /// <summary>命名模板：用于裁剪提示词——只要求模型输出模板真正用到的字段。为 null 时按全部字段兜底。</summary>
+    private readonly string? _template;
+
     /// <param name="endpoint">完整的 chat/completions 端点 URL</param>
     /// <param name="model">模型名，如 gpt-4o</param>
     /// <param name="apiKey">API Key</param>
     /// <param name="rpmLimit">每分钟请求上限（用户在「设置」填写）；0 = 不限（不替用户猜 RPM），
     /// &gt; 0 时覆盖端点嗅探得出的闸门。</param>
+    /// <param name="template">命名模板：只要求模型输出模板真正用到的字段。</param>
     /// <param name="delayAsync">可选的退避等待替换钩子（见 <see cref="_delayAsync"/>）。</param>
     public CustomImageAnalysisService(string endpoint, string model, string apiKey, int rpmLimit = 0,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        string? template = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _endpoint = endpoint;
         _model = model;
         _apiKey = apiKey;
+        _template = template;
         _delayAsync = delayAsync;
         // 端点 host 嗅探（智谱/阿里/Anthropic/Gemini 各有档位，未命中走通用档）；
         // 填了「每分钟请求上限」时在档位基础上挂闸门（闸门实例进程级共享，跨图片、跨批次生效）。
@@ -59,7 +64,7 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
         // 用构造函数里建好的策略档（闸门实例进程级共享，跨图片/跨批次累计计数，限速才真的生效）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
+            ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
 
         var content = ImageAnalysisHelper.ExtractContent(raw);
         var result = ImageAnalysisHelper.Parse(content);

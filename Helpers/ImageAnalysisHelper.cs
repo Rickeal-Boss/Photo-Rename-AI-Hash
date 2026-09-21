@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -40,40 +41,123 @@ public static class ImageAnalysisHelper
         }
     }
 
-    public static string BuildPrompt(string language)
+    /// <summary>命名模板中「由 AI 产出」的占位符。只有模板用到它们时，识别结果才会进入文件名。</summary>
+    /// <remarks>与 <c>OrganizeService</c> 的指纹判定共用同一份定义，避免两处各写一份导致漂移。</remarks>
+    internal static readonly string[] AiPlaceholders =
+        { "{category}", "{scene}", "{people}", "{action}", "{subtitle}", "{source}" };
+
+    /// <summary>
+    /// 按命名模板算出「本次真正需要 AI 输出哪些字段」。
+    /// </summary>
+    /// <returns>
+    /// 模板用到的 AI 字段（按固定顺序）；模板为空或不含任何 AI 占位符时返回<b>全部</b>字段——
+    /// 后者用于「模板未知」的兜底（例如直接调用本方法做单次识别），保证行为不退化。
+    /// </returns>
+    private static string[] RequiredAiKeys(string? template)
+    {
+        var keys = new List<string>();
+        if (!string.IsNullOrEmpty(template))
+        {
+            foreach (var p in AiPlaceholders)
+            {
+                if (template!.IndexOf(p, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                // 占位符 {category} → 字段名 category
+                keys.Add(p.Trim('{', '}'));
+            }
+        }
+        // 模板为空 / 一个 AI 占位符都没用 → 兜底为全部字段
+        return keys.Count > 0 ? keys.ToArray() : new[] { "category", "scene", "people", "action", "subtitle", "source" };
+    }
+
+    /// <summary>
+    /// 构造识图提示词。
+    /// </summary>
+    /// <param name="language">界面语言（zh-CN / en-US），决定 AI 输出字段的语言。</param>
+    /// <param name="template">
+    /// 用户的命名模板。<b>强烈建议传入</b>：只有模板真正用到的字段才会被要求输出，
+    /// 既省 token，也让模型把注意力集中在会用到的字段上（未用到的字段不必生成，出错面也更小）。
+    /// 传 null 则按全部字段兜底。
+    /// </param>
+    /// <remarks>
+    /// 三条关键经验（都是实测踩出来的）：
+    /// 1. <b>示例比指令更有约束力</b>：示例必须与目标语言一致，否则模型会照抄示例语言 → 中英混合。
+    /// 2. <b>只问要用的</b>：要求模型输出用不到的字段，既浪费 token 又引入不必要的出错点。
+    /// 3. <b>取值要有边界</b>：给词表、给长度上限、给非法字符约束，比"简短描述"这类模糊要求准确得多，
+    ///    因为文件名字段最终要落进文件名（有长度与字符集限制）。
+    /// </remarks>
+    public static string BuildPrompt(string language, string? template = null)
     {
         bool zh = (language ?? "").StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+        string[] keys = RequiredAiKeys(template);
 
-        // ⚠ 示例必须与目标语言一致。原实现固定给英文示例，而模型会照抄示例的用词与语言——
-        // 即便上面写了 "Values in 中文"，category / action 仍常常回退成英文，
-        // 同一条结果里出现「部分英文、部分中文」的混合命名。故示例随语言切换。
+        // 各字段的取值说明（只在需要时纳入）。给候选词表 + 长度上限 + 非法字符约束，
+        // 比"简短描述"这类模糊要求准确得多——这些值最终要拼进文件名。
+        string Spec(string key) => key switch
+        {
+            "category" => "category=main subject type; pick ONE from " +
+                          (zh ? "美食/宠物/人物/风景/建筑/文档/截图/商品/车辆/其它" : "food/pet/people/landscape/building/document/screenshot/product/vehicle/other") + " if possible",
+            "scene" => "scene=where the photo was taken; a short noun phrase",
+            "people" => "people=who appears; use 'none' if none or unidentifiable; NEVER invent names",
+            "action" => "action=what is happening; a short verb phrase",
+            "subtitle" => "subtitle=visible on-screen text, kept VERBATIM in its original language; 'none' if none",
+            "source" => "source=origin token; pick ONE from " +
+                        (zh ? "手机/相机/截图/电脑/生成" : "phone/camera/screenshot/computer/generated"),
+            _ => ""
+        };
 
-        // 各字段的语言约束：category/scene/people/action 必须统一为所选语言；
-        // subtitle 是画面上「看到」的文字，天然是多语言的，按原样保留、不要翻译；
-        // source 沿用 phone/screenshot/camera 这类通用标识，也不做语言统一。
+        // 语言规则：category/scene/people/action 统一为所选语言；
+        // subtitle 是画面上「看到」的文字，天然多语言，按原样保留、不要翻译；
+        // source 沿用通用标识，也不做语言统一。
         string langRule = zh
-            ? "Language rule: category, scene, people, action MUST be in Simplified Chinese only — " +
-              "no English words (except unavoidable proper nouns like brand or person names); " +
-              "subtitle keeps the original text as seen on screen, do NOT translate it; " +
-              "source uses common tokens like phone/screenshot/camera. " +
-              "Never mix Chinese and English within one result."
-            : "Language rule: category, scene, people, action MUST be in English only; " +
-              "subtitle keeps the original text as seen on screen, do NOT translate it; " +
-              "source uses common tokens like phone/screenshot/camera. " +
-              "Never mix languages within one result.";
+            ? "Language: category/scene/people/action MUST be Simplified Chinese only (no English words " +
+              "except unavoidable proper nouns); subtitle keeps original text, do NOT translate; " +
+              "source uses the tokens above. Never mix Chinese and English in one result."
+            : "Language: category/scene/people/action MUST be English only; subtitle keeps original text, " +
+              "do NOT translate; source uses the tokens above. Never mix languages in one result.";
 
-        string example = zh
-            ? "{\"category\":\"宠物\",\"scene\":\"客厅\",\"people\":\"无\",\"action\":\"睡觉\",\"subtitle\":\"none\",\"source\":\"phone\"}"
-            : "{\"category\":\"pet\",\"scene\":\"living room\",\"people\":\"none\",\"action\":\"sleeping\",\"subtitle\":\"none\",\"source\":\"phone\"}";
+        // 示例只包含本次真正需要的字段，且与目标语言一致。
+        string zhSample = "{\"category\":\"宠物\",\"scene\":\"客厅\",\"people\":\"无\",\"action\":\"睡觉\",\"subtitle\":\"none\",\"source\":\"手机\"}";
+        string enSample = "{\"category\":\"pet\",\"scene\":\"living room\",\"people\":\"none\",\"action\":\"sleeping\",\"subtitle\":\"none\",\"source\":\"phone\"}";
+        string ordered = string.Join(",", keys);
+        // 示例按本次需要的字段裁剪，保持与要求完全一致的形状（键顺序也要一致，模型会照抄形状）。
+        var sampleParts = new List<string>();
+        foreach (var k in keys)
+        {
+            sampleParts.Add(zh switch
+            {
+                true => k switch
+                {
+                    "category" => "\"category\":\"宠物\"",
+                    "scene" => "\"scene\":\"客厅\"",
+                    "people" => "\"people\":\"无\"",
+                    "action" => "\"action\":\"睡觉\"",
+                    "subtitle" => "\"subtitle\":\"none\"",
+                    "source" => "\"source\":\"手机\"",
+                    _ => ""
+                },
+                _ => k switch
+                {
+                    "category" => "\"category\":\"pet\"",
+                    "scene" => "\"scene\":\"living room\"",
+                    "people" => "\"people\":\"none\"",
+                    "action" => "\"action\":\"sleeping\"",
+                    "subtitle" => "\"subtitle\":\"none\"",
+                    "source" => "\"source\":\"phone\"",
+                    _ => ""
+                }
+            });
+        }
+        string example = "{" + string.Join(",", sampleParts) + "}";
 
-        return "Analyze this image. Output ONLY a JSON object (no markdown fences) with exactly these keys: " +
-               "category, scene, people, action, subtitle, source. " +
-               langRule + " " +
-               "category=one short word or phrase (e.g. " + (zh ? "美食/宠物/人物/风景/文档/截图" : "food/pet/people/landscape/document/screenshot") + "). " +
-               "scene=place where the photo was taken. people=person names, or 'none' if none. " +
-               "action=short verb phrase describing what is happening. " +
-               "subtitle=any visible on-screen text, or 'none' if none. source=origin like phone/screenshot/camera. " +
-               "Example: " + example;
+        var sb = new StringBuilder();
+        sb.Append("Analyze this image and return ONLY a compact JSON object. No explanation, no markdown fence. ");
+        sb.Append("Keys (in this order): ").Append(ordered).Append(". ");
+        foreach (var k in keys) sb.Append(Spec(k)).Append(". ");
+        sb.Append("Rules: every value <= 12 characters; use 'none' when unknown; ");
+        sb.Append("never use characters / \\ : * ? \" < > | or newlines. ");
+        sb.Append(langRule).Append(" ");
+        sb.Append("Example: ").Append(example);
+        return sb.ToString();
     }
 
     /// <summary>

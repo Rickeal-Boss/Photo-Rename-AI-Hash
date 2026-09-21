@@ -38,9 +38,14 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
     /// 使「暂停」能打断退避（组织层的暂停检查点夹在 AI 调用前后，退避期间点暂停原本要等约 4 分钟）。</summary>
     private readonly Func<TimeSpan, CancellationToken, Task>? _delayAsync;
 
-    public NvidiaImageAnalysisService(string apiKey, Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    /// <summary>命名模板：用于裁剪提示词——只要求模型输出模板真正用到的字段。为 null 时按全部字段兜底。</summary>
+    private readonly string? _template;
+
+    public NvidiaImageAnalysisService(string apiKey, string? template = null,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _apiKey = apiKey;
+        _template = template;
         _delayAsync = delayAsync;
     }
 
@@ -67,7 +72,7 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
                     role = "user",
                     content = new object[]
                     {
-                        new { type = "text", text = ImageAnalysisHelper.BuildPrompt(language) },
+                        new { type = "text", text = ImageAnalysisHelper.BuildPrompt(language, _template) },
                         new { type = "image_url", image_url = new { url = dataUrl } }
                     }
                 }
