@@ -57,6 +57,15 @@ public partial class OrganizeViewModel : ObservableObject
     /// <summary>「覆盖」撞上本批次已产出的目标、被降级为自动加序号的文件数。</summary>
     private int _degradedBatchCollision;
 
+    /// <summary>
+    /// 有降级说明、但原因文案不在上面两类已知模式里的条目数（<b>中性兜底桶</b>）。
+    /// 存在的意义：本 VM 靠<b>匹配内核文案</b>来区分降级原因（内核只把原因写进 <c>Message</c>，没有结构化标志）。
+    /// 若内核日后改了文案措辞，条目会落进这里 → 汇总时只说「未按覆盖处理、已自动改名」，
+    /// <b>不硬套一个具体原因</b>；否则会把 A 原因谎报成 B 原因（P33）。
+    /// 逐条的真实原因始终在结果列表各行的提示里。
+    /// </summary>
+    private int _degradedOther;
+
     /// <summary>由页面注入：重命名实际执行前弹出备份文件夹选择。返回 null 表示用户取消。</summary>
     public Func<Task<string?>>? BackupFolderPicker { get; set; }
 
@@ -406,6 +415,7 @@ public partial class OrganizeViewModel : ObservableObject
         _batchFailures.Clear();
         _degradedRenameMode = 0;
         _degradedBatchCollision = 0;
+        _degradedOther = 0;
     }
 
     /// <summary>
@@ -419,7 +429,8 @@ public partial class OrganizeViewModel : ObservableObject
     /// 判定「降级」的依据：内核只在这两种情况下给<b>成功</b>条目写 <c>Message</c>
     /// （<c>OrganizeService</c> 的 <c>entry.Message = degradeReason</c> 两处，均在 <c>degraded</c> 为真时）；
     /// 其余成功条目的 <c>Message</c> 恒为空，错误条目则已被上面的 <see cref="RenameLogEntry.IsError"/> 分流。
-    /// 两类原因按文案区分：重命名模式的说明含「重命名模式」，本批次占用冲突的含「本批次其他文件占用」。
+    /// 两类原因按文案区分：重命名模式的说明含「重命名模式」，本批次占用冲突的含「本批次」；
+    /// 两者都不含时落 <see cref="_degradedOther"/>（中性兜底，汇总时不硬套原因）。
     /// </remarks>
     private void TrackBatchIssues(RenameLogEntry entry)
     {
@@ -430,8 +441,12 @@ public partial class OrganizeViewModel : ObservableObject
         }
         if (!entry.IsSuccess || string.IsNullOrWhiteSpace(entry.Message)) return;
 
+        // 归类依据是内核的<b>文案</b>（内核没有结构化标志）。两类已知文案见 OrganizeService.ResolveTargetAsync：
+        // 「重命名模式下不会覆盖源文件夹中的其它文件…」与「目标已被本批次其他文件占用…」。
+        // 都不匹配时落中性桶，汇总时不硬套原因——宁可少说，也不能把原因说错（P33）。
         if (entry.Message.Contains("重命名模式", StringComparison.Ordinal)) _degradedRenameMode++;
-        else _degradedBatchCollision++;
+        else if (entry.Message.Contains("本批次", StringComparison.Ordinal)) _degradedBatchCollision++;
+        else _degradedOther++;
     }
 
     /// <summary>
@@ -441,13 +456,15 @@ public partial class OrganizeViewModel : ObservableObject
     /// </summary>
     private void ReportDegradedSummary()
     {
-        if (_degradedRenameMode == 0 && _degradedBatchCollision == 0) return;
+        if (_degradedRenameMode == 0 && _degradedBatchCollision == 0 && _degradedOther == 0) return;
 
         var parts = new List<string>();
         if (_degradedRenameMode > 0)
             parts.Add($"{_degradedRenameMode} 个文件因「重命名模式不支持覆盖」而自动加序号改名（未覆盖源文件夹中的其它文件）");
         if (_degradedBatchCollision > 0)
             parts.Add($"{_degradedBatchCollision} 个文件因目标已被本批次其它文件占用而自动加序号改名");
+        if (_degradedOther > 0)
+            parts.Add($"{_degradedOther} 个文件未按「覆盖」处理、已自动加序号改名（原因见结果列表各行提示）");
 
         // 模拟运行下没有任何文件被改动，措辞必须是「预估」而不是既成事实（P33：不能把预览说成已发生）
         var note = (DryRun ? "模拟运行预估：本批次将有 " : "本批次有 ") + string.Join("；", parts) +
