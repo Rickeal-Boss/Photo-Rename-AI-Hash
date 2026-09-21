@@ -285,25 +285,33 @@ jobs:
 
       # =====================================================================
       # Install.bat 不变量断言（阻断式，只读）。
-      # 三条都属同一类：被人"顺手简化"掉之后不会立刻报错，而是退化成
+      # 四条都属同一类：被人"顺手简化"掉之后不会立刻报错，而是退化成
       # 【静默失败】——正是本项目最难排查的那一类故障。
       #   ① chcp 65001 必须存在且位于任何中文 echo 之前：
       #      没有它，cmd 按 936 解析 UTF-8 字节 → 用户看到满屏乱码，
       #      而脚本功能完全正常、CI 全绿。
       #   ② 管理员自检必须存在：
       #      没有它，非管理员双击会在证书导入处失败，一路走到安装才抛看不懂的错。
-      #      ⚠ 本护栏【只校验判据字符串存在，不校验判据有效性】—— 这正是它自身的
-      #        局限（半空转）：Install.bat 原实现是 'net session OR fltmc'，而 fltmc
-      #        无参调用在部分 Windows 上对非提权进程同样返回 0，OR 逻辑下自检恒通过，
-      #        字符串却一直在本护栏眼里，判绿照旧。
-      #        现已把主判据换成 whoami /groups 的 High Mandatory Level SID
-      #        （S-1-16-12288），net session 降为兜底；本护栏仍按字符串存在判定，
-      #        判据有效性靠这处注释 + 人工复核守住。
+      #      ⚠ 第八轮修（判据集合过期型空转）：旧护栏只认 'net session' / 'fltmc'，
+      #        而 Install.bat 的主判据在第七轮已换成 whoami /groups 的 High Mandatory
+      #        Level SID（S-1-16-12288）。旧护栏于是对新主判据零覆盖：
+      #          - 删掉新主判据 → 旧护栏仍因 'net session' 存在而恒绿；
+      #          - 把已被论证为「对非提权进程也可能返回 0」的 fltmc OR 分支加回来
+      #            （即回归到它本要拦的旧实现）→ 旧护栏仍把 fltmc 当作合法替代而放行。
+      #        护栏因此成了它本要拦的那个回归的通行证 —— 比没有护栏更危险（虚假安全感）。
+      #        现改为：SID 主判据是【必要条件】（whoami /groups 与 S-1-16-12288 必须在
+      #        同一可执行行上同时出现，写在注释里不算）；fltmc 在可执行行里出现即红。
+      #        'net session' 仅作为脚本内的兜底，不再作为「满足本护栏」的充分条件。
+      #      ⚠ 本护栏【只校验判据字符串存在，不校验判据有效性】—— 这是它剩余且无法
+      #        静态消除的局限（SID 判据本身是否真的读到令牌，只能靠这处注释 + 人工复核）。
       #   ③ Install.bat 里每个 dir /b 查找模式必须在文档里出现过：
       #      这条防的是"三处各自演化"（Install.bat / README / 安装说明.txt）。
       #      只做正向（脚本模式 → 文档），不做反向：文档里用的是
       #      PhotoRenameAIHash_<version>_x64.msix 这种带占位符的写法，
       #      反向匹配会被占位符绊倒，收益不抵误报。
+      #   ④ Install.bat 换行锁定（.gitattributes 的 text eol=crlf）必须真的生效：
+      #      索引侧须为 LF（规范化后形态）、工作区侧须为 CRLF。索引侧仍是 crlf
+      #      说明该属性只对新内容生效、已入库 blob 未规范化（下次编辑即整文件 diff 噪音）。
       # =====================================================================
       - name: Assert Install.bat invariants (blocking)
         shell: pwsh
@@ -323,8 +331,19 @@ jobs:
           for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '\S*[一-鿿]\S*' -and $lines[$i] -notmatch '^\s*REM') { $firstCjk = $i; break } }
           if ($firstCjk -ge 0 -and $chcpIdx -gt $firstCjk) { Write-Error ("Install.bat 的 'chcp 65001'（第 " + ($chcpIdx + 1) + " 行）晚于第一条含中文的非注释行（第 " + ($firstCjk + 1) + " 行）：这一行会以 936 解码成乱码"); exit 1 }
 
-          # ② 管理员自检
-          if (-not ($bat -match 'net\s+session') -and -not ($bat -match 'fltmc')) { Write-Error "Install.bat 缺少管理员自检（net session / fltmc）：证书导入 LocalMachine 必须提权，没有自检时非管理员双击会静默失败到安装步才报错"; exit 1 }
+          # ② 管理员自检（主判据为必要条件；fltmc 不得回用）
+          #    先剔掉注释行：SID / fltmc 只出现在解释性注释里不算「判据存在」。
+          $batCode = ($lines | Where-Object { $_ -notmatch '^\s*REM\b' -and $_ -notmatch '^\s*::' }) -join "`n"
+          # 主判据：必须有一行用 whoami /groups 读出 High Mandatory Level SID（S-1-16-12288）。
+          if (-not ($batCode -match 'whoami\s+/groups[^\r\n]*S-1-16-12288')) {
+            Write-Error "Install.bat 缺少基于完整性级别 SID 的管理员自检（同一行上须同时有 'whoami /groups' 与 'S-1-16-12288'）：这是当前的主判据，删掉它之后非管理员双击会在第 2 步证书导入处失败，一路走到安装才抛看不懂的错。注意本判据只在【可执行行】里查找，写在 REM 注释里不算。"
+            exit 1
+          }
+          # 反向断言：fltmc 不得再作为提权判据回用（它对非提权进程也可能返回 0，OR 下自检恒真）。
+          if ($batCode -match '\bfltmc\b') {
+            Write-Error "Install.bat 的可执行行里又出现了 fltmc：fltmc 无参调用在部分 Windows 上对非提权进程同样返回 0，放进 OR 逻辑会让管理员自检恒为真（自检退化成装饰），正是第七轮已移除的旧实现。请改用 whoami /groups 的 S-1-16-12288 判据。"
+            exit 1
+          }
 
           # ③ 脚本里的 dir /b 查找模式必须在文档里出现过
           $patterns = @()
@@ -338,7 +357,24 @@ jobs:
           foreach ($pat in $patterns) { if (-not (($docs -join "`n") -match [regex]::Escape($pat))) { $undocumented += $pat } }
           if ($undocumented.Count -gt 0) { Write-Error ("Install.bat 的查找模式 " + ($undocumented -join ', ') + " 在 README.md / 安装说明.txt 中均未提及：三处说明已各自演化，用户按文档判断会得出错误结论。请同步文档（README 的 Installing 章节为权威源）。"); exit 1 }
 
-          ("BATGUARD chcp_line=" + ($chcpIdx + 1) + " first_cjk_line=" + ($firstCjk + 1) + " patterns=" + ($patterns -join ',') ) >> ci-diagnostics.log
+          # ④ Install.bat 换行锁定（.gitattributes 的 'Install.bat text eol=crlf'）必须有断言覆盖，
+          #    否则「锁死」只是声明、靠人记得（本项目已吃过「声明 ↔ 实际不一致」的亏）。
+          #    期望形态：索引侧 LF（text 属性规范化后的标准入库形态）+ 工作区侧 CRLF
+          #    （cmd.exe 对 LF 下的 goto / 标签 / 括号块解析不可靠，脚本会静默失效）。
+          #    索引侧仍是 crlf ⇒ .gitattributes 只对后续 checkout/commit 生效，已入库的 blob
+          #    尚未规范化：下次编辑该文件并 add 时 git 会把整个文件报成改动（正是该属性想
+          #    避免的 diff 噪音）。修法：git add --renormalize Install.bat 后提交。
+          #    避免 native 命令 stderr + ErrorActionPreference=Stop 的版本相关差异：
+          #    与本文件 Verify 步调用 signtool 同款写法，临时降为 Continue 再取退出码。
+          $ErrorActionPreference = 'Continue'
+          $eol = (& git -C $env:GITHUB_WORKSPACE ls-files --eol Install.bat | Out-String).Trim()
+          $gitExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($gitExit -ne 0 -or -not $eol) { Write-Error ("无法读取 Install.bat 的换行属性（git ls-files --eol 失败，退出码 " + $gitExit + "）：换行锁定无断言覆盖，拒绝静默放行。输出：" + $eol); exit 1 }
+          if ($eol -notmatch 'i/lf') { Write-Error ("Install.bat 索引侧换行不是 LF（实际: " + $eol + "）：.gitattributes 的 'text eol=crlf' 尚未对已入库内容生效（需执行 git add --renormalize Install.bat）。当前状态下每次编辑都会把整个文件报成 diff 噪音。"); exit 1 }
+          if ($eol -notmatch 'w/crlf') { Write-Error ("Install.bat 工作区侧换行不是 CRLF（实际: " + $eol + "）：cmd.exe 对 LF 下的 goto / 标签 / 括号块解析不可靠，安装脚本会静默失效。"); exit 1 }
+
+          ("BATGUARD chcp_line=" + ($chcpIdx + 1) + " first_cjk_line=" + ($firstCjk + 1) + " patterns=" + ($patterns -join ',') + " adminSid=1 fltmc=0 eol=" + $eol) >> ci-diagnostics.log
           Write-Host ("BATGUARD ok: chcp@" + ($chcpIdx + 1) + ", patterns=" + ($patterns -join ','))
           "CHECKPOINT:bat-guard-done" >> ci-diagnostics.log
 
