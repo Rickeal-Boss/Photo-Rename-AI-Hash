@@ -61,7 +61,9 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
             ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
 
-        var content = ImageAnalysisHelper.ExtractContent(raw);
+        // 传入文件名：让「空正文」这条逐文件级永久错误的文案自带文件名，
+        // 避免同因计数把它误当成整批级根因熔断整批（P26 三层口径）。
+        var content = ImageAnalysisHelper.ExtractContent(raw, System.IO.Path.GetFileName(imagePath));
         var result = ImageAnalysisHelper.Parse(content, _template);
         // 解析不出结构化结果：抛专用类型 AiResultInvalidException 而非裸 InvalidOperationException——
         // 语义是「模型给了内容但内容不可用，重试有意义」（temperature=0.3 下输出并非确定性），

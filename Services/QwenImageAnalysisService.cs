@@ -46,7 +46,9 @@ public sealed class QwenImageAnalysisService : IImageAnalysisService
             ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl,
             AiProviderProfiles.For(AiProvider.Qwen), ct, _delayAsync).ConfigureAwait(false);
 
-        var content = ImageAnalysisHelper.ExtractContent(raw);
+        // 传入文件名：让「空正文」这条逐文件级永久错误的文案自带文件名，
+        // 避免同因计数把它误当成整批级根因熔断整批（P26 三层口径）。
+        var content = ImageAnalysisHelper.ExtractContent(raw, System.IO.Path.GetFileName(imagePath));
         var result = ImageAnalysisHelper.Parse(content, _template);
         // 与 CustomImageAnalysisService 同口径：解析不出抛 AiResultInvalidException（重试有意义），
         // 不判永久（temperature=0.3 下输出非确定性；判永久会让连续 3 个文件熔断整批，见 P26）。

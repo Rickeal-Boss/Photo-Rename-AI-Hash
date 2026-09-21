@@ -286,7 +286,10 @@ public static class ImageAnalysisHelper
         // 有的版本要等 SendAsync 才抛），后者会被下面的 catch 当成「网络 / 连通性」瞬时故障去重试。
         // 这两条判据很宽松（不可能误伤合法 Key），但足以拦住最常见的「整行粘贴」类配置错误，
         // 且不消耗限流名额——配置错误不该占用闸门。
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+        // 判据必须落到「解析结果」上：`out _` 会丢弃 Uri，若某 .NET 版本对 "https://"
+        // 这类无主机名输入仍返回 true，则该判据对它宣称的头号用例（只填了 https://）完全空转。
+        // 追加 uri.Host.Length > 0 后，判据不再依赖 TryCreate 的具体实现细节（D-7）。
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri) || endpointUri.Host.Length == 0)
             throw new AiPermanentException(
                 "视觉识别端点 URL 不是合法地址（例如只填了 https:// 而缺少主机名）。" +
                 "请到「设置」检查端点，需形如 https://host/path。",
@@ -743,11 +746,21 @@ public static class ImageAnalysisHelper
     /// 若响应为错误对象（含 error 字段）则抛异常，便于调用方提示具体原因（文案已过 <c>Snippet</c> 脱敏）。
     /// 若正文为空且非截断（模型什么都没产出），抛 <see cref="AiPermanentException"/>(isBatchLevel: false)。
     /// </summary>
+    /// <param name="raw">视觉识别接口的原始响应体。</param>
+    /// <param name="fileName">
+    /// 当前处理的文件名（通常传 <c>System.IO.Path.GetFileName(imagePath)</c>），仅用于让「空正文」这条
+    /// <b>逐文件级</b>永久错误的文案自带文件名。传 null 时文案保持原样。
+    /// <para><b>为什么必须带上</b>：编排层（<c>OrganizeService.RunAsync</c>）的「同因计数」对逐文件级错误的
+    /// 唯一性保证，是「文案里内嵌文件名」——文案不含文件名时，连续 3 张被内容审核拒绝的图会凑出同一个
+    /// cause，把「逐图成立」的问题误升级成「连续 3 个文件熔断整批」，且中止文案会把根因谎报成
+    /// 「配置 / 账户级问题」（P26 三层口径）。本文件 <see cref="EncodeAsJpegDataUrlAsync"/> 的解码失败文案
+    /// 一直带文件名，正是同一形状。</para>
+    /// </param>
     /// <exception cref="InvalidOperationException">响应体含 error 字段（该分支保留既有异常类型，文案已脱敏）。</exception>
     /// <exception cref="AiResultInvalidException">响应体不是合法 JSON、不是 JSON 对象，或结构不符（重试有意义）。</exception>
     /// <exception cref="AiPermanentException">输出被 max_tokens 截断且解析不出结果（整批级，不重试）；
     /// 或正文为空且非截断（逐文件级，不重试、不熔断整批）。</exception>
-    public static string ExtractContent(string raw)
+    public static string ExtractContent(string raw, string? fileName = null)
     {
         string content = "";
         string finishReason = "";
@@ -848,11 +861,15 @@ public static class ImageAnalysisHelper
         //  - isBatchLevel: false —— 内容审核拒绝是逐图的，不得升级成「连续 3 个文件熔断整批」（P26 三层口径）；
         //  - 与上面的 finish_reason=="length" 分支对齐（那一支已用更具体的文案短路，故此处只处理非截断形态）；
         //  - 网络类瞬时故障不走这里（它们在 CallVisionApiRawAsync 内已按 AiTransientException 处理，未改动）。
+        //  - <b>文案必须自带文件名</b>：编排层的「同因计数」靠「逐文件级文案含文件名」保证 cause 唯一，
+        //    否则连续 3 张被审核拒绝的图会凑出同一个 cause → 误熔断整批 + 归因谎报（见方法 XML 注释）。
+        //    fileName 为 null（如单次调用、内部探测）时文案逐字保持原样，不退化。
         if (text.Length == 0)
         {
             throw new AiPermanentException(
-                "视觉识别返回了空内容（模型未产出任何文本，可能因内容审核被拒绝）：" +
-                "请更换识别模型或检查图片。",
+                "视觉识别返回了空内容" +
+                (string.IsNullOrEmpty(fileName) ? "" : $"（{fileName}）") +
+                "（模型未产出任何文本，可能因内容审核被拒绝）：请更换识别模型或检查图片。",
                 isBatchLevel: false);
         }
 
@@ -870,7 +887,8 @@ public static class ImageAnalysisHelper
     /// 优先 <c>message.content</c>，为空回退 <c>message.reasoning</c>，并剥离内联 &lt;think&gt; 段。
     /// 保留本方法名以维持既有调用点不变。
     /// </summary>
-    public static string ExtractNemotronContent(string raw) => ExtractContent(raw);
+    /// <param name="fileName">同 <see cref="ExtractContent"/>：让「空正文」逐文件级错误文案自带文件名。</param>
+    public static string ExtractNemotronContent(string raw, string? fileName = null) => ExtractContent(raw, fileName);
 
     /// <summary>剥离模型输出中可能内联的 &lt;think&gt;…&lt;/think&gt; 推理段（大小写不敏感）；
     /// 只有未闭合的 &lt;think&gt; 时把其后内容整体视为推理段丢弃（正常情况下不会出现：

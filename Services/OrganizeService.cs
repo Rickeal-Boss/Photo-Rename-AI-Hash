@@ -104,8 +104,10 @@ public sealed class OrganizeService : IOrganizeService
         // 续传索引只采纳指纹相同的记录——改模板 / 换模式 / 换冲突策略后重跑不再被旧记录静默跳过。
         // conditional: true = 只纳入真正会改变文件名的参数（换引擎但模板不用 AI 占位符时不算变更）。
         req.Fingerprint = ComputeFingerprint(req, output, conditional: true);
-        // 读侧一并接受上一代指纹（无条件口径）：否则算法一升级，老用户的所有历史记录立刻全部失配，
-        // 每次升级都要被迫全量重做一遍。参数真变了才会两代都不匹配 → 那时重做才是应该的。
+        // 读侧一并接受前两代指纹（fp2 = 条件性但无自定义端点；fp1 = 无条件口径）：
+        // 否则算法一升级（fp2 → fp3 纳入端点 host），老用户的所有历史记录立刻全部失配，
+        // 每次升级都要被迫全量重做一遍。参数真变了才会三代都不匹配 → 那时重做才是应该的。
+        string prevFingerprint = ComputeFingerprint(req, output, conditional: true, includeCustomEndpoint: false);
         string legacyFingerprint = ComputeFingerprint(req, output, conditional: false);
 
         IImageAnalysisService? ai;
@@ -156,7 +158,7 @@ public sealed class OrganizeService : IOrganizeService
         // 避免重复处理（例如已正确命名的 game_古建筑竞技场_..._screenshot.png）。
         // 第二参数是指纹：历史记录的指纹与本次不同（或旧日志根本没有该列）则一律不计入索引，
         // 宁可重做——重做的最坏结果是「内容相同则跳过 / 加序号」，而静默跳过是用户完全无感的丢活。
-        var completed = await _log.LoadRenameLogAsync(output, req.Fingerprint, legacyFingerprint).ConfigureAwait(false);
+        var completed = await _log.LoadRenameLogAsync(output, req.Fingerprint, prevFingerprint, legacyFingerprint).ConfigureAwait(false);
 
         // 工作队列：文件处理失败（如视觉模型偶发未按 JSON 返回、网络抖动、瞬时限流等）不直接跳过，
         // 而是重新入队到队尾稍后再次尝试，最大化「成功重命名」的比例；达到单文件最大尝试次数仍失败才放弃。
@@ -213,7 +215,7 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
                 LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
-                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源中至少一项与本次不同），" +
+                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
                           "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
                           "若希望继续沿用旧记录续传，请保持这些参数不变。",
             });
@@ -224,6 +226,26 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
                 LogLine = "警告：续传索引可能不完整（部分子目录无法访问），已按可读取的部分处理。",
+            });
+        }
+
+        // P1-2（内核侧可感知输出）：实跑 + 模板含 AI 占位符 + 本批次拿不到 AI 值（引擎=「无」）时，
+        // ProcessOneAsync 会把用户模板整条回退成 DefaultNamingTemplate（避免产出 unknown_…_unknown 垃圾名，
+        // 见该方法的 aiValueUnavailable 注释）。回退本身是合理取舍，但此前<b>完全静默</b>：
+        // 用户看到结果列表里的文件名与自己填的模板完全不同，却没有任何一处说明为什么（P33 谎报类）。
+        // 这里在批次开始时用既有日志通道（与 IgnoredByFingerprint / EnumerationIncomplete 同约定）
+        // 说清「哪些字段取不到值、原因、回退成了什么规则」。
+        // 判据与 ProcessOneAsync 同源：非模拟 + 模板用到 AI 占位符 + ai == null（= 引擎为「无」；
+        // 引擎非「无」但缺 Key 的情况会在 CreateAi 处抛整批级永久错误，根本到不了这里）。
+        if (!req.DryRun && ai == null && TemplateUsesAny(req.NamingTemplate ?? "", AiPlaceholders))
+        {
+            progress.Report(new OrganizeProgress
+            {
+                // 必须带 Percent：OnProgress 无条件赋值 Progress = p.Percent，不带会把进度条打回 0。
+                Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
+                LogLine = "提示：命名模板用到了 AI 字段（如 {category}），但本批次识别引擎为「无」（未启用任何识别引擎），" +
+                          $"无法产出这些字段，已回退到默认命名规则 {DefaultNamingTemplate}。" +
+                          "若希望保留你的模板，请到「设置」选择识别引擎并配置 API Key 后重跑。",
             });
         }
 
@@ -519,7 +541,8 @@ public sealed class OrganizeService : IOrganizeService
         // 归档的目标子目录由「输出目录 + 日期来源」决定，故 isArchive: true —— 日期来源恒为有效维度，
         // 即便命名模板里没写 {yyyy} 之类的占位符（子目录本身已经用了日期）。
         req.Fingerprint = ComputeFingerprint(req, req.OutputFolder, conditional: true, isArchive: true);
-        // 与 RunAsync 同：读侧一并接受上一代指纹，避免算法升级导致老用户全量重做。
+        // 与 RunAsync 同：读侧一并接受前两代指纹（fp2 / fp1），避免算法升级导致老用户全量重做。
+        string prevFingerprint = ComputeFingerprint(req, req.OutputFolder, conditional: true, isArchive: true, includeCustomEndpoint: false);
         string legacyFingerprint = ComputeFingerprint(req, req.OutputFolder, conditional: false, isArchive: true);
 
         // 本批次已实际落地的目标路径（语义同 RunAsync）
@@ -545,7 +568,7 @@ public sealed class OrganizeService : IOrganizeService
 
         // 断点续传：读取输出目录（含递归子文件夹）的重命名日志，跳过已归档完成（源路径已记录）的文件。
         // 同 RunAsync：指纹不一致的历史记录不计入索引（参数变了就该重做）。
-        var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint, legacyFingerprint).ConfigureAwait(false);
+        var completed = await _log.LoadRenameLogAsync(req.OutputFolder, req.Fingerprint, prevFingerprint, legacyFingerprint).ConfigureAwait(false);
 
         // 索引可信度告警（与 RunAsync 同文案、同口径；Percent 取 0：此时本批次尚未处理任何文件）
         if (completed.IgnoredByFingerprint > 0)
@@ -554,7 +577,7 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = 0,
                 LogLine = $"检测到 {completed.IgnoredByFingerprint} 条历史记录来自不同的命名配置" +
-                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源中至少一项与本次不同），" +
+                          "（模式 / 冲突策略 / 命名模板，以及该模板实际用到的识别引擎、模型、语言、日期来源、自定义端点中至少一项与本次不同），" +
                           "已忽略这些记录并重新处理对应文件。若你本就是想换规则重跑，此提示可忽略；" +
                           "若希望继续沿用旧记录续传，请保持这些参数不变。",
             });
@@ -1436,6 +1459,12 @@ public sealed class OrganizeService : IOrganizeService
 
         // 抽成局部函数：末尾「净化后为空」的兜底需要用它再跑一遍默认模板，
         // 不抽就要把 15 行 Replace 抄两遍（抄两份必然漂移）。
+        // AI 占位符的替换必须<b>忽略大小写</b>：检测侧（<see cref="TemplateUsesAny"/> 与
+        // <c>ImageAnalysisHelper.RequiredAiKeys</c>）一律用 OrdinalIgnoreCase，若替换区分大小写，
+        // 用户模板写 {Category} 时会被判为「用到了 AI 字段」（建引擎、发请求、付费），
+        // 却一次都匹配不上 → AI 结果被丢弃、文件名里留下字面量 {Category}，UI 还宣称 AI 字段会生效（P33 类）。
+        // 注：日期占位符（{MM} 月 / {mm} 分）刻意<b>保持区分大小写</b>——它们存在仅大小写不同的成对写法，
+        // 忽略大小写会让 {MM} 的替换把 {mm} 也吃掉（月覆盖分钟），故不在本次统一范围内。
         string Build(string tpl) => (tpl ?? "")
             .Replace("{yyyy}", when.ToString("yyyy"))
             .Replace("{MM}", when.ToString("MM"))
@@ -1446,18 +1475,22 @@ public sealed class OrganizeService : IOrganizeService
             .Replace("{date}", when.ToString("yyyy-MM-dd"))
             .Replace("{n}", index.ToString("D4"))
             .Replace("{name}", San(Path.GetFileNameWithoutExtension(f.Name)))
-            .Replace("{category}", Ai(f.Category))
-            .Replace("{scene}", Ai(f.Scene))
-            .Replace("{people}", Ai(f.People))
-            .Replace("{action}", Ai(f.Action))
-            .Replace("{subtitle}", Ai(f.Subtitle))
-            .Replace("{source}", Ai(f.SourceTag));
+            .Replace("{category}", Ai(f.Category), StringComparison.OrdinalIgnoreCase)
+            .Replace("{scene}", Ai(f.Scene), StringComparison.OrdinalIgnoreCase)
+            .Replace("{people}", Ai(f.People), StringComparison.OrdinalIgnoreCase)
+            .Replace("{action}", Ai(f.Action), StringComparison.OrdinalIgnoreCase)
+            .Replace("{subtitle}", Ai(f.Subtitle), StringComparison.OrdinalIgnoreCase)
+            .Replace("{source}", Ai(f.SourceTag), StringComparison.OrdinalIgnoreCase);
 
-        var built = Build(template);
+        // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException。
+        // 抽成局部函数复用：下方「净化后为空 → 回退默认模板」这条分支也必须过同一截断，
+        // 否则 MaxBaseNameLength 的 MAX_PATH 收口会在新旁路上失效（模板写成 "../" 且源文件名主干较长时）。
+        string Truncate(string s)
+            => s.Length > MaxBaseNameLength
+                ? s.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.')
+                : s;
 
-        // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException
-        if (built.Length > MaxBaseNameLength)
-            built = built.Substring(0, MaxBaseNameLength).TrimEnd('_', ' ', '.');
+        var built = Truncate(Build(template));
 
         // P1-5：截断之后再对<b>结果整体</b>做一次「路径级」净化。
         // 上面只对每个占位符的<b>值</b>做了 San()，模板自身的字面量（"../"、"..\..\"、"C:\Windows\"）
@@ -1471,8 +1504,10 @@ public sealed class OrganizeService : IOrganizeService
         // P1-5 兜底：模板字面量<b>全是</b>分隔符 / 空白（"../"、"\"、"/"、"   "…）时净化结果为空，
         // 直接返回会让文件名只剩扩展名（".jpg"），同批文件还会互相撞名并被一路加 _1/_2/_3。
         // 回退到默认模板，与 ProcessOneAsync 的「模板为空」回退同口径（同用 DefaultNamingTemplate）。
+        // 必须同样过 Truncate：默认模板展开后仍可能超 180（源文件名主干很长时），
+        // 而这条回退分支正是「模板 = "../"」这个头号用例的落点。
         if (string.IsNullOrWhiteSpace(built))
-            built = Build(DefaultNamingTemplate);
+            built = Truncate(Build(DefaultNamingTemplate));
 
         return built;
     }
@@ -1519,7 +1554,13 @@ public sealed class OrganizeService : IOrganizeService
     };
 
     /// <summary>当前指纹算法版本：将来调整纳入字段时递增，即可让旧日志自动失效（旧指纹不再匹配）。</summary>
-    private const string FingerprintVersion = "fp2";
+    private const string FingerprintVersion = "fp3";
+
+    /// <summary>
+    /// 上一代「条件性」指纹版本（fp2：模板用到 AI 占位符时纳入引擎 / 模型 / 语言，但<b>不</b>纳入自定义端点）。
+    /// 读侧一并接受它：本轮把自定义端点 host 纳入指纹（fp2 → fp3）后，老用户的历史记录仍能续传。
+    /// </summary>
+    private const string PrevFingerprintVersion = "fp2";
 
     /// <summary>
     /// 上一代指纹算法版本（无条件纳入全部参数）。读侧<b>一并接受</b>它，
@@ -1570,10 +1611,14 @@ public sealed class OrganizeService : IOrganizeService
     /// <param name="req">本次请求参数。</param>
     /// <param name="output">本次实际的输出目录（重命名模式下即源目录）。</param>
     /// <param name="conditional">
-    /// true = 条件性指纹（当前算法 fp2）：只纳入<b>真正会改变文件名</b>的参数；
+    /// true = 条件性指纹（当前算法 fp3）：只纳入<b>真正会改变文件名</b>的参数；
     /// false = 上一代写法 fp1（无条件纳入全部参数），仅用于读侧兼容旧日志。
     /// </param>
     /// <param name="isArchive">归档模式：日期子目录由拍摄时间决定，故「取 EXIF 日期」恒为有效维度。</param>
+    /// <param name="includeCustomEndpoint">
+    /// 是否把「自定义引擎的端点 host」纳入指纹（当前算法 fp3 为 true）。
+    /// 传 false 用于生成上一代 fp2 指纹（读侧兼容旧日志用），使旧记录仍能匹配。
+    /// </param>
     /// <remarks>
     /// <b>为什么必须是「条件性」的</b>（fp1 → fp2 要解决的问题）：
     /// fp1 无条件把 引擎 / 模型 / 语言 / 日期来源 全部纳入。于是用户只是换了个识别引擎，
@@ -1581,10 +1626,16 @@ public sealed class OrganizeService : IOrganizeService
     /// 指纹却变了 → 全部历史记录失配 → 整批重做，白白重新调用一遍 AI（费时费钱）。
     /// 治好「静默跳过」的同时不该引入「无谓重做」，所以改为：
     /// <b>模板用到哪类占位符，对应参数才进指纹。</b>
-    /// 刻意<b>不</b>纳入：API Key（敏感信息，不落盘）、CustomApiUrl / CustomApiRpmLimit
-    /// （端点地址与速率上限不改变「命名结果」本身，修端点不该让整批重做）。
+    /// 刻意<b>不</b>纳入：API Key（敏感信息，不落盘）、CustomApiRpmLimit
+    /// （速率上限不改变「命名结果」本身，改上限不该让整批重做）。
+    /// <para><b>fp2 → fp3（本轮）</b>：自定义引擎下<b>端点地址才是供应商身份</b>——此前指纹只纳入
+    /// <c>AiProvider(=Custom)</c> + <c>CustomApiModel</c>，用户换一个供应商的端点、模型名恰好同名
+    /// （gpt-4o 这类通用名）时指纹完全不变 → 整批被「跳过(日志已完成)」静默跳过，实际一个新名都没生成。
+    /// 故与「模板用到 AI 占位符才纳入引擎 / 模型 / 语言」同口径，<b>只有模板真的用到 AI 字段且引擎为 Custom 时</b>，
+    /// 端点才进指纹；且只取 <b>host</b>（不含 path / query）——既区分供应商，又避免把
+    /// <c>?key=</c> 这类查询串随指纹落盘（D-5：密钥不落盘），也不会因用户只改 path 就全量重做。</para>
     /// </remarks>
-    private static string ComputeFingerprint(OrganizeRequest req, string output, bool conditional, bool isArchive = false)
+    private static string ComputeFingerprint(OrganizeRequest req, string output, bool conditional, bool isArchive = false, bool includeCustomEndpoint = true)
     {
         var sb = new StringBuilder();
         // 自由文本字段（用户可直接输入，可能含分隔符 '|'）统一走 Field() 加「长度前缀」：
@@ -1599,7 +1650,10 @@ public sealed class OrganizeService : IOrganizeService
         bool usesAiPlaceholders = !conditional || TemplateUsesAny(template, AiPlaceholders);
         bool usesDatePlaceholders = !conditional || isArchive || TemplateUsesAny(template, DatePlaceholders);
 
-        sb.Append(conditional ? FingerprintVersion : LegacyFingerprintVersion);
+        // 版本前缀三态：fp3（当前）/ fp2（条件性但无端点，读侧兼容）/ fp1（无条件，读侧兼容）。
+        sb.Append(conditional
+            ? (includeCustomEndpoint ? FingerprintVersion : PrevFingerprintVersion)
+            : LegacyFingerprintVersion);
         sb.Append('|').Append(req.Mode);                 // 模式决定目标目录与是否原地改名
         sb.Append('|').Append(req.Conflict);             // 冲突策略决定同名文件处理方式
         Field(template);                                 // 命名模板直接影响输出文件名
@@ -1612,10 +1666,27 @@ public sealed class OrganizeService : IOrganizeService
             Field(req.Language ?? "");                   // 提示语言影响 AI 产出的命名内容
             sb.Append('|').Append(req.AiProvider);       // 引擎不同 → 命名结果不同
             Field(req.CustomApiModel ?? "");             // 自定义模型名：不同模型命名风格不同
+            // 自定义引擎：端点 host 即供应商身份（换端点必然改变识别结果）。只取 host，理由见方法 remarks。
+            if (includeCustomEndpoint && req.AiProvider == AiProvider.Custom)
+                Field(CustomEndpointIdentity(req.CustomApiUrl));
         }
 
         Field(output);                                   // 输出目录：换目录就该往新目录重做
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 自定义引擎端点的「供应商身份」：只取 <b>host</b>（不含 path / query / fragment）。
+    /// <para>取 host 而非整串 URL：用户把 Key 拼进端点（<c>?key=…</c>）是现实用法，而指纹会随
+    /// rename_log.csv <b>落盘</b>——纳入整串等于把密钥写进日志（D-5）。host 已足以区分供应商，
+    /// 且不会因用户只改 path（如换部署路径）就整批重做。</para>
+    /// <para>解析不出（空 / 非法 URL）返回空串：该形态在调用期会被端点预校验拦下（整批中止），
+    /// 指纹取值不影响任何行为。</para>
+    /// </summary>
+    private static string CustomEndpointIdentity(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return "";
+        return Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri) ? uri.Host : "";
     }
 
     /// <summary>
