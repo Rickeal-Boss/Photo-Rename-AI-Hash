@@ -84,10 +84,10 @@
                     <!-- A-10：模拟运行不调用识别接口（不产生 API 消耗），含 AI 字段的命名在模拟下取不到真实值 -->
                     <TextBlock TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}">
-                        「模拟运行」不改动任何文件，也不会调用识别接口（不产生 API 消耗），仅按规则预览结果；
-                        「实际执行」会真实复制/移动/重命名并调用识别接口，请确认模式后再开始。
-                        注意：模拟运行下 category / scene / people / action / subtitle / source 等 AI 字段取不到真实值，
-                        预览出的文件名与「实际执行」的结果可能不同，请以实际执行的结果为准。
+                        「模拟运行」不改动任何文件，也不会调用识别接口（不产生 API 消耗）：
+                        category / scene / people / action / subtitle / source 等 AI 字段一律填 unknown0001、unknown0002 … 这类占位值，
+                        仅用于预览命名结构；「实际执行」会真实复制/移动/重命名并调用识别接口，请确认模式后再开始。
+                        注意：模拟运行下 AI 字段取不到真实识别结果，预览出的文件名与实际执行的结果会不同，请以实际执行为准。
                     </TextBlock>
                     <!-- P0-1 配套：EXIF 解析修复后，补上「日期来源」可见开关，让功能状态可感知、可关闭 -->
                     <CheckBox Content="使用照片拍摄时间（EXIF）作为日期来源；无 EXIF 时回退文件修改时间"
