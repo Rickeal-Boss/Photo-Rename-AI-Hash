@@ -452,8 +452,11 @@ public sealed class CompletedLog
     /// <para>与 <see cref="EnumerationIncomplete"/> 并列，由编排层走既有 <c>progress.Report</c> 通道
     /// 告知用户「该目录的 rename_log.csv 表头不可识别，已按无历史记录处理」——
     /// 绝不能直接当成空索引静默继续（那是用户完全无感的重复劳动）。</para>
-    /// <para>写入侧已同步修好「零字节文件不补表头」（见 <see cref="AppendRenameLogAsync"/> 的 isNew 判定），
-    /// 故此后成功写入一次即自愈；本标志只负责把「曾经发生过」这件事说出来。</para>
+    /// <para>自愈范围（<b>有界，不要写成「一律会自动补回」</b>）：写入侧已修好「零字节文件不补表头」
+    /// （见 <see cref="AppendRenameLogAsync"/> 的 <c>isNew</c> 判定），故<b>零字节</b>这一态
+    /// 此后成功写入一次即自愈；但 <c>isNew</c> 只在「文件不存在或零字节」时为真，
+    /// 因此「已有数据行却缺少表头」（以及仅含 BOM 的文件）<b>不会</b>自愈——
+    /// 表头只能位于文件开头，追加写补不回来。告警文案须按这两态分别给出处置建议。</para>
     /// </summary>
     public bool HeaderUnreadable { get; set; }
 }

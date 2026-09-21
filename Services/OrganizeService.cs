@@ -288,15 +288,20 @@ public sealed class OrganizeService : IOrganizeService
         // 读侧会把所有行判为不可用 → 续传索引恒为空 → 每次全量重做，而此前<b>没有任何提示</b>
         //（既不增加 IgnoredByFingerprint 也不增加 EnumerationIncomplete），用户以为续传生效了。
         // 这里用既有日志通道（与上面三条同约定）说清「已按无历史记录处理」。
-        // 写入侧（RenameLogService.AppendRenameLogAsync）已同步修好「零字节文件不补表头」，
-        // 故此后成功写入一次即自愈。
+        // 写入侧（RenameLogService.AppendRenameLogAsync）已修好「零字节文件不补表头」，
+        // 故<b>零字节</b>这一态此后成功写入一次即自愈；但「已有数据行却缺少表头」<b>不会</b>自愈
+        //（表头只能位于文件开头，追加写补不回来）。故下方告警文案按两种情形分别给出处置建议，
+        // 不可统一承诺「下次写入会自动补回表头」——那在最典型的那一态上是假的。
         if (completed.HeaderUnreadable)
         {
             progress.Report(new OrganizeProgress
             {
                 Percent = (int)(100.0 * skippedAtStart / Math.Max(1, files.Count)),
                 LogLine = "警告：输出目录中的 rename_log.csv 表头不可识别（文件为空、缺少必需列，或上次写入被中断），" +
-                          "已按「无历史记录」处理：本批次会重新处理所有文件。下次成功写入时会自动补回表头。",
+                          "已按「无历史记录」处理：本批次会重新处理所有文件。" +
+                          "若该文件是空的，下次成功写入会自动补回表头；若文件里已有数据行却缺少表头，" +
+                          "写入无法补回（表头只能位于文件开头），请手动删除或重命名这个 rename_log.csv 后重跑，" +
+                          "否则续传会一直失效。",
             });
         }
 
@@ -748,7 +753,10 @@ public sealed class OrganizeService : IOrganizeService
             {
                 Percent = 0,
                 LogLine = "警告：输出目录中的 rename_log.csv 表头不可识别（文件为空、缺少必需列，或上次写入被中断），" +
-                          "已按「无历史记录」处理：本批次会重新处理所有文件。下次成功写入时会自动补回表头。",
+                          "已按「无历史记录」处理：本批次会重新处理所有文件。" +
+                          "若该文件是空的，下次成功写入会自动补回表头；若文件里已有数据行却缺少表头，" +
+                          "写入无法补回（表头只能位于文件开头），请手动删除或重命名这个 rename_log.csv 后重跑，" +
+                          "否则续传会一直失效。",
             });
         }
 

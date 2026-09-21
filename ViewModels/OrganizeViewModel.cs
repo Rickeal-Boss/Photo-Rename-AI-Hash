@@ -96,10 +96,23 @@ public partial class OrganizeViewModel : ObservableObject
     /// 反向（模拟跑却报「本批次有…已被替换」）则虚报既成事实。
     /// <para>
     /// <b>跨域契约（与 <c>Services/OrganizeService.cs</c> 的划分，勿在任一侧单独改口径）：</b>
-    /// 内核<b>只输出计数</b>（含模拟运行下的同口径统计），<b>不生成任何时态措辞</b>；
-    /// 「将被…替换 / 已被…替换」的时态一律由本文件 <see cref="ReportDegradedSummary"/>
-    /// 按本快照选择。故内核侧 <c>overwroteExisting</c> 的 <c>!req.DryRun</c> 守卫保持不动
-    /// （过去时语义归 UI），模拟口径由内核另走同一汇总通道上报计数。
+    /// 时态分工是按「<b>哪条路径真的能到达</b>」划分的，<b>不是</b>「计数归内核、措辞归 UI」：
+    /// <list type="bullet">
+    /// <item><description><b>模拟运行</b>：整句由<b>内核自己</b>输出——<c>OrganizeService</c> 两侧
+    /// <c>finally</c> 里的「模拟运行预估：本批次将有 N 个…」，走与 <c>IgnoredByFingerprint</c>
+    /// 相同的 <c>progress.Report</c> 通道。</description></item>
+    /// <item><description><b>实际执行</b>：由本文件 <see cref="ReportDegradedSummary"/> 输出，
+    /// 数据源是 <c>_overwroteNoBackup</c> 桶（内核写 <c>OverwriteNoBackupNotice</c> 文案，
+    /// UI 按该文案分桶）。内核侧 <c>overwroteExisting</c> 的 <c>!req.DryRun</c> 守卫与过去时语义
+    /// 保持不动。</description></item>
+    /// </list>
+    /// 两条路径各自只出口一次、互不重复。
+    /// <br/>
+    /// <b>为什么不让 UI 统一出两种时态</b>：本文件的 <c>_overwroteNoBackup</c> 桶在模拟运行下
+    /// <b>恒为 0</b> —— <see cref="TrackBatchIssues"/> 在 <c>!entry.IsSuccess</c> 处早退，
+    /// 而模拟条目 <c>Status="模拟(移动)" / "模拟(归档)"</c> 不是成功态。要让它在模拟下可达，
+    /// 就得放宽那条早退判据，等于改变「哪些条目算问题」的口径，风险显著更高。
+    /// 故本文件只负责实跑的过去时文案；<b>不要</b>在此处补将来时分支——那是不可达的死代码。
     /// </para>
     /// </remarks>
     private bool _runDryRun;
@@ -556,15 +569,15 @@ public partial class OrganizeViewModel : ObservableObject
 
         var parts = new List<string>();
         // 「已覆盖」排在首位：它是本批次唯一「已经造成不可恢复后果」的一类，最需要用户先看到。
-        // U2：正文时态必须与下面的前缀同源（都取批次开始时的快照 _runDryRun）——
-        // 模拟运行下没有任何文件被改动，只能写将来时「将被替换」；写成过去时「已被替换」
-        // 就与前缀「模拟运行预估：本批次将有 …」自相矛盾，并把预览说成既成事实（P33）。
+        // 时态固定为<b>过去时</b>：_overwroteNoBackup 只在【实际执行】下才可能 > 0 ——
+        // TrackBatchIssues 在 !entry.IsSuccess 处早退，而模拟条目 Status="模拟(移动)/模拟(归档)"
+        // 不是成功态，故模拟运行下该桶恒为 0。模拟的「覆盖预估」由内核自己整句上报
+        // （跨域契约见 _runDryRun 字段的 <remarks>）。
+        // <b>刻意不写将来时分支</b>：它在模拟运行下不可达，是死代码，且会让后来者误以为
+        // 「模拟态的覆盖告警由本文件负责」而重复上报。
         if (_overwroteNoBackup > 0)
-            parts.Add(_runDryRun
-                ? $"{_overwroteNoBackup} 个目标位置的原有文件将被「覆盖」策略直接替换，" +
-                  "而这些将被替换的文件没有备份、原内容不可恢复"
-                : $"{_overwroteNoBackup} 个目标位置的原有文件已被「覆盖」策略直接替换，" +
-                  "而这些被替换的文件没有备份、原内容不可恢复");
+            parts.Add($"{_overwroteNoBackup} 个目标位置的原有文件已被「覆盖」策略直接替换，" +
+                      "而这些被替换的文件没有备份、原内容不可恢复");
         if (_degradedRenameMode > 0)
             parts.Add($"{_degradedRenameMode} 个文件因「重命名模式不支持覆盖」而自动加序号改名（未覆盖源文件夹中的其它文件）");
         if (_degradedBatchCollision > 0)
@@ -580,12 +593,10 @@ public partial class OrganizeViewModel : ObservableObject
         {
             // 补一句「两者相反」的点题：否则用户看到同一段汇总里既有「已覆盖」又有「已改名」，
             // 很容易读成「同一批文件既被覆盖又被改名」，反而更糊涂。
-            // U2：时态同样随快照走，否则模拟下会出现「将有 … 已被替换」的混用。
-            note += _runDryRun
-                ? "注意：「覆盖」与「自动加序号改名」是相反的结果——前者会替换目标文件的内容且不可恢复，" +
-                  "后者只是文件名多了一个序号、文件内容原样保留。"
-                : "注意：「已覆盖」与「已自动加序号改名」是相反的结果——前者目标文件的内容已被替换且不可恢复，" +
-                  "后者只是文件名多了一个序号、文件内容原样保留。";
+            // 同样固定过去时：本分支只在 _overwroteNoBackup > 0 时进入，而那只在实跑下成立
+            // （理由见上方同段的说明），故不存在「模拟下把预览说成既成事实」的风险。
+            note += "注意：「已覆盖」与「已自动加序号改名」是相反的结果——前者目标文件的内容已被替换且不可恢复，" +
+                    "后者只是文件名多了一个序号、文件内容原样保留。";
         }
         AppendLog(note);
         // 用 Warning 而非成功色：这不是失败，但用户选择「覆盖」却没被覆盖、或已不可恢复地覆盖了别的文件，都必须显眼
@@ -1112,7 +1123,9 @@ public partial class OrganizeViewModel : ObservableObject
         // U2（第十二轮）：把本次运行的实际参数快照下来。下面返回的 req 就是内核拿到的同一组值，
         // 终态汇总（ReportDegradedSummary）与失败清单头部（WriteFailureListAsync）必须读这两个字段，
         // 而不是读实时的 DryRun / SelectedMode —— 运行期间用户还能改那些控件，实时值已与内核不同源。
-        // 时态措辞由 UI 按 _runDryRun 生成，内核只给计数（跨域契约见字段注释）。
+        // 时态分工不是「内核给计数、UI 给措辞」，而是按可达性划分：模拟态的覆盖预估由内核整句
+        // 上报，实跑态的覆盖告警才由本文件 ReportDegradedSummary 按 _runDryRun 出过去时文案
+        // （完整契约与理由见 _runDryRun 字段的 <remarks>，勿只改一侧）。
         _runDryRun = DryRun;
         _runMode = SelectedMode;
 
