@@ -65,6 +65,15 @@ public sealed class SettingsService : ISettingsService
     /// </summary>
     public string LastCorruptedBackupPath { get; private set; } = "";
 
+    /// <summary>
+    /// P1-3：最近一次 <see cref="SaveAsync"/> 里 DPAPI <see cref="Protect"/> 是否失败过
+    /// （域策略 / 漫游用户配置 / 凭据损坏等场景下会发生）。
+    /// 为 true 表示本次落盘的密钥是<b>明文</b>，而保存本身仍然成功 ——
+    /// 上层必须把这层降级说出来，不能让用户以为已经加密（P33）。
+    /// 仅进程内状态，不写入 settings.json、不新增 <see cref="AppSettings"/> 字段。
+    /// </summary>
+    public bool LastProtectFailed { get; private set; }
+
     /// <summary>A-11：用户是否已确认过这次损坏（在设置页点「保存设置」即视为确认）。确认后释放保护闩。</summary>
     private bool _loadFailureAcknowledged;
 
@@ -161,6 +170,15 @@ public sealed class SettingsService : ISettingsService
         // 已有备份且备份文件还在 → 视为同一份损坏文件，不重复备份
         if (!string.IsNullOrEmpty(LastCorruptedBackupPath) && File.Exists(LastCorruptedBackupPath)) return;
 
+        // P1-5：走到这里说明这是一次「新的损坏」（上一份备份已被一次成功的 Load 清空，或还没备份过）。
+        // 用户的确认是针对「那一次」损坏的，新的损坏必须重新确认一次，否则同一会话内二次损坏时
+        // HasUnacknowledgedLoadFailure 恒为 false → 保护闩失效，整理结束的自动持久化会把归零的默认
+        // 配置（4 个密钥全空）写回磁盘。
+        // 复位只能放在这个判重分支<b>之后</b>：设置页的保存流程是「先 AcknowledgeLoadFailure()
+        // 再 Load() 再 SaveAsync()」，同一次损坏期间 Load 会被反复调用，若复位放在判重之前，
+        // 用户刚点下确认就被清掉 → 保存必然被闩拦下 → 在设置页永远存不进去（比原缺陷严重得多）。
+        _loadFailureAcknowledged = false;
+
         try
         {
             if (!File.Exists(FilePath)) return; // 文件根本不存在（全新安装）：没有可备份的东西
@@ -196,13 +214,21 @@ public sealed class SettingsService : ISettingsService
             target.Theme = (AppTheme)ReadInt(root, nameof(AppSettings.Theme), (int)target.Theme);
             target.DefaultFolder = ReadString(root, nameof(AppSettings.DefaultFolder), target.DefaultFolder);
             target.Language = ReadString(root, nameof(AppSettings.Language), target.Language);
-            target.OperationMode = (OperationMode)ReadInt(root, nameof(AppSettings.OperationMode), (int)target.OperationMode);
+            // P1-1：逐字段抢救拿到的整数同样不校验定义域（这里绕过 JsonSerializer 自己读的），
+            // 越界值会让下拉框空白，也会让「是否重命名模式」的判断失效（备份弹窗被绕过）。钳进枚举范围。
+            target.OperationMode = (OperationMode)Math.Clamp(
+                ReadInt(root, nameof(AppSettings.OperationMode), (int)target.OperationMode),
+                (int)OperationMode.Copy, (int)OperationMode.Rename);
             target.NamingTemplate = ReadString(root, nameof(AppSettings.NamingTemplate), target.NamingTemplate);
-            target.ConflictStrategy = (ConflictStrategy)ReadInt(root, nameof(AppSettings.ConflictStrategy), (int)target.ConflictStrategy);
+            target.ConflictStrategy = (ConflictStrategy)Math.Clamp(
+                ReadInt(root, nameof(AppSettings.ConflictStrategy), (int)target.ConflictStrategy),
+                (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
             target.OutputFolder = ReadString(root, nameof(AppSettings.OutputFolder), target.OutputFolder);
             target.DryRun = ReadBool(root, nameof(AppSettings.DryRun), target.DryRun);
             target.UseExifDate = ReadBool(root, nameof(AppSettings.UseExifDate), target.UseExifDate);
-            target.AiProvider = (AiProvider)ReadInt(root, nameof(AppSettings.AiProvider), (int)target.AiProvider);
+            target.AiProvider = (AiProvider)Math.Clamp(
+                ReadInt(root, nameof(AppSettings.AiProvider), (int)target.AiProvider),
+                (int)AiProvider.None, (int)AiProvider.Nvidia);
             target.ZhipuApiKey = ReadString(root, nameof(AppSettings.ZhipuApiKey), target.ZhipuApiKey);
             target.QwenApiKey = ReadString(root, nameof(AppSettings.QwenApiKey), target.QwenApiKey);
             target.NvidiaApiKey = ReadString(root, nameof(AppSettings.NvidiaApiKey), target.NvidiaApiKey);
@@ -280,6 +306,17 @@ public sealed class SettingsService : ISettingsService
                 "，为避免覆盖原文件，本次未写入。");
         }
 
+        // P1-3：该标志只反映最近一次保存，每次进入保存前先复位
+        LastProtectFailed = false;
+
+        // 保险：若字段值仍是 "enc:" 密文形态（说明上一次解密失败、上层把原文当明文传了回来），
+        // 视为无效并写空串——否则 Protect 会对它二次加密，此后只解一层仍得到 "enc:…"，密钥永久不可恢复。
+        // 明文原值先取出来：加密只是「落盘前临时替换」，无论成功失败都必须在 finally 里还原。
+        var z = ScrubCipherText(settings.ZhipuApiKey);
+        var q = ScrubCipherText(settings.QwenApiKey);
+        var n = ScrubCipherText(settings.NvidiaApiKey);
+        var c = ScrubCipherText(settings.CustomApiKey);
+
         await _saveLock.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -290,26 +327,14 @@ public sealed class SettingsService : ISettingsService
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
 
-            // 加密仅作用于落盘内容：先在共享对象上暂存密文、序列化、写盘，再还原明文，
+            // 加密仅作用于落盘内容：先在共享对象上暂存密文、序列化、写盘，再由 finally 还原明文，
             // 避免污染内存中 VM 持有的 settings（TextBox 仍需显示明文）。
-            // 保险：若字段值仍是 "enc:" 密文形态（说明上一次解密失败、上层把原文当明文传了回来），
-            // 视为无效并写空串——否则 Protect 会对它二次加密，此后只解一层仍得到 "enc:…"，密钥永久不可恢复。
-            var z = ScrubCipherText(settings.ZhipuApiKey);
-            var q = ScrubCipherText(settings.QwenApiKey);
-            var n = ScrubCipherText(settings.NvidiaApiKey);
-            var c = ScrubCipherText(settings.CustomApiKey);
             settings.ZhipuApiKey = Protect(z);
             settings.QwenApiKey = Protect(q);
             settings.NvidiaApiKey = Protect(n);
             settings.CustomApiKey = Protect(c);
 
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
-
-            // 还原内存对象为明文
-            settings.ZhipuApiKey = z;
-            settings.QwenApiKey = q;
-            settings.NvidiaApiKey = n;
-            settings.CustomApiKey = c;
 
             // 原子写：先写临时文件再原地替换，避免写入中途崩溃损坏 settings.json
             var tmp = FilePath + ".tmp";
@@ -318,6 +343,15 @@ public sealed class SettingsService : ISettingsService
         }
         finally
         {
+            // P1-4：还原明文必须在 finally 里。此前它写在 try 的末尾，
+            // 一旦 <c>Protect</c> 之后、还原之前有任何一步抛出（序列化 / 写临时文件 / 替换），
+            // 传入的 AppSettings 四个密钥字段就会停留在 "enc:" 密文态；
+            // 该对象若被复用再保存一次，ScrubCipherText 会把这串密文当成
+            // 「上一轮解密失败的残留」写空串 → 密钥被静默清空。
+            settings.ZhipuApiKey = z;
+            settings.QwenApiKey = q;
+            settings.NvidiaApiKey = n;
+            settings.CustomApiKey = c;
             _saveLock.Release();
         }
     }
@@ -358,8 +392,11 @@ public sealed class SettingsService : ISettingsService
 
     /// <summary>
     /// 用 DPAPI（CurrentUser 作用域）加密敏感字段，密文以 "enc:" 前缀标记以便读取时识别。
-    /// 加密失败则降级为明文返回，绝不阻断保存。密钥与当前 Windows 用户账户绑定，
-    /// 其他用户/其他机器无法解密，避免 API Key 以明文落盘被任意进程读取。
+    /// 密钥与当前 Windows 用户账户绑定，其他用户/其他机器无法解密，避免 API Key 以明文落盘被任意进程读取。
+    /// <b>加密失败时降级为明文返回、绝不阻断保存</b>（P1-3）：域策略 / 漫游用户配置 / 凭据损坏的机器上
+    /// 若改成「保存失败」，用户就永远存不了配置（P24 精神）。但降级必须<b>可感知</b>——
+    /// 置位 <see cref="LastProtectFailed"/>，由设置页在保存结果里明说「密钥可能以明文保存」，
+    /// 否则页面底部还写着「经 DPAPI 加密」，与实际不符（P33 谎报）。
     /// </summary>
     private static readonly byte[] Entropy =
     {
@@ -370,7 +407,7 @@ public sealed class SettingsService : ISettingsService
     /// <summary>密文前缀：用于识别「该字段已加密」，读取时据此决定是否解密。</summary>
     private const string EncPrefix = "enc:";
 
-    private static string Protect(string? plain)
+    private string Protect(string? plain)
     {
         if (string.IsNullOrEmpty(plain)) return plain ?? "";
         try
@@ -380,6 +417,8 @@ public sealed class SettingsService : ISettingsService
         }
         catch
         {
+            // 明文降级（详见方法注释）。置位让上层能如实告知用户，而不是静默降级。
+            LastProtectFailed = true;
             return plain ?? "";
         }
     }

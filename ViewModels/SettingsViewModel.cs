@@ -30,6 +30,94 @@ public partial class SettingsViewModel : ObservableObject
     /// <summary>A-11：同步 / 初始化期间置位——由同步引起的属性变化不算「用户手动改过」。</summary>
     private bool _suppressAiDirty;
 
+    // ── A-12：密钥明文驻留状态（逐字段跟踪，见 KeptInPlaintext） ──
+    // PasswordBox 必须拿到明文才能显示 / 编辑，所以「读进内存」这一步躲不掉；
+    // 能做的是让明文<b>不常驻</b>：保存成功后立即清零，并把这个状态显式暴露出来。
+    // 逐字段而不是共用一个布尔：四个框在保存后是一起清空的，若共用一个标志，
+    // 用户只改其中一项时另三项会因为「标志为真」被空串写回磁盘 → 密钥被静默清空。
+    private bool _zhipuPlain;
+    private bool _qwenPlain;
+    private bool _nvidiaPlain;
+    private bool _customPlain;
+
+    /// <summary>A-12：由 <see cref="ClearPlaintextKeys"/> 发起的清空赋值，不算「用户持有明文」。</summary>
+    private bool _clearingPlaintext;
+
+    /// <summary>
+    /// A-12：本页内存中当前是否持有密钥明文（未保存的输入，或刚从磁盘载入的明文）。
+    /// 为 false 表示本页不持有明文（上一次保存后已清零），此时密钥字段的权威值在磁盘上。
+    /// </summary>
+    public bool KeptInPlaintext => _zhipuPlain || _qwenPlain || _nvidiaPlain || _customPlain;
+
+    /// <summary>密钥字段被写入时更新「明文驻留」标志。清空动作走 _clearingPlaintext 守卫，不置位。</summary>
+    private void MarkPlaintextHeld(ref bool flag)
+    {
+        // 不判 value 是否为空：用户主动清空某框也是一种「以 UI 值为准」的编辑，必须记为持有，
+        // 否则下一次保存会跳过该字段、把用户的「删除密钥」意图吞掉。
+        if (!_clearingPlaintext) flag = true;
+        NotifyPlaintextState();
+    }
+
+    partial void OnZhipuApiKeyChanged(string value)
+    {
+        MarkPlaintextHeld(ref _zhipuPlain);
+    }
+
+    partial void OnQwenApiKeyChanged(string value)
+    {
+        MarkPlaintextHeld(ref _qwenPlain);
+    }
+
+    partial void OnNvidiaApiKeyChanged(string value)
+    {
+        MarkPlaintextHeld(ref _nvidiaPlain);
+    }
+
+    partial void OnCustomApiKeyChanged(string value)
+    {
+        MarkPlaintextHeld(ref _customPlain);
+    }
+
+    private void NotifyPlaintextState() => OnPropertyChanged(nameof(KeptInPlaintext));
+
+    /// <summary>
+    /// A-12：清掉本页内存里的密钥明文，把明文暴露窗口压到最短。
+    /// <b>只能在写盘成功之后调用</b>：保存失败时保留用户输入，否则用户得重填一遍才救得回来。
+    /// </summary>
+    private void ClearPlaintextKeys()
+    {
+        _clearingPlaintext = true;
+        try
+        {
+            // 置空即可（string 不可变，无法真正擦除旧实例；这里做到的是「不再被本页引用」）
+            ZhipuApiKey = "";
+            QwenApiKey = "";
+            NvidiaApiKey = "";
+            CustomApiKey = "";
+        }
+        finally
+        {
+            _clearingPlaintext = false;
+        }
+        // 显式复位：属性已是空串时 setter 短路、钩子不会被调用
+        _zhipuPlain = false;
+        _qwenPlain = false;
+        _nvidiaPlain = false;
+        _customPlain = false;
+        NotifyPlaintextState();
+    }
+
+    /// <summary>按本页当前四个密钥值重算「明文驻留」标志（空串不算持有明文）。
+    /// 用于「从磁盘载入明文」与构造期初始化这两处——那时属性变化不是用户编辑。</summary>
+    private void SyncPlaintextFlagsFromVm()
+    {
+        _zhipuPlain = ZhipuApiKey.Length > 0;
+        _qwenPlain = QwenApiKey.Length > 0;
+        _nvidiaPlain = NvidiaApiKey.Length > 0;
+        _customPlain = CustomApiKey.Length > 0;
+        NotifyPlaintextState();
+    }
+
     public SettingsViewModel()
     {
         _model = _settings.Load();
@@ -50,6 +138,8 @@ public partial class SettingsViewModel : ObservableObject
         OnPropertyChanged(nameof(ThemeIndex)); // 与 Theme 赋值保持一致，确保索引计算属性就绪
         _initializing = false;
         _aiBlockDirty = false; // 构造期的赋值由 _initializing 抑制，这里再显式兜一次底
+        // A-12：构造期从磁盘解密出来的密钥就是明文，按长度如实置位（空串不算持有）
+        SyncPlaintextFlagsFromVm();
 
         ShowUndecryptableKeysWarningIfNeeded();
         // A-11：配置读取失败提示（更严重，放在后面以便覆盖上面的解密失败提示）
@@ -233,15 +323,16 @@ public partial class SettingsViewModel : ObservableObject
     /// </summary>
     private async Task SaveThemeAsync()
     {
-        // A-11：沿用 SaveAsync 的既有约定——「重读磁盘快照前先捕获 UI 当前值」。
-        // AiProviderIndex 的 getter 读 _model.AiProvider，若不先捕获、重读后取到的会是磁盘旧值。
-        var pendingProvider = (AiProvider)AiProviderIndex;
         try
         {
-            // 重读磁盘（不覆盖 _model，避免打乱本页其余字段的内存状态），只回写主题与引擎
+            // 重读磁盘（不覆盖 _model，避免打乱本页其余字段的内存状态），只回写主题。
+            // P1-2：此前这里顺带把 UI 的引擎选择也写了进去 —— 用户并没点「保存设置」，
+            // 未确认的编辑不该因为「切了个主题」就被落盘（与函数自身「只写主题」的声明矛盾）。
+            // 也不用担心「整理页刚持久化的引擎被回退」：model 是 Load() 出来的新鲜对象，
+            // 不写 AiProvider 就是磁盘最新值，正是想要的行为（那是 SaveAsync 全量保存路径
+            // 才需要处理的「重读前先捕获 UI 值」约定，与本函数语义不同）。
             var model = _settings.Load();
             model.Theme = Theme;
-            model.AiProvider = pendingProvider;
             await _settings.SaveAsync(model);
 
             StatusText = "主题已切换（已保存，下次启动也会保留）。";
@@ -278,9 +369,14 @@ public partial class SettingsViewModel : ObservableObject
         // 避免用构造时快照把它静默回退；本页仅只读展示，导航回页时由 SyncOwnedFieldsFromDisk 同步。
         _model.Language = Language;
         _model.AiProvider = pendingProvider;
-        _model.ZhipuApiKey = ZhipuApiKey;
-        _model.QwenApiKey = QwenApiKey;
-        _model.NvidiaApiKey = NvidiaApiKey;
+        // A-12：密钥逐字段按「本页是否持有明文」决定写不写。
+        // 上一次保存成功后 ClearPlaintextKeys 已把四个框清空并把标志置 false，
+        // 此时空串代表「本页没有明文」而不是「用户想清空」→ 必须保持磁盘原值，
+        // 否则下一次保存会把密钥静默抹掉。用户真正编辑过（含主动清空）的标志为 true → 以 UI 值为准。
+        // 这四个属性是普通 [ObservableProperty]、不从 _model 派生，故不受上面重读磁盘影响。
+        if (_zhipuPlain) _model.ZhipuApiKey = ZhipuApiKey;
+        if (_qwenPlain) _model.QwenApiKey = QwenApiKey;
+        if (_nvidiaPlain) _model.NvidiaApiKey = NvidiaApiKey;
         // D-5：CustomApiUrl 不在 DPAPI 加密清单内，是明文落盘的；而 Google 的 OpenAI 兼容端点等
         // 把密钥写在 ?key= 里（Gemini host 嗅探会招徕这种粘贴）。保存前把这类查询参数摘出来：
         // 回填到密钥框（走 DPAPI 加密），并从 URL 移除。解析失败 / 无内嵌密钥 → 原样保存，
@@ -303,7 +399,7 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _model.CustomApiModel = CustomApiModel;
-        _model.CustomApiKey = CustomApiKey;
+        if (_customPlain) _model.CustomApiKey = CustomApiKey; // 同 A-12：不持有明文时保持磁盘原值
         // P1-D：一次性吃掉全部脏输入 —— NaN（NumberBox 清空文本时 Value 就是 NaN）、±∞、
         // 负数、以及超过 UI 上界 600 的值（此前只钳下界，1e11 会溢出成 int.MinValue 落盘，
         // 下个会话在 Minimum=0 的 NumberBox 里显示 -2147483648 → UI 谎报）。
@@ -322,6 +418,8 @@ public partial class SettingsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            // 注意：走不到下面的 ClearPlaintextKeys —— 保存失败时保留用户输入，
+            // 否则用户刚填好的密钥会被一次写盘失败连带清空，得重填一遍才救得回来。
             // A-11：写盘失败必须把上面那次「确认」收回去（重新上闩）。
             // 确认只能发生在写盘之前（见上方注释：放在写盘后会导致 SaveAsync 的闩先抛异常、
             // 用户永远保存不了），所以「确认」只有在真正写盘成功时才算数。此前失败分支只改 StatusText、
@@ -341,10 +439,23 @@ public partial class SettingsViewModel : ObservableObject
         // 已落盘 → 本页 AI 区块与磁盘重新对齐，之后的导航同步不会被误判为「用户改过」
         _aiBlockDirty = false;
 
+        // P1-3：DPAPI 加密失败时密钥是<b>明文</b>落盘的，而保存本身仍然成功。
+        // 不改成保存失败（那样在域策略 / 漫游配置机器上用户会永远存不了配置，见 P24），
+        // 但必须明说——页面底部还写着「经 DPAPI 加密」，与实际不符就是 P33 谎报。
+        var protectNote = "";
+        if (_settings is SettingsService savedImpl && savedImpl.LastProtectFailed)
+            protectNote = "注意：本机 DPAPI 加密不可用，密钥可能以明文保存。";
+
+        // A-12：写盘成功后立即清掉本页内存里的密钥明文，把明文暴露窗口压到最短。
+        // 先记下清除前是否确实持有明文：一个密钥都没填时不该凭空弹「已清除」的提示。
+        var clearedPlaintext = KeptInPlaintext;
+        ClearPlaintextKeys();
+
         // 通知依赖 _model 派生的计算属性（AiProviderIndex/可见性等）刷新
         OnPropertyChanged(nameof(AiProviderIndex));
         OnPropertyChanged(nameof(CustomProviderVisibility));
-        StatusText = "设置已保存。" + urlNote;
+        StatusText = "设置已保存。" + urlNote + protectNote +
+                     (clearedPlaintext ? "（密钥明文已从本页内存清除；再次进入本页可从设置文件重新载入。）" : "");
         StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success; // P1-1：保存成功
         StatusBarOpen = true;
     }
@@ -418,6 +529,18 @@ public partial class SettingsViewModel : ObservableObject
     {
         var disk = _settings.Load();
         DefaultFolder = disk.DefaultFolder;
+
+        // A-12：密钥明文不常驻 —— 上一次保存成功后本页已清零，用户再次导航回本页
+        // （即「要查看 / 编辑」）时按磁盘重新载入一次。本页仍有未保存的编辑时不载入，避免冲掉它；
+        // 载入后明文重新驻留，下一次保存仍会原样写回（值相同），不会有回退风险。
+        if (!KeptInPlaintext)
+        {
+            ZhipuApiKey = disk.ZhipuApiKey;
+            QwenApiKey = disk.QwenApiKey;
+            NvidiaApiKey = disk.NvidiaApiKey;
+            CustomApiKey = disk.CustomApiKey;
+            SyncPlaintextFlagsFromVm();
+        }
 
         // A-11：此前这里只同步了 DefaultFolder，AI 引擎下拉框不同步 → 用户在整理页改了引擎并持久化后
         // 进设置页看到的仍是旧值，再点「保存设置」就把旧引擎写回去了（用户改的引擎静默丢失）。

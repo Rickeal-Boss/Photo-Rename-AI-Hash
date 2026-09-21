@@ -46,7 +46,7 @@
             </sc:SettingsCard>
 
             <!-- 默认文件夹（D-3.4：该字段由整理页拥有并写入，本页改为只读展示） -->
-            <sc:SettingsCard Header="默认文件夹" Description="在「整理」页选择源文件夹后自动记录，此处仅供查看。">
+            <sc:SettingsCard Header="默认文件夹" Description="在「整理」页执行一次整理后自动记录，此处仅供查看。">
                 <TextBox Text="{x:Bind ViewModel.DefaultFolder, Mode=OneWay}"
                          IsReadOnly="True" MinWidth="320" />
             </sc:SettingsCard>
@@ -134,10 +134,12 @@
                      IsClosable="True"
                      AutomationProperties.LiveSetting="Polite" />
 
-            <TextBlock Text="密钥经 Windows DPAPI 加密保存在本机设置文件中（绑定当前用户，迁移 / 重装系统后不可解密，需重新填写），仅用于本地调用。"
-                       TextWrapping="Wrap"
+            <TextBlock TextWrapping="Wrap"
                        MaxWidth="640"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                密钥经 Windows DPAPI 加密保存在本机设置文件中（绑定当前用户，迁移 / 重装系统后不可解密，需重新填写），仅用于本地调用。
+                密钥明文只在「设置」页打开期间保留在内存中，点「保存设置」落盘后会立即清除；若本机 DPAPI 不可用，保存结果会明确提示密钥可能以明文存储。
+            </TextBlock>
         </StackPanel>
     </ScrollViewer>
 </Page>

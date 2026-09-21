@@ -46,8 +46,12 @@ public partial class OrganizeViewModel : ObservableObject
         UseExifDate = _model.UseExifDate;
         AiProviderIndex = System.Math.Clamp((int)_model.AiProvider, (int)AiProvider.None, (int)AiProvider.Nvidia);
         _syncedProviderIndex = AiProviderIndex; // 构造即视为已与磁盘对齐
-        OperationModeIndex = (int)_model.OperationMode;
-        ConflictIndex = (int)_model.ConflictStrategy;
+        // P1-1：与 AiProvider 同一套路 —— System.Text.Json 数字→枚举不校验定义域，
+        // settings.json 里手工编辑出的 "OperationMode": 7 会被原样读成越界枚举：
+        // 既让 ComboBox 因无匹配项而空白，也会让「是否重命名模式」的判断失效
+        // （越界值 != Rename →「重命名必须先选备份文件夹」的弹窗被绕过）。在读取处就钳进定义域。
+        OperationModeIndex = System.Math.Clamp((int)_model.OperationMode, (int)OperationMode.Copy, (int)OperationMode.Rename);
+        ConflictIndex = System.Math.Clamp((int)_model.ConflictStrategy, (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
         // P1-4：结果集合变化时同步空态/列表可见性
         Results.CollectionChanged += (_, __) => UpdateResultVisibility();
         UpdateResultVisibility();
@@ -64,6 +68,20 @@ public partial class OrganizeViewModel : ObservableObject
     [ObservableProperty] private int _operationModeIndex;
 
     [ObservableProperty] private int _conflictIndex;
+
+    /// <summary>
+    /// 钳制后的「操作模式」。凡是要把它交给内核、或拿它与枚举做比较的地方都必须走这里，
+    /// 而不是直接用 <see cref="OperationModeIndex"/>：后者是 ComboBox 的双向绑定值，
+    /// 控件在「无匹配项」时会回写 -1，而 <c>(OperationMode)(-1)</c> 既不是 Copy 也不是 Rename，
+    /// 会让 <c>== OperationMode.Rename</c> 形式的判断静默失效（备份文件夹弹窗被绕过）。
+    /// 只钳「赋值处」不够：后续的比较与写回仍会用到原值，故所有读取处统一走本属性。
+    /// </summary>
+    private OperationMode SelectedMode =>
+        (OperationMode)System.Math.Clamp(OperationModeIndex, (int)OperationMode.Copy, (int)OperationMode.Rename);
+
+    /// <summary>钳制后的「冲突处理策略」：同 <see cref="SelectedMode"/>，越界值一律钳回枚举定义域。</summary>
+    private ConflictStrategy SelectedConflict =>
+        (ConflictStrategy)System.Math.Clamp(ConflictIndex, (int)ConflictStrategy.AutoRename, (int)ConflictStrategy.Overwrite);
 
     [ObservableProperty] private bool _dryRun;
 
@@ -167,6 +185,25 @@ public partial class OrganizeViewModel : ObservableObject
         OnPropertyChanged(nameof(StatusLineVisibility)); // D-2.6：终态收起进度区状态行，避免与 InfoBar 同句重复
     }
 
+    /// <summary>
+    /// 终态提示的统一出口：同时写常驻状态行（<see cref="StatusText"/>）与终态横幅（<see cref="StatusBarMessage"/>）。
+    /// </summary>
+    /// <remarks>
+    /// <b>必须显式写 StatusBarMessage，不能只依赖 <see cref="OnStatusBarOpenChanged"/> 的快照。</b>
+    /// <c>[ObservableProperty]</c> 生成的 setter 带相等性判断：若横幅此刻已经开着
+    /// （例如上一轮「整理完成」的成功横幅还没关，或保护闩拦截发生在成功终态之后），
+    /// 末尾那句 <c>StatusBarOpen = true</c> 就是 no-op → 钩子不触发 → 横幅继续显示「整理完成」，
+    /// 而承载真正提示的状态行又被 <see cref="StatusLineVisibility"/> 折叠 → 提示在 UI 上完全不可见
+    /// （P33 谎报，且正是本轮要清零的「配置静默丢失」：用户看到成功横幅，配置却没落盘）。
+    /// </remarks>
+    private void ShowTerminalStatus(string message, Microsoft.UI.Xaml.Controls.InfoBarSeverity severity)
+    {
+        StatusText = message;
+        StatusSeverity = severity;
+        StatusBarMessage = message; // 显式刷新横幅文案：不依赖 StatusBarOpen 的翻转
+        StatusBarOpen = true;       // 已开着时这一句是 no-op，但文案上面已经写进去了
+    }
+
     private void UpdateResultVisibility()
     {
         bool has = Results.Count > 0;
@@ -187,7 +224,7 @@ public partial class OrganizeViewModel : ObservableObject
             return;
         }
 
-        if (OperationModeIndex != (int)OperationMode.Rename &&
+        if (SelectedMode != OperationMode.Rename &&
             (string.IsNullOrWhiteSpace(OutputFolder) || !Directory.Exists(OutputFolder)))
         {
             StatusText = "请选择有效输出文件夹（重命名模式可留空）。";
@@ -196,7 +233,7 @@ public partial class OrganizeViewModel : ObservableObject
 
         // P0-3：输出目录不得等于源目录、也不得位于源目录树内。否则递归扫描会把上一轮
         // 生成的产物再次当作输入（其路径不在续传索引中），无 AI 回退命名场景下副本逐轮线性累积。
-        if (OperationModeIndex != (int)OperationMode.Rename && IsInsideTree(OutputFolder, SourceFolder))
+        if (SelectedMode != OperationMode.Rename && IsInsideTree(OutputFolder, SourceFolder))
         {
             StatusText = "已取消：输出文件夹不能与源文件夹相同或位于源文件夹内部——" +
                          "重复运行时上一轮生成的文件会被再次当作输入，造成重复副本逐轮累积。" +
@@ -208,7 +245,7 @@ public partial class OrganizeViewModel : ObservableObject
         }
 
         // 重命名模式 + 实际执行：必须先选择备份文件夹，未选择则取消（不动任何文件）
-        if ((OperationMode)OperationModeIndex == OperationMode.Rename && !DryRun)
+        if (SelectedMode == OperationMode.Rename && !DryRun)
         {
             if (string.IsNullOrWhiteSpace(BackupFolder))
             {
@@ -406,10 +443,9 @@ public partial class OrganizeViewModel : ObservableObject
             else
             {
                 // 兜底：暂停确实没生效。明确告知并引导改用「取消」，避免用户以为已暂停而离开。
-                // （设置 StatusText 后再打开 StatusBarOpen：OnStatusBarOpenChanged 会快照文案到横幅）
-                StatusText = "当前阶段（扫描文件 / 加载索引）暂不支持暂停，请稍候或点击「取消」。";
-                StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
-                StatusBarOpen = true;
+                // （走 ShowTerminalStatus：横幅可能已开着，只设 StatusText 再置 StatusBarOpen 不会刷新横幅文案）
+                ShowTerminalStatus("当前阶段（扫描文件 / 加载索引）暂不支持暂停，请稍候或点击「取消」。",
+                                   Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
             }
         }
     }
@@ -467,10 +503,10 @@ public partial class OrganizeViewModel : ObservableObject
 
         var backup = settings.LastCorruptedBackupPath;
         var where = string.IsNullOrEmpty(backup) ? "" : "（已备份到 " + backup + "）";
-        StatusText = "配置文件读取失败" + where +
-                     "，为避免覆盖，本次未自动保存；请在「设置」页检查文件或重新配置。";
-        StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error;
-        StatusBarOpen = true;
+        // 走 ShowTerminalStatus：横幅可能还开着上一轮的终态文案（同值赋值不触发钩子 → 提示不可见）
+        ShowTerminalStatus("配置文件读取失败" + where +
+                           "，为避免覆盖，本次未自动保存；请在「设置」页检查文件或重新配置。",
+                           Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error);
         AppendLog("配置文件读取失败" + where +
                   "，为避免覆盖原文件，整理结果对应的配置本次未自动写入磁盘。");
     }
@@ -492,9 +528,9 @@ public partial class OrganizeViewModel : ObservableObject
         {
             SourceFolder = SourceFolder,
             OutputFolder = OutputFolder,
-            Mode = (OperationMode)OperationModeIndex,
+            Mode = SelectedMode,
             NamingTemplate = NamingTemplate,
-            Conflict = (ConflictStrategy)ConflictIndex,
+            Conflict = SelectedConflict,
             DryRun = DryRun,
             AiProvider = provider,
             AiApiKey = key,
@@ -519,12 +555,12 @@ public partial class OrganizeViewModel : ObservableObject
             var reason = "配置未保存：配置文件读取失败" + where +
                          "，为避免覆盖原文件本次未自动写入；请在「设置」页确认后保存。";
             AppendLog(reason);
-            // P2-2：拦截生效时只写日志不够 —— 用户此刻就在整理页，而横幅多半还停在「任务结束」的
-            // 终态文案上，很容易漏看「配置其实没保存」。同步把状态栏切到 Warning 并打开（先设文案、
-            // 再开 StatusBarOpen：OnStatusBarOpenChanged 会快照文案到横幅）。
-            StatusText = reason;
-            StatusSeverity = Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning;
-            StatusBarOpen = true;
+            // P2-2 / P0-1：拦截生效时只写日志不够 —— 用户此刻就在整理页，而横幅多半还停在
+            // 「整理完成」的成功文案上，很容易漏看「配置其实没保存」。
+            // 上一版这里只做「先设 StatusText 再置 StatusBarOpen=true」，但此刻 StatusBarOpen 已是 true，
+            // 同值赋值不触发 OnStatusBarOpenChanged → 横幅文案不刷新 → 提示在 UI 上完全不可见。
+            // 改走 ShowTerminalStatus，显式写 StatusBarMessage，不再依赖横幅的翻转。
+            ShowTerminalStatus(reason, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
             // P2-2：基线对齐原先写在 return 之后，被闩拦截时会被整段跳过 —— 下一次导航进整理页时
             // SyncProviderFromDisk 会把「当前值 != 陈旧基线」误判成「用户手动改过」而拒绝同步磁盘值。
             // 挪到 return 之前：本次未落盘，但仍把当前值视为基线，避免留下永久性误判。
@@ -541,8 +577,9 @@ public partial class OrganizeViewModel : ObservableObject
         _model.DryRun = DryRun;
         _model.UseExifDate = UseExifDate;
         _model.AiProvider = (AiProvider)AiProviderIndex;
-        _model.OperationMode = (OperationMode)OperationModeIndex;
-        _model.ConflictStrategy = (ConflictStrategy)ConflictIndex;
+        // 写回同样用钳制后的值：否则越界索引会被固化进 settings.json，成为持久非法值
+        _model.OperationMode = SelectedMode;
+        _model.ConflictStrategy = SelectedConflict;
         await _settings.SaveAsync(_model);
         // 当次选择已落盘 → 与磁盘重新对齐，之后的「设置页改引擎」才应同步进整理页
         _syncedProviderIndex = AiProviderIndex;
