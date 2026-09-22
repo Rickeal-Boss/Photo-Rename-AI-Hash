@@ -706,21 +706,35 @@ public static class ImageAnalysisHelper
     /// <summary>
     /// 截断响应体用于异常文案：<b>先截断再脱敏</b>（顺序不可反，否则正则要扫全量响应体）。
     /// 脱敏是必须的（D-5）：企业代理的错误页模板（如 Squid）会回显完整请求 URL（含 ?key=），
-    /// 主流网关也可能在错误文案里回显 Key 片段。异常文案虽不落盘，但用户截图外发即泄露。
+    /// 主流网关也可能在错误文案里回显 Key 片段。
+    /// <b>异常文案会落盘</b>（第十三轮订正，原注释写「虽不落盘」是错的）：经 <c>RenameLogEntry.Message</c>
+    /// → <c>_batchFailures</c> → <c>organize_failures_*.csv</c>，并会写进结果列表与 <c>crash.log</c>，
+    /// 并非只存在于内存；此外用户截图外发亦泄露。故脱敏必须按「会落盘」的严格口径，不能按「只在内存」放宽。
     /// </summary>
     private static string Snippet(string t)
     {
         if (string.IsNullOrEmpty(t)) return "";
-        var s = t.Length > 500 ? t.Substring(0, 500) : t;
+        // 顺序（第十三轮订正）：【先脱敏，再安全截断】。
+        // 旧实现是「先 Substring(0, 500)，再对这 500 字符脱敏」，有两个彼此独立的缺陷：
+        //   ① 截断点会把密钥切成两半，剩下的片段短于规则下限 → 规则不命中 → 片段原样留在文案里；
+        //   ② Substring 按 UTF-16 码元切，可能切断代理对 → 落盘被替换成 U+FFFD（乱码方块）。
+        // 改成先对完整文本脱敏、再安全截断，两个缺陷一并消除。
+        // 成本：5 条正则要扫完整响应体。Snippet 只在异常路径调用（不在热路径），可接受。
+        // 成本控制：先按 MaxCodeScanLength 取有界窗口（与响应体扫描同口径），
+        // 不为脱敏去扫一个几 MB 的响应体。
+        var s = t.Length > MaxCodeScanLength ? t.Substring(0, MaxCodeScanLength) : t;
 
-        // 顺序不可反：先截断（见上），再对这 500 字符脱敏
-        s = Regex.Replace(s, @"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", "$1***");
+        // 令牌就是「从标记词到下一个空白为止的全部字符」——用 \S 而非固定字符集，
+        // 一次性关闭「字符集漏一个字符 → 整条规则不命中 → 明文回显」这一整类缺陷
+        // （第十二轮只给裸 Key 那条补了 +/=，漏了 bearer 与 api key 这两条）。
+        s = Regex.Replace(s, @"(?i)(bearer\s+)\S{8,}", "$1***");
         // P1-4 缺口 1：分隔符必须允许「空格」——「API key: xxx」「Access Token: xxx」带空格是英文文案里
         // 最常见的写法，原 `api[_-]?key` 只认 `_`/`-`/无分隔，导致该规则完全漏网（当时只剩四家前缀兜底）。
-        s = Regex.Replace(s, @"(?i)((?:api[\s_\-]?key|apikey|access[\s_\-]?token|secret)\s*[:=]\s*""?)[A-Za-z0-9._\-]{8,}", "$1***");
+        s = Regex.Replace(s, @"(?i)((?:api[\s_\-]?key|apikey|access[\s_\-]?token|secret)\s*[:=]\s*""?)\S{8,}", "$1***");
         // 「&amp;」是 HTML 转义的「&」：企业代理的错误页模板（Squid 等）会把查询串转义后回显，
         // 只认裸 & 会让 ?key= 的脱敏整条失效（漏一圈等于没脱敏）。
-        s = Regex.Replace(s, @"(?i)([?&](?:amp;)?(?:key|api[_-]?key|access_token|token)=)[^&\s""]+", "$1***");
+        // 参数名白名单补 x-api-key / subscription-key（Azure APIM 的官方形态）/ api_key / access-token。
+        s = Regex.Replace(s, @"(?i)([?&](?:amp;)?(?:key|api[_-]?key|x[_-]api[_-]?key|subscription[_-]?key|access[_-]?token|access_token|token)=)[^&\s""]+", "$1***");
 
         // 以下两条补「无关键字邻接的裸 Key 回显」（如 "invalid key sk-proj-xxxx"、路径内嵌 /v1/sk-xxx）：
         // 上面三条都依赖关键字（bearer / apikey / ?key=）邻接，厂商直接把 Key 拼进错误文案时全部漏网。
@@ -740,7 +754,10 @@ public static class ImageAnalysisHelper
         // 同样把 \b 换成负向后瞻（中文语境下 Key 前邻是汉字，\b 不成立 → 漏网）。
         // 字符集不含 + / =：Google 的 Key 是 [A-Za-z0-9_-]，没有标准 base64 形态，不扩大字符集。
         s = Regex.Replace(s, @"((?<![A-Za-z0-9])AIza)[A-Za-z0-9._\-]{16,}", "$1***");
-        return s;
+
+        // 脱敏【之后】才安全截断到 500：既收住长度（否则整份响应体会被塞进异常文案与日志），
+        // 也不在 UTF-16 代理对中间切断（TextUtil.Safe）。
+        return TextUtil.Safe(s, 500);
     }
 
     /// <summary>

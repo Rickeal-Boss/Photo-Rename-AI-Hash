@@ -2080,10 +2080,10 @@ public sealed class OrganizeService : IOrganizeService
         // A-06：对最终基名整体截断，避免多字段模板叠加目录深度后触发 PathTooLongException。
         // 抽成局部函数复用：下方「净化后为空 → 回退默认模板」这条分支也必须过同一截断，
         // 否则 MaxBaseNameLength 的 MAX_PATH 收口会在新旁路上失效（模板写成 "../" 且源文件名主干较长时）。
-        // P2-3：截断走 TruncateSafe（不在 UTF-16 代理对中间切断），TrimEnd 保留以防截出非法结尾字符。
+        // P2-3：截断走 TextUtil.Safe（不在 UTF-16 代理对中间切断），TrimEnd 保留以防截出非法结尾字符。
         string Truncate(string s)
             => s.Length > MaxBaseNameLength
-                ? TruncateSafe(s, MaxBaseNameLength).TrimEnd('_', ' ', '.')
+                ? TextUtil.Safe(s, MaxBaseNameLength).TrimEnd('_', ' ', '.')
                 : s;
 
         var built = Truncate(Build(template));
@@ -2354,23 +2354,10 @@ public sealed class OrganizeService : IOrganizeService
 
     private static readonly char[] Invalid = Path.GetInvalidFileNameChars();
 
-    /// <summary>
-    /// 按 UTF-16 码元上限截断，且<b>不切断代理对</b>（P2-3）。
-    /// <see cref="string.Length"/> 是 UTF-16 码元数、<c>Substring</c> 按码元切：截断点若落在 BMP 外字符
-    /// （emoji / 部分生僻字）的代理对中间，会产出含<b>孤立代理项</b>的字符串（非法 Unicode），
-    /// 随后进入 <c>Path.Combine</c> / <c>File.Move</c>（文件名非法或显示乱码）。
-    /// 供 <see cref="Sanitize"/> 与 <see cref="BuildName"/> 内的局部函数 <c>Truncate</c> 共用，
-    /// 避免两处各写一份再次漂移。
-    /// </summary>
-    private static string TruncateSafe(string s, int maxLength)
-    {
-        if (maxLength <= 0) return "";
-        if (s.Length <= maxLength) return s;
-        int len = maxLength;
-        // 截断点的最后一个码元是「高位代理」⇒ 它后面的低位代理已被切掉，回退一位保住整个代理对。
-        if (char.IsHighSurrogate(s[len - 1])) len--;
-        return s.Substring(0, len);
-    }
+    // 安全截断已提升为共享工具 Helpers/TextUtil.Safe（第十三轮）：ImageAnalysisHelper.Snippet 的
+    // 截断点同样需要它（那里既要防代理对被切断，也要防把密钥切成两半）。此处不再保留私有实现，
+    // 避免两份实现漂移——本项目已因「同一逻辑两份实现」栽过（P64 家族）。
+    // 语义见 TextUtil.Safe：按 UTF-16 码元上限截断，且不切断代理对。
 
     private static string Sanitize(string s)
     {
@@ -2384,8 +2371,8 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         var t = sb.ToString();
-        // P2-3：截断改走 TruncateSafe（原为 t.Substring(0, 40)），避免切出孤立代理项。
-        return TruncateSafe(t, 40);
+        // P2-3：截断改走 TextUtil.Safe（原为 t.Substring(0, 40)），避免切出孤立代理项。
+        return TextUtil.Safe(t, 40);
     }
 
     private static void Categorize(OrganizeReport report, RenameLogEntry e)
