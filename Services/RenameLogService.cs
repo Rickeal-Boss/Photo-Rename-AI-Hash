@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;          // Volatile / Interlocked：跨线程累加并读取写盘失败计数
 using System.Threading.Tasks;
+using PhotoRenameAIHash.Helpers;
 using PhotoRenameAIHash.Models;
 
 namespace PhotoRenameAIHash.Services;
@@ -49,19 +50,19 @@ public sealed class RenameLogService
 
             sb.AppendLine(string.Join(",", new[]
             {
-                Csv(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-                CsvText(entry.OriginalName), // 文件名可由外部控制（下载/共享目录），防公式注入
-                CsvText(entry.NewName),
-                Csv(entry.Operation),
-                Csv(entry.Status),
-                Csv(entry.Md5),
-                Csv(entry.OriginalPath),
-                Csv(entry.NewPath),
-                CsvText(entry.Message), // 可能含模型返回内容或服务端回显，防公式注入
-                // 必须保持「最后一列」（列位 <see cref="FingerprintColumnIndex"/>）：
-                // LoadRenameLogAsync 在旧表头（无该列）场景下按这个固定列位兜底读取，
-                // 将来若新增列请追加在它之后，不要插到它前面。
-                Csv(entry.Fingerprint), // Csv() 统一加引号，指纹含 '|' / ',' 也能正确往返
+                TextUtil.Csv(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                TextUtil.CsvText(entry.OriginalName), // 文件名可由外部控制（下载/共享目录），防公式注入
+                TextUtil.CsvText(entry.NewName),
+                TextUtil.Csv(entry.Operation),
+                TextUtil.Csv(entry.Status),
+                TextUtil.Csv(entry.Md5),
+                TextUtil.Csv(entry.OriginalPath),
+                TextUtil.Csv(entry.NewPath),
+                TextUtil.CsvText(entry.Message), // 可能含模型返回内容或服务端回显，防公式注入
+                // 第十四轮 R6-5 订正：真正的不变量是「指纹列位固定（0 基 9，见 <see cref="FingerprintColumnIndex"/>）」，
+                // 不是「必须是最后一列」——将来新增列追加在它之后时，IndexOf(header,"Fingerprint") 与
+                // 固定列位兜底都仍然成立；旧表头（无该列）场景按固定列位兜底读取。
+                TextUtil.Csv(entry.Fingerprint), // Csv() 统一加引号，指纹含 '|' / ',' 也能正确往返
             }));
 
             // P2-4：UTF-8 带 BOM——新文件落盘时写入 BOM（Excel 直接打开中文不乱码），
@@ -134,7 +135,13 @@ public sealed class RenameLogService
                 try
                 {
                     if (!File.Exists(csv)) continue;
-                    var lines = File.ReadAllLines(csv);
+                    // 第十四轮 R6-4：严格 UTF-8 解码（无效字节序列即抛）。本日志由本应用以 UTF-8(BOM) 写出；
+                    // 若被用户用 Excel 以系统 ANSI(GBK) 重存，中文状态字（「错误」「跳过」）会变乱码，
+                    // 下方排除式判据 Contains("错误")/Contains("跳过") 双双失配 → 这些行通过指纹闸
+                    // 被计入「已完成」→ 永久静默跳过——与历史 P0「跳过(已存在) 污染续传索引」同一后果，
+                    // 只是入口换成了编码损坏（fail-open，方向反了）。解码失败抛出 → 被本文件层 catch 接住
+                    // → 该文件整份不入索引（宁可重做，不静默跳过）。BOM 探测保持默认开启，正常文件无感。
+                    var lines = File.ReadAllLines(csv, StrictUtf8);
 
                     // K-P2-2：文件<b>存在</b>但零行（0 字节 / 只有 BOM）⇒ 无表头可用。
                     // 此前直接 continue（静默），用户拿不到任何提示、续传索引恒为空、每次全量重做。
@@ -249,6 +256,14 @@ public sealed class RenameLogService
     }
 
     private const string LogFileName = "rename_log.csv";
+
+    /// <summary>
+    /// 读侧专用解码器：无效 UTF-8 字节序列即抛（写侧 <c>UTF8Encoding(true)</c> 的对偶）。
+    /// 见 <see cref="LoadRenameLogAsync"/> 内 ReadAllLines 处的说明（第十四轮 R6-4）：
+    /// 被非 UTF-8 编码重存的日志整份弃用，绝不把乱码状态字当有效判据。
+    /// </summary>
+    private static readonly Encoding StrictUtf8 =
+        new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     /// <summary>
     /// <c>Operation</c> 列中「原地重命名」的字面值——<b>与 <c>OrganizeService.OpName</c> 共用同一常量</b>，
@@ -377,30 +392,10 @@ public sealed class RenameLogService
         return result.ToArray();
     }
 
-    /// <summary>
-    /// CSV 字段转义：引号翻倍，并把 CR / LF 折成空格。
-    /// 后者不是形式主义——Windows 文件名不可能含换行，但 <c>ex.Message</c> 可以；
-    /// 一个含换行的 Message 会把一行记录劈成两行：第一段 Status 仍在列 3、主索引不受影响，
-    /// 但若续行恰好凑够 ≥7 列且列 3 不含「错误」，会被解析成一条假的「已完成」记录，
-    /// 导致该文件被永久跳过。概率极低但非零，且与「跳过(已存在)污染续传索引」同源，1 行堵掉。
-    /// </summary>
-    private static string Csv(string s)
-        => "\"" + (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
-
-    /// <summary>
-    /// CSV 公式注入防护（第十三轮 SEC-03）：Excel / LibreOffice 打开 CSV 时，单元格以
-    /// <c>= + - @</c> 开头会被当作【公式】求值，<b>引号包裹不能阻止该行为</b>。
-    /// 做法是在这些字符前补一个单引号 <c>'</c>（Excel 会把它当文本显示）。
-    /// </summary>
-    /// <remarks>
-    /// <b>只能用于不被续传判据消费的列</b>：<c>OriginalPath</c> / <c>NewPath</c> 会被
-    /// <see cref="CompletedLog.DoneBySource"/> / <see cref="CompletedLog.DoneByNewPath"/> /
-    /// <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/> 做<b>精确字符串比较</b>，
-    /// 加前缀会让键与磁盘实况不符 → 「阻止文件名被逐轮叠加（不可逆）」的保护失效，
-    /// 比本缺陷严重得多。故本方法只用于 OriginalName / NewName / Message。
-    /// </remarks>
-    private static string CsvText(string s)
-        => Csv((s is { Length: > 0 } && s[0] is '=' or '+' or '-' or '@') ? "'" + s : s);
+    // 第十四轮 R6-2（P79 收口）：Csv / CsvText 提升为共享工具 Helpers/TextUtil——本文件与
+    // OrganizeViewModel 此前各持一份逐字相同的私有实现，安全规则双份实现下「修一半」的代价
+    // 是某条导出路径整个失去防护。前导空白判定（R2-3）与「路径列不加前缀」的取舍说明见
+    // TextUtil.CsvText；「不把 ' 前缀的 NewName 用于匹配」的埋雷提示见 CompletedLog.DoneByName。
 }
 
 /// <summary>已完成文件索引：用于启动时断点续传跳过。键忽略大小写。</summary>

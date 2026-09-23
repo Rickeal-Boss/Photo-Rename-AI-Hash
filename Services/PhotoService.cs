@@ -170,8 +170,10 @@ public sealed class PhotoService : IPhotoService
             // 全限定 System.IO.Directory：本文件同时 using 了 MetadataExtractor，
             // 后者也有 Directory 类型（EXIF 目录项），裸写会触发 CS0104 歧义
             System.IO.Directory.CreateDirectory(dir);
+            // 第十四轮 R5-1：与 App.WriteCrashLog 同批原子修复——诊断日志时间戳补 InvariantCulture
+            //（非公历区域年份错位），ab51705 的「17 处全部补齐」漏掉的另一处。
             File.AppendAllText(Path.Combine(dir, "scan.log"),
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+                $"[{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)}] {message}{Environment.NewLine}");
         }
         catch
         {

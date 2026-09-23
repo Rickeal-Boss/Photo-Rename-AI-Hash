@@ -121,7 +121,7 @@ public sealed class SettingsService : ISettingsService
                 settings.NvidiaApiKey = Unprotect(settings.NvidiaApiKey, out var nvidiaFailed);
                 settings.CustomApiKey = Unprotect(settings.CustomApiKey, out var customFailed);
                 LastLoadHadUndecryptableKeys = zhipuFailed || qwenFailed || nvidiaFailed || customFailed;
-                return settings;
+                return Normalize(settings);
             }
         }
         catch (Exception ex)
@@ -141,7 +141,7 @@ public sealed class SettingsService : ISettingsService
                 salvaged.NvidiaApiKey = Unprotect(salvaged.NvidiaApiKey, out var nf);
                 salvaged.CustomApiKey = Unprotect(salvaged.CustomApiKey, out var cf);
                 LastLoadHadUndecryptableKeys = zf || qf || nf || cf;
-                return salvaged;
+                return Normalize(salvaged);
             }
             catch
             {
@@ -150,6 +150,26 @@ public sealed class SettingsService : ISettingsService
         }
 
         return new AppSettings();
+    }
+
+    /// <summary>
+    /// 读回后的值域归一（第十四轮 R6-9 / R5-5）。此前只有抢救路径（TrySalvageFields）做了枚举归一，
+    /// 而主路径 JsonSerializer.Deserialize 对越界枚举数字同样直接 cast 不抛（手改 settings.json 写
+    /// <c>"Theme": 99</c> 即可达）——归一必须覆盖两个入口，故统一收到这里、Load 的各 return 共用，
+    /// 不在两处各写一份同构规则（P79）。口径与 TrySalvageFields 一致：越界落「破坏面最小」档
+    /// （System / Copy / AutoRename / None），不钳到枚举上界（Rename / Overwrite / Nvidia 付费引擎）。
+    /// </summary>
+    private static AppSettings Normalize(AppSettings s)
+    {
+        if (!Enum.IsDefined(typeof(AppTheme), s.Theme)) s.Theme = AppTheme.System;
+        if (!Enum.IsDefined(typeof(OperationMode), s.OperationMode)) s.OperationMode = OperationMode.Copy;
+        if (!Enum.IsDefined(typeof(ConflictStrategy), s.ConflictStrategy)) s.ConflictStrategy = ConflictStrategy.AutoRename;
+        if (!Enum.IsDefined(typeof(AiProvider), s.AiProvider)) s.AiProvider = AiProvider.None;
+        // R5-5（NUM-05 收口）：与保存侧 SettingsViewModel 的 Math.Clamp(...,0,600) 同口径。
+        // 越界值（手改 100000）会让 RateGate(100000, 60s) 闸门形同关闭——用户以为已限速、
+        // 实际完全不限，且设置页 NumberBox（Maximum=600）显示越界值（UI 谎报）。
+        s.CustomApiRpmLimit = Math.Clamp(s.CustomApiRpmLimit, 0, 600);
+        return s;
     }
 
     /// <summary>

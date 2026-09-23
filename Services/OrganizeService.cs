@@ -64,6 +64,15 @@ public sealed class OrganizeService : IOrganizeService
     public bool IsPaused => _pts?.IsPaused == true || _pendingPause;
 
     /// <summary>
+    /// 当前是否有批次处于活跃期（RunAsync / ArchiveByDateAsync 入口到 EndBatch）。
+    /// 第十四轮 R3-2：供 UI 区分「批次已结束但 VM 尚在收尾」与「批次仍在准备阶段」——
+    /// 两者 VM 的 IsBusy 都为 true（复位被刻意推迟到所有收尾 await 之后），但只有后者
+    /// 值得提示「暂不支持暂停」，前者应静默忽略（否则会用「当前阶段是扫描」的谎报文案
+    /// 覆盖刚显示的成功/出错横幅）。
+    /// </summary>
+    public bool IsBatchActive => _batchActive;
+
+    /// <summary>
     /// 协作式暂停：挂起处理循环，保留已扫描的工作队列与状态，可随时继续（区别于 Cancel 的硬取消）。
     /// 令牌尚未创建时（批次未开始、或已开始但仍在校验 / 构造 AI 阶段）先把请求记到
     /// <see cref="_pendingPause"/>，由创建点补应用，避免这一段窗口内点暂停被静默丢弃。
@@ -458,9 +467,15 @@ public sealed class OrganizeService : IOrganizeService
                     // <b>不能无脑给所有逐文件级都补路径</b>：那会让「文案不含文件名的整批级根因」
                     // （400 Arrearage 欠费等）也变得人人不同 —— 正好把这第二条闸的作用完全抵消掉。
                     string fileName = Path.GetFileName(f.Path);
+                    // 第十四轮 R4-4（R1-9 同条）：fileName 为空串时 Replace 会抛 ArgumentException
+                    //（.NET 对空 oldValue），Contains("") 恒为 true 会拼出无意义的 " @"。理论不可达
+                    //（f.Path 来自文件枚举恒有文件名），但该异常会在 catch 块内部抛出、绕过全部分级
+                    // 直穿 RunAsync（VM 只看到「出错：…」），一行守卫消掉这个硬哨兵；空名时 cause
+                    // 原样保留（跨文件相同 → 交给第二条闸，安全方向）。
+                    bool hasFileName = fileName.Length > 0;
                     string cause = ex.IsBatchLevel
-                        ? ex.Message.Replace(fileName, "{file}")
-                        : (ex.Message.Contains(fileName) ? ex.Message + " @" + f.Path : ex.Message);
+                        ? (hasFileName ? ex.Message.Replace(fileName, "{file}") : ex.Message)
+                        : (hasFileName && ex.Message.Contains(fileName) ? ex.Message + " @" + f.Path : ex.Message);
                     if (cause == lastPermanentCause) sameCauseCount++;
                     else { lastPermanentCause = cause; sameCauseCount = 1; }
 
@@ -2052,7 +2067,7 @@ public sealed class OrganizeService : IOrganizeService
         }
 
         string Ai(string v) => string.IsNullOrWhiteSpace(v)
-            ? (dryRun ? "unknown" + index.ToString("D4") + NextPlaceSuffix() : "unknown")
+            ? (dryRun ? "unknown" + index.ToString("D4", CultureInfo.InvariantCulture) + NextPlaceSuffix() : "unknown")
             : San(v);
 
         // 占位计数在 Build 调用前重置——Build 可能走两次（正常一次 + 净化后为空回退默认模板那次），
@@ -2068,7 +2083,9 @@ public sealed class OrganizeService : IOrganizeService
             .Replace("{mm}", when.ToString("mm", CultureInfo.InvariantCulture))
             .Replace("{ss}", when.ToString("ss", CultureInfo.InvariantCulture))
             .Replace("{date}", when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
-            .Replace("{n}", index.ToString("D4"))
+            // 第十四轮 R5-3：D4 对非负 int 在所有区域产出相同拉丁数字（实害≈0），补 InvariantCulture
+            // 只为与同函数内 7 处日期占位符统一口径，避免下一轮审查把它当「漏修」重复排查。
+            .Replace("{n}", index.ToString("D4", CultureInfo.InvariantCulture))
             .Replace("{name}", San(Path.GetFileNameWithoutExtension(f.Name)))
             .Replace("{category}", Ai(f.Category), StringComparison.OrdinalIgnoreCase)
             .Replace("{scene}", Ai(f.Scene), StringComparison.OrdinalIgnoreCase)

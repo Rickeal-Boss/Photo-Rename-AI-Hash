@@ -99,8 +99,11 @@ public partial class App : Application
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
+            // 第十四轮 R5-2（与 R5-1 同批）：诊断日志时间戳补 InvariantCulture——字符串插值的自定义格式
+            // 走 CurrentCulture，非公历区域（th-TH 泰历等）会把 2026 写成 2569，crash.log 的时间
+            // 与用户描述无法对时。ab51705 补了 17 处、漏掉 crash.log 与 scan.log 这 2 处（R1-7）。
             File.AppendAllText(path,
-                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {kind}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
+                $"[{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)}] {kind}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
         }
         catch
         {

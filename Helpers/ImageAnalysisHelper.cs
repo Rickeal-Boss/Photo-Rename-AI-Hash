@@ -290,9 +290,11 @@ public static class ImageAnalysisHelper
                 isBatchLevel: true);
 
         // P1-1 防御性预校验：端点 URL 与 Key 的合法性在进入重试循环之前就拦掉。
-        // 只靠 CreateRequest 的 try/catch 是不够的：框架对 Authorization 头的 token 校验时机
-        // 在不同 .NET 版本并不一致（有的版本在构造 AuthenticationHeaderValue 时就抛，
-        // 有的版本要等 SendAsync 才抛），后者会被下面的 catch 当成「网络 / 连通性」瞬时故障去重试。
+        // 只靠 CreateRequest 的 try/catch 是不够的：Authorization 头的 token 格式校验发生在
+        // SendAsync 内部（HttpClientHandler 序列化请求头时抛 FormatException；构造
+        // AuthenticationHeaderValue 本身对任意非空 scheme/token 都不校验内容、不抛）——
+        // 若不预校验，该异常会被下面的 catch 当成「网络 / 连通性」瞬时故障去重试
+        //（第十四轮 R2-4 订正：原注释写「有的版本在构造 AuthenticationHeaderValue 时就抛」不成立）。
         // 这两条判据很宽松（不可能误伤合法 Key），但足以拦住最常见的「整行粘贴」类配置错误，
         // 且不消耗限流名额——配置错误不该占用闸门。
         // 判据必须落到「解析结果」上：`out _` 会丢弃 Uri，若某 .NET 版本对 "https://"
@@ -329,7 +331,9 @@ public static class ImageAnalysisHelper
             // HttpRequestMessage 单次使用，每次尝试都必须重新构造。
             // 构造期的配置类异常（端点 URL 非法 / Key 含非法字符）已由 CreateRequest 归入
             // AiPermanentException(isBatchLevel: true)：此前这三行在 try 之外，UriFormatException /
-            // ArgumentException（消息可能回显 Key 片段）会以框架异常逃逸，绕过既有的异常分类体系（P1-1）。
+            // ArgumentException 会以框架异常逃逸，绕过既有的异常分类体系（P1-1）。
+            // （第十四轮 R2-4 订正：这些框架异常的消息<b>不会</b>回显 Key 片段——
+            // Key 只进请求头、不进异常消息，此前注释失实。）
             using var req = CreateRequest(endpoint, apiKey, jsonBody);
 
             HttpResponseMessage resp;
@@ -454,11 +458,18 @@ public static class ImageAnalysisHelper
                     // 不能依赖 AiPermanentException 的默认 true —— 那会把逐文件的 413/415
                     // 也纳入「连续 3 次熔断中止整批」（P26 三层口径）。
                     var batchLevel4xx = IsBatchLevel4xx(code, respText);
-                    // 第十三轮 D1：<b>逐文件级</b>的 4xx（目前只有 413/415）文案必须自带文件名。
-                    // 编排层 RunAsync 用「文案里出现文件名才补 @{路径}」来保证 cause 与文件一一对应；
-                    // 文案不含文件名 → cause 跨文件逐字节相同 → 连续 3 个文件即触发第二条熔断闸
-                    // 中止整批，把 P47「413/415 改逐文件级」的修复整体抵消（分级改对了、cause 没改）。
-                    var fileHint = (!batchLevel4xx && !string.IsNullOrEmpty(imagePath))
+                    // 第十三轮 D1：413（载荷过大）/ 415（媒体类型不被接受）这类<b>确定只针对当前文件</b>的
+                    // 4xx，文案必须自带文件名——编排层 RunAsync 用「文案里出现文件名才补 @{路径}」来保证
+                    // cause 与文件一一对应；文案不含文件名 → cause 跨文件逐字节相同 → 连续 3 个文件即触发
+                    // 第二条熔断闸中止整批，把 P47「413/415 改逐文件级」的修复整体抵消（分级改对了、cause 没改）。
+                    // 第十四轮 R4-1（P0 回归修复）：注入判据<b>不能</b>用 !batchLevel4xx——IsBatchLevel4xx 对
+                    // 400/422 且业务码非 1211/1214 也返回 false（保守按逐文件级），而其中混着通义 400 Arrearage
+                    // 欠费、自建网关模型名写错这类<b>整批级根因</b>：给它们带上文件名会让 cause 人人不同 →
+                    // 第二条闸彻底失效，1000 张的目录会连发 1000 次真实请求（本应第 3 个就中止）。
+                    // 故只有 IsPerFile4xx（与 IsBatchLevel4xx 共享同一码集合，不漂移）命中的码才注入文件名，
+                    // 其余保持 cause 稳定交给第二条闸兜底——即 OrganizeService 注释里「不能无脑给所有
+                    // 逐文件级都补路径」的禁令在注入侧同样成立。
+                    var fileHint = (IsPerFile4xx(code) && !string.IsNullOrEmpty(imagePath))
                         ? $"（文件：{Path.GetFileName(imagePath)}）"
                         : "";
                     throw new AiPermanentException(
@@ -673,10 +684,21 @@ public static class ImageAnalysisHelper
     /// <b>不会走到本方法</b>；若将来有人把它们移回 4xx 分流，必须同步在本方法里按 false 处理，
     /// 否则「超时」会被读成账户/额度问题（P26 三层口径）。</para>
     /// </summary>
+    /// <summary>
+    /// <b>确定只针对当前文件</b>的 4xx 状态码集合：413（载荷过大）/ 415（媒体类型不被接受）。
+    /// 两个消费方必须保持同真同假：<see cref="IsBatchLevel4xx"/>（逐文件级分级）与本文件的
+    /// fileHint 注入（第十四轮 R4-1）。注意「不是整批级」≠「该注入文件名」——400/422 的未知业务码
+    /// 被保守判为逐文件级，但其中混着欠费 / 模型名写错这类整批根因，注入文件名会打穿编排层的
+    /// 第二条熔断闸（sameCauseCount 永不累加）。
+    /// </summary>
+    private static bool IsPerFile4xx(int code) => code == 413 || code == 415;
+
     private static bool IsBatchLevel4xx(int code, string respText)
     {
-        // 载荷过大 / 媒体类型不被接受：只针对当前文件 → 逐文件，不熔断
-        if (code == 413 || code == 415) return false;
+        // 载荷过大 / 媒体类型不被接受：只针对当前文件 → 逐文件，不熔断。
+        // 与 IsPerFile4xx 共享同一码集合：本方法的「是否逐文件级」与 fileHint 的「是否注入文件名」
+        // 必须永远同真同假，否则一侧改了另一侧就漂移（P79 家族：同一规则两份实现必然各改各的）。
+        if (IsPerFile4xx(code)) return false;
 
         // 鉴权 / 权限 / 端点不存在 / 方法不允许：配置级错误，对整批成立
         if (code == 401 || code == 403 || code == 404 || code == 405) return true;
@@ -721,7 +743,8 @@ public static class ImageAnalysisHelper
     private const int MaxCodeScanLength = 65536;
 
     /// <summary>
-    /// 截断响应体用于异常文案：<b>先截断再脱敏</b>（顺序不可反，否则正则要扫全量响应体）。
+    /// 截断响应体用于异常文案：<b>先脱敏、再安全截断</b>（第十四轮订正 R1-3：本摘要此前写「先截断再脱敏」
+    /// 与实现相反——照它回退会重新引入密钥切半与代理对切断两个缺陷，顺序不可反）。
     /// 脱敏是必须的（D-5）：企业代理的错误页模板（如 Squid）会回显完整请求 URL（含 ?key=），
     /// 主流网关也可能在错误文案里回显 Key 片段。
     /// <b>异常文案会落盘</b>（第十三轮订正，原注释写「虽不落盘」是错的）：经 <c>RenameLogEntry.Message</c>
@@ -736,7 +759,7 @@ public static class ImageAnalysisHelper
         //   ① 截断点会把密钥切成两半，剩下的片段短于规则下限 → 规则不命中 → 片段原样留在文案里；
         //   ② Substring 按 UTF-16 码元切，可能切断代理对 → 落盘被替换成 U+FFFD（乱码方块）。
         // 改成先对完整文本脱敏、再安全截断，两个缺陷一并消除。
-        // 成本：5 条正则要扫完整响应体。Snippet 只在异常路径调用（不在热路径），可接受。
+        // 成本：5 条正则扫一段 64KB 有界窗口（见下）。Snippet 只在异常路径调用（不在热路径），可接受。
         // 成本控制：先按 MaxCodeScanLength 取有界窗口（与响应体扫描同口径），
         // 不为脱敏去扫一个几 MB 的响应体。
         var s = t.Length > MaxCodeScanLength ? t.Substring(0, MaxCodeScanLength) : t;
@@ -747,7 +770,9 @@ public static class ImageAnalysisHelper
         s = Regex.Replace(s, @"(?i)(bearer\s+)\S{8,}", "$1***");
         // P1-4 缺口 1：分隔符必须允许「空格」——「API key: xxx」「Access Token: xxx」带空格是英文文案里
         // 最常见的写法，原 `api[_-]?key` 只认 `_`/`-`/无分隔，导致该规则完全漏网（当时只剩四家前缀兜底）。
-        s = Regex.Replace(s, @"(?i)((?:api[\s_\-]?key|apikey|access[\s_\-]?token|secret)\s*[:=]\s*""?)\S{8,}", "$1***");
+        // 键名允许带引号（R2-1，第十四轮补 JSON 键名形态）：{"api_key":"…"} 里 api_key 后是 `":`，
+        // 缺 `["']?` 会让整条规则对 JSON 形态不命中（网关原样回显请求体时正是这种形态）。
+        s = Regex.Replace(s, @"(?i)((?:api[\s_\-]?key|apikey|access[\s_\-]?token|secret)[""]?\s*[:=]\s*""?)\S{8,}", "$1***");
         // 「&amp;」是 HTML 转义的「&」：企业代理的错误页模板（Squid 等）会把查询串转义后回显，
         // 只认裸 & 会让 ?key= 的脱敏整条失效（漏一圈等于没脱敏）。
         // 参数名白名单补 x-api-key / subscription-key（Azure APIM 的官方形态）/ api_key / access-token。
@@ -771,6 +796,13 @@ public static class ImageAnalysisHelper
         // 同样把 \b 换成负向后瞻（中文语境下 Key 前邻是汉字，\b 不成立 → 漏网）。
         // 字符集不含 + / =：Google 的 Key 是 [A-Za-z0-9_-]，没有标准 base64 形态，不扩大字符集。
         s = Regex.Replace(s, @"((?<![A-Za-z0-9])AIza)[A-Za-z0-9._\-]{16,}", "$1***");
+
+        // R2-1（第十四轮）：智谱 Key 的结构性形态「32 位 hex + '.' + ≥16 位 token」是四个引擎中
+        // 唯一无任何文字前缀的，错误文案回显时上面几条全部漏网。用组合判据而非裸 32hex：
+        // 单独的 32 位 hex（MD5、内容哈希）不命中，必须「hex32 + '.' + 长尾」同现才命中——
+        // R2 实测 8 个正常样本 0 误伤（含 d41d8cd….jpg 这类「MD5 作文件名」形态：尾段 .jpg 不足 16 位）。
+        // 纯 hex 无分隔符的裸 Key 仍不覆盖：会误伤 MD5（SEC-01 维持 P1，需另行设计）。
+        s = Regex.Replace(s, @"(?i)((?<![A-Za-z0-9])[0-9a-f]{32}\.)[A-Za-z0-9._\-+/=]{16,}", "$1***");
 
         // 脱敏【之后】才安全截断到 500：既收住长度（否则整份响应体会被塞进异常文案与日志），
         // 也不在 UTF-16 代理对中间切断（TextUtil.Safe）。
