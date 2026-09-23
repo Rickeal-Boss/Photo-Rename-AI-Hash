@@ -59,7 +59,7 @@ public sealed class CustomImageAnalysisService : IImageAnalysisService
         // 用构造函数里建好的策略档（闸门实例进程级共享，跨图片/跨批次累计计数，限速才真的生效）。
         // CallVisionApiAsync 在密钥/网络/HTTP 异常时抛异常，不会返回 null
         var raw = await ImageAnalysisHelper.CallVisionApiAsync(_endpoint, _model, _apiKey,
-            ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl, _profile, ct, _delayAsync).ConfigureAwait(false);
+            ImageAnalysisHelper.BuildPrompt(language, _template), dataUrl, _profile, ct, _delayAsync, imagePath).ConfigureAwait(false);
 
         // 传入文件名：让「空正文」这条逐文件级永久错误的文案自带文件名，
         // 避免同因计数把它误当成整批级根因熔断整批（P26 三层口径）。

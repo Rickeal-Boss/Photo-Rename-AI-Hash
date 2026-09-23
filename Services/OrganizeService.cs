@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -831,7 +832,7 @@ public sealed class OrganizeService : IOrganizeService
                         if (ex.HasValue) when = ex.Value;
                     }
 
-                    string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy"), when.ToString("yyyy-MM-dd"));
+                    string destDir = Path.Combine(req.OutputFolder, when.ToString("yyyy", CultureInfo.InvariantCulture), when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
                     if (!req.DryRun)
                     {
                         // P2-5：建目录失败要包装成「环境级」永久错误，让归档也能早停。
@@ -2060,13 +2061,13 @@ public sealed class OrganizeService : IOrganizeService
         {
             aiPlaceIdx = 0;
             return (tpl ?? "")
-            .Replace("{yyyy}", when.ToString("yyyy"))
-            .Replace("{MM}", when.ToString("MM"))
-            .Replace("{dd}", when.ToString("dd"))
-            .Replace("{HH}", when.ToString("HH"))
-            .Replace("{mm}", when.ToString("mm"))
-            .Replace("{ss}", when.ToString("ss"))
-            .Replace("{date}", when.ToString("yyyy-MM-dd"))
+            .Replace("{yyyy}", when.ToString("yyyy", CultureInfo.InvariantCulture))
+            .Replace("{MM}", when.ToString("MM", CultureInfo.InvariantCulture))
+            .Replace("{dd}", when.ToString("dd", CultureInfo.InvariantCulture))
+            .Replace("{HH}", when.ToString("HH", CultureInfo.InvariantCulture))
+            .Replace("{mm}", when.ToString("mm", CultureInfo.InvariantCulture))
+            .Replace("{ss}", when.ToString("ss", CultureInfo.InvariantCulture))
+            .Replace("{date}", when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
             .Replace("{n}", index.ToString("D4"))
             .Replace("{name}", San(Path.GetFileNameWithoutExtension(f.Name)))
             .Replace("{category}", Ai(f.Category), StringComparison.OrdinalIgnoreCase)
@@ -2231,13 +2232,13 @@ public sealed class OrganizeService : IOrganizeService
 
         // 展开日期占位符（与 BuildName 同口径、同大小写敏感性），字面量原样保留。
         string expanded = prefix
-            .Replace("{yyyy}", when.ToString("yyyy"))
-            .Replace("{MM}", when.ToString("MM"))
-            .Replace("{dd}", when.ToString("dd"))
-            .Replace("{HH}", when.ToString("HH"))
-            .Replace("{mm}", when.ToString("mm"))
-            .Replace("{ss}", when.ToString("ss"))
-            .Replace("{date}", when.ToString("yyyy-MM-dd"));
+            .Replace("{yyyy}", when.ToString("yyyy", CultureInfo.InvariantCulture))
+            .Replace("{MM}", when.ToString("MM", CultureInfo.InvariantCulture))
+            .Replace("{dd}", when.ToString("dd", CultureInfo.InvariantCulture))
+            .Replace("{HH}", when.ToString("HH", CultureInfo.InvariantCulture))
+            .Replace("{mm}", when.ToString("mm", CultureInfo.InvariantCulture))
+            .Replace("{ss}", when.ToString("ss", CultureInfo.InvariantCulture))
+            .Replace("{date}", when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
 
         // 仍含未展开的占位符（未知占位符）→ 形态判据不可靠，放弃。
         return expanded.Contains('{') || expanded.Contains('}') ? "" : expanded;

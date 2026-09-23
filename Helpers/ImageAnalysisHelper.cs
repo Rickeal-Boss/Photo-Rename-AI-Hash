@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;              // Path.GetFileName：逐文件级 4xx 文案要带文件名（第十三轮 D1）
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -212,7 +213,10 @@ public static class ImageAnalysisHelper
     public static Task<string> CallVisionApiAsync(
         string endpoint, string model, string apiKey, string prompt, string dataUrl,
         AiProviderProfile profile, CancellationToken ct,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        // 第十三轮 D1：透传给 CallVisionApiRawAsync，让逐文件级 4xx（413/415）文案带文件名。
+        // 漏透传会让走本包装的引擎（自定义 / 通义）修不到 —— 又是一次「只修一半」。
+        string? imagePath = null)
     {
         // 配置缺失 = 整批级永久错误：模型名为空时每个文件都会以完全相同的方式失败，
         // 此前抛裸 InvalidOperationException 会被编排层判成「确定性失败」再重排队 2 次——
@@ -246,7 +250,7 @@ public static class ImageAnalysisHelper
 
         // delayAsync 必须透传：本方法只是构造默认请求体的包装，
         // 漏传会让「暂停可打断退避」在走 CallVisionApiAsync 的引擎（自定义 / 通义）上静默失效。
-        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), profile, ct, delayAsync);
+        return CallVisionApiRawAsync(endpoint, apiKey, JsonSerializer.Serialize(body), profile, ct, delayAsync, imagePath);
     }
 
     /// <summary>
@@ -258,7 +262,12 @@ public static class ImageAnalysisHelper
     /// <param name="delayAsync">同 <see cref="CallVisionApiAsync"/> 的同名参数：可选的退避等待替换钩子。</param>
     public static async Task<string> CallVisionApiRawAsync(
         string endpoint, string apiKey, string jsonBody, AiProviderProfile profile, CancellationToken ct,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        // 第十三轮 D1：逐文件级 4xx（413/415）的文案必须自带文件名，否则编排层算出的
+        // 「同因 cause」会跨文件逐字节相同 → 连续 3 个文件即触发第二条熔断闸中止整批，
+        // 而这正是 P47 把 413/415 改成逐文件级时要避免的形态（修了分级却没修 cause 唯一性）。
+        // 可为 null（历史调用点不受影响），非空时 413/415 文案会带上文件名。
+        string? imagePath = null)
     {
         // 以下三处与 CallVisionApiAsync 的「模型名为空」同属配置缺失：
         // 整批级永久错误，不重排队（空配置重试无成功可能），连续 3 个文件命中即中止整批。
@@ -444,9 +453,17 @@ public static class ImageAnalysisHelper
                     // isBatchLevel 必须按状态码显式分级（见 IsBatchLevel4xx）：
                     // 不能依赖 AiPermanentException 的默认 true —— 那会把逐文件的 413/415
                     // 也纳入「连续 3 次熔断中止整批」（P26 三层口径）。
+                    var batchLevel4xx = IsBatchLevel4xx(code, respText);
+                    // 第十三轮 D1：<b>逐文件级</b>的 4xx（目前只有 413/415）文案必须自带文件名。
+                    // 编排层 RunAsync 用「文案里出现文件名才补 @{路径}」来保证 cause 与文件一一对应；
+                    // 文案不含文件名 → cause 跨文件逐字节相同 → 连续 3 个文件即触发第二条熔断闸
+                    // 中止整批，把 P47「413/415 改逐文件级」的修复整体抵消（分级改对了、cause 没改）。
+                    var fileHint = (!batchLevel4xx && !string.IsNullOrEmpty(imagePath))
+                        ? $"（文件：{Path.GetFileName(imagePath)}）"
+                        : "";
                     throw new AiPermanentException(
-                        $"视觉识别接口返回 {code} {resp.StatusCode}（客户端永久错误，重试无意义）：{snippet}{hint}",
-                        isBatchLevel: IsBatchLevel4xx(code, respText));
+                        $"视觉识别接口返回 {code} {resp.StatusCode}（客户端永久错误，重试无意义）：{snippet}{hint}{fileHint}",
+                        isBatchLevel: batchLevel4xx);
                 }
 
                 return respText;

@@ -86,7 +86,7 @@ public sealed class NvidiaImageAnalysisService : IImageAnalysisService
         //   状态码判定上移而删除，注释指向不存在的代码，会误导维护者，故改为上述准确描述。）
         var raw = await ImageAnalysisHelper.CallVisionApiRawAsync(
             Endpoint, _apiKey, JsonSerializer.Serialize(body),
-            AiProviderProfiles.For(AiProvider.Nvidia), ct, _delayAsync).ConfigureAwait(false);
+            AiProviderProfiles.For(AiProvider.Nvidia), ct, _delayAsync, imagePath).ConfigureAwait(false);
 
         // 传入文件名：让「空正文」这条逐文件级永久错误的文案自带文件名，
         // 避免同因计数把它误当成整批级根因熔断整批（P26 三层口径）。

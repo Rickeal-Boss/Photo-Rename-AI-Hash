@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -48,15 +49,15 @@ public sealed class RenameLogService
 
             sb.AppendLine(string.Join(",", new[]
             {
-                Csv(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")),
-                Csv(entry.OriginalName),
-                Csv(entry.NewName),
+                Csv(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                CsvText(entry.OriginalName), // 文件名可由外部控制（下载/共享目录），防公式注入
+                CsvText(entry.NewName),
                 Csv(entry.Operation),
                 Csv(entry.Status),
                 Csv(entry.Md5),
                 Csv(entry.OriginalPath),
                 Csv(entry.NewPath),
-                Csv(entry.Message),
+                CsvText(entry.Message), // 可能含模型返回内容或服务端回显，防公式注入
                 // 必须保持「最后一列」（列位 <see cref="FingerprintColumnIndex"/>）：
                 // LoadRenameLogAsync 在旧表头（无该列）场景下按这个固定列位兜底读取，
                 // 将来若新增列请追加在它之后，不要插到它前面。
@@ -385,6 +386,21 @@ public sealed class RenameLogService
     /// </summary>
     private static string Csv(string s)
         => "\"" + (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
+
+    /// <summary>
+    /// CSV 公式注入防护（第十三轮 SEC-03）：Excel / LibreOffice 打开 CSV 时，单元格以
+    /// <c>= + - @</c> 开头会被当作【公式】求值，<b>引号包裹不能阻止该行为</b>。
+    /// 做法是在这些字符前补一个单引号 <c>'</c>（Excel 会把它当文本显示）。
+    /// </summary>
+    /// <remarks>
+    /// <b>只能用于不被续传判据消费的列</b>：<c>OriginalPath</c> / <c>NewPath</c> 会被
+    /// <see cref="CompletedLog.DoneBySource"/> / <see cref="CompletedLog.DoneByNewPath"/> /
+    /// <see cref="CompletedLog.DoneByNewPathAnyFingerprint"/> 做<b>精确字符串比较</b>，
+    /// 加前缀会让键与磁盘实况不符 → 「阻止文件名被逐轮叠加（不可逆）」的保护失效，
+    /// 比本缺陷严重得多。故本方法只用于 OriginalName / NewName / Message。
+    /// </remarks>
+    private static string CsvText(string s)
+        => Csv((s is { Length: > 0 } && s[0] is '=' or '+' or '-' or '@') ? "'" + s : s);
 }
 
 /// <summary>已完成文件索引：用于启动时断点续传跳过。键忽略大小写。</summary>

@@ -652,10 +652,10 @@ public partial class OrganizeViewModel : ObservableObject
                 sb.AppendLine(string.Join(",", new[]
                 {
                     Csv(e.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-                    Csv(e.OriginalName),
-                    Csv(e.OriginalPath),
+                    CsvText(e.OriginalName), // 文件名可由外部控制，防公式注入
+                    Csv(e.OriginalPath),     // 路径列不加前缀：见 CsvText 说明
                     Csv(e.Status),
-                    Csv(e.Message),
+                    CsvText(e.Message),      // 可能含模型返回内容，防公式注入
                 }));
             }
 
@@ -675,6 +675,14 @@ public partial class OrganizeViewModel : ObservableObject
     /// <summary>CSV 字段转义（与 <c>RenameLogService.Csv</c> 同口径）：引号翻倍、CR/LF 折成空格。</summary>
     private static string Csv(string? s)
         => "\"" + (s ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
+
+    /// <summary>
+    /// CSV 公式注入防护（第十三轮 SEC-03，与 <c>RenameLogService.CsvText</c> 同口径）：
+    /// Excel 打开 CSV 时单元格以 <c>= + - @</c> 开头会被当公式求值，引号包裹挡不住，
+    /// 故在这些字符前补单引号。<b>只用于名称 / 文案列</b>，路径列不加（会被精确比较）。
+    /// </summary>
+    private static string CsvText(string? s)
+        => Csv((s is { Length: > 0 } && s[0] is '=' or '+' or '-' or '@') ? "'" + s : s);
 
     /// <summary>
     /// 往终态横幅追加一条补充说明（横幅此刻通常已经开着，因此必须显式写 <see cref="StatusBarMessage"/>，
@@ -797,8 +805,8 @@ public partial class OrganizeViewModel : ObservableObject
         }
         finally
         {
-            IsBusy = false;
-            _cts = null;
+            // 注意：IsBusy = false 与 _cts = null 已移到本 finally 的【最后】，理由见那里。
+            // （此前它们在块首，会把「批次收尾的 await 窗口」暴露给新批次进入 —— 第十三轮 P1-1。）
             IsPaused = false;
             RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
@@ -830,6 +838,18 @@ public partial class OrganizeViewModel : ObservableObject
             // 固定顺序可避免同一批次的横幅句子先后随路径而变（WriteFailureListAsync 内部自吞异常，不抛）。
             await WriteFailureListAsync();
             ReportDegradedSummary();
+
+            // 第十三轮 P1-1：IsBusy = false / _cts = null 必须在 finally 的【最后】。
+            // 上面 PersistConfigAsync 与 WriteFailureListAsync 都会 await 让出 UI 线程；若在此之前
+            // 就把 IsBusy 置 false，新批次可在这个窗口内进入——「开始整理」按钮未绑 IsEnabled，
+            // 唯一拦截是命令体首行的 if (IsBusy) return;。批次 2 随即同步执行
+            // ResetBatchTracking()（清空 _batchFailures 与四个降级计数）、Results.Clear()、LogText=""；
+            // 批次 1 的续体恢复后：WriteFailureListAsync 因 _batchFailures.Count == 0 整份失败清单
+            // 不落盘，ReportDegradedSummary 读到已复位的计数 → 第一批的降级汇总丢失，
+            // 并经 ShowTerminalStatus 覆盖批次 2 正在显示的终态横幅（P33 家族）。
+            // 不损磁盘数据：服务侧 EndBatch() 已跑完，两批处理循环不会真正并发。
+            IsBusy = false;
+            _cts = null;
         }
     }
 
@@ -913,8 +933,8 @@ public partial class OrganizeViewModel : ObservableObject
         }
         finally
         {
-            IsBusy = false;
-            _cts = null;
+            // 注意：IsBusy = false 与 _cts = null 已移到本 finally 的【最后】，理由见那里。
+            // （此前它们在块首，会把「批次收尾的 await 窗口」暴露给新批次进入 —— 第十三轮 P1-1。）
             IsPaused = false;
             RateText = ""; // 终态（完成/取消/出错）收起观测行：留着会成为无人更新的陈旧数字
             PauseButtonText = "暂停";
@@ -946,6 +966,16 @@ public partial class OrganizeViewModel : ObservableObject
             // 固定顺序可避免同一批次的横幅句子先后随路径而变（WriteFailureListAsync 内部自吞异常，不抛）。
             await WriteFailureListAsync();
             ReportDegradedSummary();
+
+            // 第十三轮 P1-1（与 StartOrganizeAsync 严格同构）：IsBusy = false / _cts = null
+            // 必须落在本 finally 的【最后】。上面 PersistConfigAsync 与 WriteFailureListAsync
+            // 都会 await 让出 UI 线程，若在此之前就置 false，新批次可在这个窗口内进入
+            // （「按日期归档」按钮未绑 IsEnabled，唯一拦截是命令体首行的 if (IsBusy) return;）。
+            // 更严重的是：本处若一个复位点都没有，归档跑完后 IsBusy 永久为 true →
+            // 「开始整理」「按日期归档」双双静默失效、暂停/取消按钮语义反转、_cts 永不置 null，
+            // 全程无报错、只能重启进程恢复（第十三轮 P0）。
+            IsBusy = false;
+            _cts = null;
         }
     }
 
